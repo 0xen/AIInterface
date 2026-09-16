@@ -13,6 +13,7 @@
 //        AII_EFFORT         (default low)
 //        AII_KOKORO_SID     (default 3 = af_heart)
 //        AII_VOICEVOX_STYLE (default 2 = 四国めたん normal)
+//        AII_EARLY_WORDS   (default 12; first chunk of a reply is spoken at a comma or after this many words, 0 = off)
 //        AII_STT_LANG       (default auto)
 //
 // Modes: --say "<text>"    one typed turn through Claude, spoken, then exit
@@ -112,6 +113,7 @@ int main(int argc, char** argv) {
   const int kokoro_sid = std::atoi(env_or("AII_KOKORO_SID", "3").c_str());
   const unsigned vv_style = (unsigned)std::atoi(env_or("AII_VOICEVOX_STYLE", "2").c_str());
   const std::string stt_lang = env_or("AII_STT_LANG", "auto");
+  const int early_words = std::atoi(env_or("AII_EARLY_WORDS", "12").c_str());  // 0 = wait for full sentences
 
   const std::string models = AII_MODELS_DIR;
   const std::string stt_dir = models + "/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11";
@@ -182,7 +184,7 @@ int main(int argc, char** argv) {
     speech.mark_new_reply();
     speech.set_on_first_audio([&] { t_first_audio = clk::now(); });
 
-    aii::SentenceSplitter splitter([&](const std::string& s) { speech.enqueue(s); });
+    aii::SentenceSplitter splitter([&](const std::string& s) { speech.enqueue(s); }, early_words);
     std::printf("\nClaude: ");
     std::fflush(stdout);
     auto t_send = clk::now();
@@ -233,8 +235,15 @@ int main(int argc, char** argv) {
     aii::SentenceSplitter splitter([&](const std::string& s) {
       std::printf("  [sentence:%s] %s\n", aii::has_japanese(s) ? "ja" : "en", s.c_str());
       speech.enqueue(s);
-    });
-    splitter.feed(speak_text);
+    }, early_words);
+    // Feed one UTF-8 code point at a time so the splitter behaves as it does with streamed deltas.
+    for (size_t i = 0; i < speak_text.size();) {
+      size_t n = 1;
+      unsigned char b = (unsigned char)speak_text[i];
+      if (b >= 0xF0) n = 4; else if (b >= 0xE0) n = 3; else if (b >= 0xC0) n = 2;
+      splitter.feed(speak_text.substr(i, n));
+      i += n;
+    }
     splitter.flush();
     speech.wait_idle();
     std::printf("  first audio after %.2f s, finished after %.2f s\n",
