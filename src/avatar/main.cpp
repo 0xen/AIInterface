@@ -93,17 +93,20 @@ namespace {
 // ---- layout (pixels) ----
 constexpr std::uint32_t kWindowW = 360;
 // Starting height, and also the **ceiling** the panel may never exceed.
-// Transparency here comes from a DirectComposition visual whose content is the
-// swapchain, and the engine commits that visual once, at creation. Growing the
-// swapchain afterwards works — it logs the new size — but DWM keeps compositing
-// the visual at the size it was committed at, so everything below the original
-// height is simply never painted: the window shows the desktop there and the
-// bottom row of controls is cut in half. Shrinking is unaffected, which is why
-// this never showed until the message field pushed the chat-open layout past
-// the old 640. Fixing it properly means re-committing in the engine; until
-// then the window is created at its largest and only ever shrinks from here,
-// with enough headroom for the tallest layout (avatar band + open chat + a
-// four-line message field) and some to spare.
+//
+// This used to be a hard limit: the window could shrink but never grow past the
+// size it was created at, so it was created at its largest. That is fixed — the
+// cause was a raw SetWindowPos leaving the *client* rect (the part DWM
+// composites) pinned to the size SDL knew, and the size now goes through
+// `PresentationTarget::setSize` in placeInCorner. A window here can grow.
+//
+// The ceiling is kept anyway, as a plain layout bound rather than a workaround:
+// 780 has enough headroom for the tallest layout (avatar band + open chat + a
+// four-line message field) and some to spare, and creating at the maximum means
+// the window only ever shrinks, which is the direction this loop has always
+// been exercised in. Starting smaller and growing on demand is a behaviour
+// change in the geometry path f713297 fixed, and it buys nothing today; it
+// belongs with M5's resizable inspector, which needs growth for real.
 constexpr std::uint32_t kWindowH = 780;
 constexpr std::uint32_t kAvatarH = 260;   // avatar band at the top
 constexpr float kFontPx = 15.0f;
@@ -138,7 +141,15 @@ int gBottomMargin = kCornerMargin;
 // Places the window in the bottom-right of the primary monitor's work area.
 // The anchor is the bottom edge, so a height change grows or shrinks the
 // window upward and the corner it sits in never moves.
-void placeInCorner(HWND hwnd, int width, int height) {
+// The size goes through the target first and the position through Win32. A
+// raw SetWindowPos alone grows the window rect but not the *client* rect:
+// SDL answers WM_NCCALCSIZE for a borderless, non-resizable window with the
+// size it knows, and DWM composites the client area — which is why the window
+// could shrink but never grow past the size it was created at. `target` may
+// be null only where there is no window to place.
+void placeInCorner(platform::PresentationTarget* target, HWND hwnd, int width, int height) {
+    if (target) target->setSize({static_cast<std::uint32_t>(width),
+                                 static_cast<std::uint32_t>(height)});
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     SetWindowPos(hwnd, HWND_TOPMOST, work.right - width - kCornerMargin,
@@ -146,12 +157,12 @@ void placeInCorner(HWND hwnd, int width, int height) {
 }
 
 // Keeps the window above every other one and off the taskbar, then places it.
-void pinToCorner(HWND hwnd, int width, int height) {
+void pinToCorner(platform::PresentationTarget* target, HWND hwnd, int width, int height) {
     LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW);
     SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                  SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
-    placeInCorner(hwnd, width, height);
+    placeInCorner(target, hwnd, width, height);
 }
 
 // B2/M7.3 spike. WS_EX_TRANSPARENT on its own does *not* make this window
@@ -461,7 +472,7 @@ int main(int /*argc*/, char** /*argv*/) {
         // the window itself says nothing about activation anywhere.
         log::info("corner bottom margin {} ({} dodge)", gBottomMargin,
                   aii::kWatermarkDodgeNames[static_cast<int>(dodge)]);
-        pinToCorner(hwnd, kWindowW, kWindowH);
+        pinToCorner(target.get(), hwnd, kWindowW, kWindowH);
     }
 
     void* nativeSurface = nullptr;
@@ -953,8 +964,9 @@ int main(int /*argc*/, char** /*argv*/) {
             // — the panel jumping to the ceiling with bare desktop under it.
             // Invisible at one resize per chat click, obvious now that "shown
             // when talking" resizes on every turn.
-            if (transparent && hwnd) placeInCorner(hwnd, static_cast<int>(kWindowW),
-                                                   static_cast<int>(height));
+            if (transparent && hwnd)
+                placeInCorner(target.get(), hwnd, static_cast<int>(kWindowW),
+                              static_cast<int>(height));
             renderer->resize(width, height);
         }
 
@@ -1270,9 +1282,8 @@ int main(int /*argc*/, char** /*argv*/) {
             // Follow the panel's own height. Only the borderless window gets
             // resized: the decorated fallback has a frame to account for and
             // exists for debugging, where a fixed size is easier to reason about.
-            // Clamped to the committed composition height: a window taller
-            // than that would claim space DWM never paints, which reads as the
-            // bottom of the panel having been cut off.
+            // Clamped to kWindowH, which is now a layout bound rather than the
+            // hard composition ceiling it used to be (see kWindowH).
             if (r.desired_height > band) panelH = r.desired_height - band;
             if (transparent && hwnd && r.desired_height != 0) {
                 // The panel's own height plus the band the *next* frame will be
@@ -1322,11 +1333,14 @@ int main(int /*argc*/, char** /*argv*/) {
                 sp.h = kSpikeGrownH;
                 RECT r{};
                 GetWindowRect(sp.hwnd, &r);
+                // The size goes through the target, for the reason in
+                // placeInCorner: SDL pins the client rect a raw SetWindowPos
+                // never touches, and DWM composites the client rect.
+                sp.target->setSize({sp.w, sp.h});
                 SetWindowPos(sp.hwnd, HWND_TOPMOST, r.left, r.top, static_cast<int>(sp.w),
                              static_cast<int>(sp.h), SWP_NOACTIVATE);
                 sp.renderer->resize(sp.w, sp.h);
-                log::info("spike: grew past its creation size to {}x{} (commit-once test)", sp.w,
-                          sp.h);
+                log::info("spike: grew past its creation size to {}x{}", sp.w, sp.h);
             }
             if (spikeRoam) {
                 // M7.3: move it with SetWindowPos alone, no swapchain touched.
