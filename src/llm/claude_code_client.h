@@ -24,12 +24,22 @@ class ClaudeCodeClient final : public LlmClient {
     std::string effort = "low";
     bool tools = false;         // false = `--tools ""` (pure chat)
     std::string cwd;            // working directory for the child (empty = inherit)
+    // Tool-enabled instances only: skip the CLI's permission prompts, which
+    // nothing can answer from this app. Leave false for anything that touches
+    // a directory the user has not agreed to hand over.
+    bool bypass_permissions = false;
   };
+
+  // What a tool-enabled instance is doing, as it happens: "read main.cpp",
+  // "bash: cmake --build ...". Called on the reader thread.
+  using ActivityFn = std::function<void(const std::string& what)>;
 
   explicit ClaudeCodeClient(Options opt) : opt_(std::move(opt)) {}
   ~ClaudeCodeClient() override;
 
   bool start(std::string* error);
+  // Set before the first turn; safe to leave unset.
+  void set_on_activity(ActivityFn fn);
   const char* name() const override { return "claude-code"; }
   ChatResult turn(const std::string& user_text, const DeltaFn& on_delta,
                   std::atomic<bool>* cancel = nullptr) override;
@@ -56,6 +66,7 @@ class ClaudeCodeClient final : public LlmClient {
   ChatResult current_;
   DeltaFn on_delta_;
 
+  ActivityFn on_activity_;
   std::string session_id_, model_, last_error_;
   double util_5h_ = -1, util_7d_ = -1;
   long long reset_5h_ = 0, reset_7d_ = 0;

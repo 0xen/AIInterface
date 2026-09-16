@@ -15,6 +15,7 @@
 #include "core/config.h"
 #include "core/engines.h"
 #include "core/speech_queue.h"
+#include "core/worker_pool.h"
 
 namespace aii {
 
@@ -32,6 +33,7 @@ class VoiceSession {
     std::string usage;    // subscription window readout, empty until known
     std::string partial;  // live transcript while listening
     std::vector<Line> lines;
+    std::vector<WorkerPool::Snapshot> workers;
   };
 
   explicit VoiceSession(Config cfg);
@@ -40,7 +42,7 @@ class VoiceSession {
   void update();                       // once per frame, main thread
   void toggle_talk();                  // start listening / stop and send (barge-in while speaking)
   void silence();                      // stop the audio, keep the text coming
-  void pause();                        // cancel the current reply and stop the audio
+  void pause();                        // cancel the reply and pause every worker
   void say(const std::string& text);   // send typed/scripted text as the user turn
   bool quitting_ok() const;            // true once no worker is mid-turn
 
@@ -52,6 +54,9 @@ class VoiceSession {
   void begin_listening();
   void start_turn(std::string text);
   void run_turn(std::string text);
+  void run_commands(const std::string& reply_text);
+  // Speak a line from the app itself (worker reports) and show it.
+  void announce(const std::string& text);
   void set_state(State s);
   void set_status(const std::string& s);
   void log(const std::string& s);
@@ -61,6 +66,7 @@ class VoiceSession {
   std::unique_ptr<AudioOut> speaker_;
   std::unique_ptr<MicIn> mic_;
   std::unique_ptr<SpeechQueue> speech_;
+  std::unique_ptr<WorkerPool> workers_;
 
   std::thread loader_;
   std::thread turn_;

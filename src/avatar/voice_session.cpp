@@ -20,8 +20,10 @@ VoiceSession::VoiceSession(Config cfg) : cfg_(std::move(cfg)) {
 VoiceSession::~VoiceSession() {
   cancel_ = true;
   if (speech_) speech_->clear();
+  if (workers_) workers_->pause_all();
   if (loader_.joinable()) loader_.join();
   if (turn_.joinable()) turn_.join();
+  workers_.reset();  // interrupts and joins every worker
   if (mic_) mic_->close();
   speech_.reset();  // joins its worker before the engines go away
 }
@@ -79,6 +81,10 @@ void VoiceSession::load() {
   }
   speech_ = std::make_unique<SpeechQueue>(eng_.kokoro.get(), eng_.voicevox.get(), speaker_.get());
   speech_->set_on_status([this](const std::string& s) { log("[tts] " + s); });
+  workers_ = std::make_unique<WorkerPool>(cfg_.claude_exe, cfg_.worker_bypass);
+  workers_->set_on_report([this](const std::string&, WorkerPool::State, const std::string& summary) {
+    announce(summary);
+  });
   log("speaker: " + speaker_->device_name());
   log("mic:     " + mic_->device_name());
   set_status("ready. SPACE or Talk to speak.");
@@ -100,6 +106,7 @@ void VoiceSession::update() {
 
   // Reap a finished turn thread.
   if (turn_.joinable() && !turn_running_) turn_.join();
+  if (workers_) workers_->update();
 
   if (s == State::Listening) {
     chunk_.clear();
@@ -199,11 +206,14 @@ void VoiceSession::pause() {
     std::lock_guard<std::mutex> l(mutex_);
     s = state_;
   }
+  const size_t paused_workers = workers_ ? workers_->running() : 0;
+  if (workers_) workers_->pause_all();
   if (s == State::Thinking || s == State::Speaking) {
     cancel_ = true;
     speech_->clear();
     set_state(State::Idle);
-    set_status("paused. ready.");
+    set_status(paused_workers ? "paused (" + std::to_string(paused_workers) + " worker(s)). ready."
+                              : "paused. ready.");
   } else if (s == State::Listening) {
     mic_->stop();
     std::lock_guard<std::mutex> l(mutex_);
@@ -256,16 +266,51 @@ void VoiceSession::run_turn(std::string text) {
   }, &cancel_);
   if (cancel_) return;  // the caller already moved the state on
   splitter.flush();
-  std::string usage = eng_.llm->status_line();
-  std::lock_guard<std::mutex> l(mutex_);
-  if (!usage.empty()) usage_ = usage;
-  if (!r.ok) {
-    status_ = "error: " + r.error;
-    state_ = State::Idle;
-    return;
+  const std::string usage = eng_.llm->status_line();
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    if (!usage.empty()) usage_ = usage;
+    // The command block is machine traffic: the worker strip shows what it did,
+    // so keep it out of the transcript.
+    if (!lines_.empty() && !lines_.back().user) lines_.back().text = strip_aii_blocks(lines_.back().text);
+    if (!r.ok) {
+      status_ = "error: " + r.error;
+      state_ = State::Idle;
+      return;
+    }
+    state_ = State::Speaking;  // update() returns to Idle once the audio drains
+    status_ = "speaking...";
   }
-  state_ = State::Speaking;  // update() returns to Idle once the audio drains
-  status_ = "speaking...";
+  // Worker commands ride in a fenced block, which is shown but never spoken.
+  run_commands(r.text);
+}
+
+void VoiceSession::announce(const std::string& text) {
+  if (text.empty()) return;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    lines_.push_back({false, text});
+    if (lines_.size() > kMaxLines) lines_.erase(lines_.begin(), lines_.begin() + (lines_.size() - kMaxLines));
+  }
+  if (speech_) speech_->enqueue(text);
+}
+
+void VoiceSession::run_commands(const std::string& reply_text) {
+  if (!workers_) return;
+  for (const Command& c : parse_commands(reply_text)) {
+    std::string err;
+    if (c.verb == "spawn") {
+      if (workers_->spawn(c.name, c.cwd, c.task, &err)) {
+        log("[worker] spawned " + c.name + " in " + (c.cwd.empty()? std::string("(app dir)") : c.cwd));
+      } else {
+        announce("Could not start worker " + c.name + ". " + err);
+      }
+    } else if (c.verb == "pause") {
+      if (!workers_->pause(c.name)) announce("No running worker called " + c.name + ".");
+    } else if (c.verb == "stop") {
+      if (!workers_->stop(c.name)) announce("No worker called " + c.name + ".");
+    }
+  }
 }
 
 VoiceSession::Snapshot VoiceSession::snapshot() const {
@@ -276,6 +321,7 @@ VoiceSession::Snapshot VoiceSession::snapshot() const {
   s.usage = usage_;
   s.partial = partial_;
   s.lines = lines_;
+  if (workers_) s.workers = workers_->snapshot();
   return s;
 }
 

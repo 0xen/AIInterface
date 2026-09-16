@@ -1,0 +1,101 @@
+#pragma once
+// Multiple Claude instances working in the background. Each worker is its own
+// Claude Code child process with tools enabled and its own working directory;
+// the voice interface spawns them, watches what they are doing and reports
+// back. The conversational instance in VoiceSession is separate and never has
+// tools.
+#include <atomic>
+#include <deque>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "llm/claude_code_client.h"
+
+namespace aii {
+
+class WorkerPool {
+ public:
+  enum class State { Starting, Working, Done, Paused, Failed };
+
+  struct Snapshot {
+    std::string name;
+    std::string task;
+    std::string cwd;
+    State state = State::Starting;
+    std::string activity;               // what it is doing right now
+    std::string result;                 // final text once it is Done
+    std::vector<std::string> recent;    // last few activity lines, oldest first
+    int tool_calls = 0;
+  };
+
+  // Called from a worker thread when an instance finishes (Done or Failed).
+  // `summary` is one short spoken sentence.
+  using ReportFn = std::function<void(const std::string& name, State state, const std::string& summary)>;
+
+  WorkerPool(std::string claude_exe, bool bypass_permissions);
+  ~WorkerPool();
+  WorkerPool(const WorkerPool&) = delete;
+  WorkerPool& operator=(const WorkerPool&) = delete;
+
+  void set_on_report(ReportFn fn) { report_ = std::move(fn); }
+
+  // Starts an instance on `task` in `cwd` (empty = this process's directory).
+  // Returns false and fills `error` when the process cannot start or the name
+  // is already taken by a running worker.
+  bool spawn(const std::string& name, const std::string& cwd, const std::string& task,
+             std::string* error);
+  // Interrupts the worker's current turn; it stays in the list as Paused.
+  bool pause(const std::string& name);
+  // Interrupts every running worker.
+  void pause_all();
+  // Removes a finished (or paused) worker and its process.
+  bool stop(const std::string& name);
+
+  std::vector<Snapshot> snapshot() const;
+  size_t running() const;
+  // Reaps worker threads that have finished; call from the frame loop.
+  void update();
+
+ private:
+  struct Worker {
+    std::string name, task, cwd;
+    std::unique_ptr<ClaudeCodeClient> client;
+    std::thread thread;
+    std::atomic<bool> cancel{false};
+    std::atomic<bool> finished{false};
+    State state = State::Starting;
+    std::string activity, result;
+    std::deque<std::string> recent;
+    int tool_calls = 0;
+  };
+
+  void run(Worker* w);
+
+  std::string exe_;
+  bool bypass_ = true;
+  ReportFn report_;
+  mutable std::mutex mutex_;
+  std::vector<std::unique_ptr<Worker>> workers_;
+};
+
+const char* worker_state_name(WorkerPool::State s);
+
+// One command parsed out of a fenced ```aii block in a reply.
+struct Command {
+  std::string verb;  // spawn | pause | stop
+  std::string name;
+  std::string cwd;
+  std::string task;
+};
+
+// Finds ```aii fenced blocks in `text` and parses their command lines.
+std::vector<Command> parse_commands(const std::string& text);
+
+// The same text with every ```aii block removed, for display.
+std::string strip_aii_blocks(const std::string& text);
+
+}  // namespace aii

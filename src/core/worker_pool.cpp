@@ -1,0 +1,276 @@
+#include "core/worker_pool.h"
+
+#include <algorithm>
+
+#include "core/config.h"
+#include "core/text_util.h"
+
+namespace aii {
+namespace {
+
+constexpr size_t kRecent = 6;
+
+// A worker's system prompt: it does real work with tools, and its final
+// message is read aloud, so it must end with a one-sentence summary.
+const char* kWorkerPrompt =
+    "You are a background worker instance driven by a voice assistant. Do the task you are given "
+    "using your tools. You cannot ask questions: no one will answer, so make reasonable choices and "
+    "state them. Your final message is read aloud, so end with ONE short plain sentence saying what "
+    "you did and whether it worked. No markdown, no lists, no code in the final message.";
+
+std::string first_sentence(const std::string& text, size_t limit = 220) {
+  std::string t = trim(text);
+  if (t.empty()) return t;
+  // Prefer the last paragraph: the worker prompt asks for a closing summary.
+  const size_t para = t.rfind("\n\n");
+  if (para != std::string::npos && t.size() - para > 12) t = trim(t.substr(para + 2));
+  if (t.size() > limit) {
+    const size_t cut = t.rfind(' ', limit);
+    t = t.substr(0, cut == std::string::npos ? limit : cut) + "...";
+  }
+  return t;
+}
+
+}  // namespace
+
+const char* worker_state_name(WorkerPool::State s) {
+  switch (s) {
+    case WorkerPool::State::Starting: return "starting";
+    case WorkerPool::State::Working: return "working";
+    case WorkerPool::State::Done: return "done";
+    case WorkerPool::State::Paused: return "paused";
+    case WorkerPool::State::Failed: return "failed";
+  }
+  return "?";
+}
+
+WorkerPool::WorkerPool(std::string claude_exe, bool bypass_permissions)
+    : exe_(std::move(claude_exe)), bypass_(bypass_permissions) {}
+
+WorkerPool::~WorkerPool() {
+  pause_all();
+  std::vector<std::unique_ptr<Worker>> taken;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    taken.swap(workers_);
+  }
+  for (auto& w : taken) {
+    if (w->thread.joinable()) w->thread.join();
+  }
+}
+
+bool WorkerPool::spawn(const std::string& name, const std::string& cwd, const std::string& task,
+                       std::string* error) {
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    for (const auto& w : workers_) {
+      if (w->name == name && w->state != State::Done && w->state != State::Failed) {
+        if (error) *error = "a worker named " + name + " is already running";
+        return false;
+      }
+    }
+  }
+  auto w = std::make_unique<Worker>();
+  w->name = name;
+  w->task = task;
+  w->cwd = cwd;
+
+  ClaudeCodeClient::Options o;
+  o.exe = exe_;
+  o.system_prompt = kWorkerPrompt;
+  o.effort = "medium";
+  o.tools = true;
+  o.cwd = cwd;
+  o.bypass_permissions = bypass_;  // nothing here can answer a permission prompt
+  w->client = std::make_unique<ClaudeCodeClient>(o);
+  if (!w->client->start(error)) return false;
+
+  Worker* raw = w.get();
+  raw->client->set_on_activity([this, raw](const std::string& what) {
+    std::lock_guard<std::mutex> l(mutex_);
+    raw->activity = what;
+    ++raw->tool_calls;
+    raw->recent.push_back(what);
+    if (raw->recent.size() > kRecent) raw->recent.pop_front();
+  });
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    workers_.push_back(std::move(w));
+  }
+  raw->thread = std::thread([this, raw] { run(raw); });
+  return true;
+}
+
+void WorkerPool::run(Worker* w) {
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    w->state = State::Working;
+    w->activity = "thinking";
+  }
+  ChatResult r = w->client->turn(w->task, nullptr, &w->cancel);
+  State state;
+  std::string summary;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    if (w->cancel) {
+      w->state = State::Paused;
+      w->activity = "paused";
+      summary = w->name + " paused.";
+    } else if (!r.ok) {
+      w->state = State::Failed;
+      w->activity = "failed";
+      w->result = r.error;
+      summary = w->name + " failed: " + first_sentence(r.error, 120);
+    } else {
+      w->state = State::Done;
+      w->activity = "done";
+      w->result = trim(r.text);
+      summary = w->name + " finished. " + first_sentence(r.text);
+    }
+    state = w->state;
+  }
+  w->finished = true;
+  if (report_) report_(w->name, state, summary);
+}
+
+bool WorkerPool::pause(const std::string& name) {
+  std::lock_guard<std::mutex> l(mutex_);
+  for (auto& w : workers_) {
+    if (w->name == name && (w->state == State::Working || w->state == State::Starting)) {
+      w->cancel = true;
+      w->activity = "pausing...";
+      return true;
+    }
+  }
+  return false;
+}
+
+void WorkerPool::pause_all() {
+  std::lock_guard<std::mutex> l(mutex_);
+  for (auto& w : workers_) {
+    if (w->state == State::Working || w->state == State::Starting) {
+      w->cancel = true;
+      w->activity = "pausing...";
+    }
+  }
+}
+
+bool WorkerPool::stop(const std::string& name) {
+  std::unique_ptr<Worker> taken;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    auto it = std::find_if(workers_.begin(), workers_.end(),
+                           [&](const std::unique_ptr<Worker>& w) { return w->name == name; });
+    if (it == workers_.end()) return false;
+    (*it)->cancel = true;
+    taken = std::move(*it);
+    workers_.erase(it);
+  }
+  if (taken->thread.joinable()) taken->thread.join();
+  return true;
+}
+
+void WorkerPool::update() {
+  std::lock_guard<std::mutex> l(mutex_);
+  for (auto& w : workers_) {
+    if (w->finished && w->thread.joinable()) w->thread.join();
+  }
+}
+
+std::vector<WorkerPool::Snapshot> WorkerPool::snapshot() const {
+  std::lock_guard<std::mutex> l(mutex_);
+  std::vector<Snapshot> out;
+  out.reserve(workers_.size());
+  for (const auto& w : workers_) {
+    Snapshot s;
+    s.name = w->name;
+    s.task = w->task;
+    s.cwd = w->cwd;
+    s.state = w->state;
+    s.activity = w->activity;
+    s.result = w->result;
+    s.tool_calls = w->tool_calls;
+    s.recent.assign(w->recent.begin(), w->recent.end());
+    out.push_back(std::move(s));
+  }
+  return out;
+}
+
+size_t WorkerPool::running() const {
+  std::lock_guard<std::mutex> l(mutex_);
+  size_t n = 0;
+  for (const auto& w : workers_) {
+    if (w->state == State::Working || w->state == State::Starting) ++n;
+  }
+  return n;
+}
+
+// ---------------------------------------------------------------- commands
+
+std::vector<Command> parse_commands(const std::string& text) {
+  std::vector<Command> out;
+  size_t pos = 0;
+  for (;;) {
+    const size_t open = text.find("```aii", pos);
+    if (open == std::string::npos) break;
+    size_t body = text.find('\n', open);
+    if (body == std::string::npos) break;
+    ++body;
+    const size_t close = text.find("```", body);
+    const std::string block = text.substr(body, close == std::string::npos ? std::string::npos : close - body);
+    pos = close == std::string::npos ? text.size() : close + 3;
+
+    size_t line_start = 0;
+    while (line_start < block.size()) {
+      size_t nl = block.find('\n', line_start);
+      if (nl == std::string::npos) nl = block.size();
+      const std::string line = trim(block.substr(line_start, nl - line_start));
+      line_start = nl + 1;
+      if (line.empty()) continue;
+
+      Command c;
+      const size_t sp = line.find(' ');
+      c.verb = sp == std::string::npos ? line : line.substr(0, sp);
+      std::string rest = sp == std::string::npos ? "" : trim(line.substr(sp + 1));
+      // key=value pairs; `task=` runs to the end of the line.
+      while (!rest.empty()) {
+        const size_t eq = rest.find('=');
+        if (eq == std::string::npos) break;
+        const std::string key = trim(rest.substr(0, eq));
+        std::string value;
+        if (key == "task") {
+          value = trim(rest.substr(eq + 1));
+          rest.clear();
+        } else {
+          const size_t end = rest.find(' ', eq + 1);
+          value = rest.substr(eq + 1, end == std::string::npos ? std::string::npos : end - eq - 1);
+          rest = end == std::string::npos ? "" : trim(rest.substr(end + 1));
+        }
+        if (key == "name") c.name = value;
+        else if (key == "cwd") c.cwd = value;
+        else if (key == "task") c.task = value;
+      }
+      if (!c.verb.empty() && !c.name.empty()) out.push_back(std::move(c));
+    }
+  }
+  return out;
+}
+
+std::string strip_aii_blocks(const std::string& text) {
+  std::string out;
+  size_t pos = 0;
+  for (;;) {
+    const size_t open = text.find("```aii", pos);
+    if (open == std::string::npos) {
+      out += text.substr(pos);
+      break;
+    }
+    out += text.substr(pos, open - pos);
+    const size_t close = text.find("```", open + 6);
+    if (close == std::string::npos) break;  // unterminated: drop the rest
+    pos = close + 3;
+  }
+  return trim(out);
+}
+
+}  // namespace aii

@@ -46,6 +46,29 @@ seconds, `--no-voice` shows the window without loading any engine, `--opaque` gi
 window. Engines load on a background thread, so the window appears at once and the status
 line reports progress.
 
+### Background workers
+
+Ask for work to be done ("start a worker called build in C:\myrepo that runs the tests") and the
+assistant spawns a separate Claude Code instance with file and command tools in that directory.
+Each worker appears as a line in the panel with its state and what it is doing; when one finishes,
+its one-sentence summary is spoken. Say "pause the build worker" to interrupt one; the Pause button
+interrupts the reply in flight and every running worker.
+
+The assistant drives this by ending a reply with a fenced block that is displayed but never spoken
+and is removed from the transcript once it has run:
+
+```
+spawn name=build cwd=C:\myrepo task=Run the test suite and report what failed.
+pause name=build
+stop name=build
+```
+
+Workers run with `--permission-mode bypassPermissions`, because nothing in this app can answer a
+permission prompt and a worker that asked would hang forever. That means a worker can read, write
+and run commands in the directory it is given without asking. Give the assistant directories you
+are willing to hand over. Set `AII_WORKER_BYPASS=0` to make workers ask instead, accepting that
+they will stall when they do.
+
 The window uses the engine's D3D12 backend: on the AMD driver here only a DirectComposition
 swapchain gives per-pixel alpha (the engine's Vulkan path composites opaque). The text panel
 is drawn with GDI into a bitmap each time something changes and blitted by a shader, which is
@@ -166,6 +189,7 @@ build\Release\voiceloop.exe --speak "Text to speak. 日本語も。"    # synthe
 | `AII_KOKORO_SID` | `3` | English voice (3 = af_heart, 2 = af_bella) |
 | `AII_VOICEVOX_STYLE` | `2` | Japanese voice style (2 = 四国めたん ノーマル; 3 = ずんだもん, 8 = 春日部つむぎ, 10 = 雨晴はう) |
 | `AII_EARLY_WORDS` | `12` | the first chunk of a reply is spoken at a comma or after this many words; `0` waits for full sentences |
+| `AII_WORKER_BYPASS` | `1` | background workers skip permission prompts; `0` makes them ask, which stalls them |
 
 ## How a turn flows
 

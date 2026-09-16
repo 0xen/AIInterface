@@ -81,6 +81,7 @@ bool ClaudeCodeClient::start(std::string* error) {
   if (!opt_.effort.empty()) cmd += " --effort " + opt_.effort;
   if (!opt_.model.empty()) cmd += " --model " + quote_arg(opt_.model);
   if (!opt_.tools) cmd += " --tools \"\"";
+  if (opt_.tools && opt_.bypass_permissions) cmd += " --permission-mode bypassPermissions";
   if (!opt_.system_prompt.empty()) cmd += " --system-prompt " + quote_arg(opt_.system_prompt);
   std::wstring wcmd = widen(cmd);
 
@@ -186,6 +187,12 @@ void ClaudeCodeClient::handle_line(const std::string& line) {
           if (on_delta_) on_delta_(t);
         }
       }
+    } else if (et == "content_block_start") {
+      // A tool call starting: report what the instance is about to do.
+      const auto& b = ev.contains("content_block") ? ev["content_block"] : json::object();
+      if (b.value("type", "") == "tool_use" && on_activity_) {
+        on_activity_(b.value("name", "tool"));
+      }
     } else if (et == "message_start") {
       if (ev.contains("message") && ev["message"].contains("usage")) {
         const auto& u = ev["message"]["usage"];
@@ -223,6 +230,11 @@ void ClaudeCodeClient::handle_line(const std::string& line) {
     turn_done_ = true;
     cv_.notify_all();
   }
+}
+
+void ClaudeCodeClient::set_on_activity(ActivityFn fn) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  on_activity_ = std::move(fn);
 }
 
 ChatResult ClaudeCodeClient::turn(const std::string& user_text, const DeltaFn& on_delta,

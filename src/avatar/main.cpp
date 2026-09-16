@@ -168,6 +168,31 @@ void drawPanel(aii::GdiCanvas& canvas, const aii::VoiceSession::Snapshot& snap,
                 DT_END_ELLIPSIS | DT_SINGLELINE);
     y += 24;
 
+    // Worker strip: one line per background instance, with what it is doing.
+    if (!snap.workers.empty()) {
+        const Color barBg{34, 38, 48};
+        const int rows = static_cast<int>(snap.workers.size());
+        const int stripH = rows * 17 + 8;
+        canvas.fill_rect(kPad, y, w - 2 * kPad, stripH, barBg);
+        int wy = y + 4;
+        for (const auto& k : snap.workers) {
+            Color tone = dim;
+            switch (k.state) {
+                case aii::WorkerPool::State::Working: tone = Color{140, 225, 170}; break;
+                case aii::WorkerPool::State::Done: tone = Color{150, 205, 255}; break;
+                case aii::WorkerPool::State::Failed: tone = accent; break;
+                default: break;
+            }
+            const std::string line =
+                k.name + " [" + aii::worker_state_name(k.state) + "] " + k.activity +
+                (k.tool_calls ? "  x" + std::to_string(k.tool_calls) : std::string());
+            canvas.text(kPad + 6, wy, w - 2 * kPad - 12, 16, line, 12, tone, false,
+                        DT_END_ELLIPSIS | DT_SINGLELINE);
+            wy += 17;
+        }
+        y += stripH + 6;
+    }
+
     // Transcript: newest at the bottom, filling upward.
     const int transcriptTop = y;
     const int transcriptBottom = buttons[0].y - kPad;
@@ -486,6 +511,10 @@ int main(int /*argc*/, char** /*argv*/) {
         std::string panelKey = aii::VoiceSession::state_name(snap.state);
         panelKey += '|' + snap.status + '|' + snap.usage + '|' + snap.partial;
         for (const auto& l : snap.lines) panelKey += (l.user ? "\nU:" : "\nC:") + l.text;
+        for (const auto& k : snap.workers) {
+            panelKey += "\nW:" + k.name + aii::worker_state_name(k.state) + k.activity +
+                        std::to_string(k.tool_calls);
+        }
         if (panelKey != lastPanelKey) {
             lastPanelKey = std::move(panelKey);
             drawPanel(canvas, snap, buttons, session != nullptr);
