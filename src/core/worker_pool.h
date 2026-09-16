@@ -85,14 +85,36 @@ class WorkerPool {
 const char* worker_state_name(WorkerPool::State s);
 
 // One command parsed out of a fenced ```aii block in a reply.
+//
+// The block is this app's only agent→app command channel, and stays that way:
+// M1c.2's toolbar buttons are a verb here rather than a second mechanism, and
+// M2.5's bus is specced to reuse the same registry behind it.
 struct Command {
-  std::string verb;  // spawn | pause | stop
+  std::string verb;  // spawn | pause | stop  (worker verbs, for the session)
   std::string name;
   std::string cwd;
   std::string task;
+  // The `button` verb's fields (M1c.2). Kept in the same struct rather than a
+  // variant because the block is line-oriented key=value either way and one
+  // parser is what makes a new verb a few lines instead of a format.
+  std::string id;
+  std::string label;
+  std::string tip;
+  std::string path;
 };
 
 // Finds ```aii fenced blocks in `text` and parses their command lines.
+//
+// Values are unquoted single tokens, or `"quoted like this"` when they contain
+// spaces; `task=` and `path=` run to the end of the line when unquoted, since
+// both are routinely the last thing on it and both routinely contain spaces.
+//
+// **App-owned verbs are applied here and are not returned.** `button` has no
+// worker to dispatch to — it registers with ButtonRegistry — and this is the
+// one point every ```aii``` block in the process already flows through, exactly
+// once per completed reply, which is precisely the cardinality registration
+// wants. The caller keeps dispatching the worker verbs it owns and is not
+// widened every time the app gains one of its own.
 std::vector<Command> parse_commands(const std::string& text);
 
 // The same text with every ```aii block removed, for display.

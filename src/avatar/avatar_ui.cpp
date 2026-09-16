@@ -1,10 +1,12 @@
 #include "avatar_ui.h"
 
+#include "core/button_registry.h"
 #include "imgui.h"
 #include "imgui_layer.h"
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -14,6 +16,10 @@ namespace aii {
 namespace {
 
 constexpr float kChatHeight = 260.0f;  // the scrollback area when open
+// How long the reason something did nothing stays on the reserved row under
+// the message field. Shared by the send refusals and by a toolbar button whose
+// folder has gone away since it was registered.
+constexpr float kRefusalSeconds = 2.5f;
 
 // Palette, written as ordinary sRGB literals; ui_color() converts.
 ImVec4 dim() { return ui_color(0.59f, 0.61f, 0.67f); }
@@ -133,6 +139,118 @@ void visibility_button(AvatarUiState& state, float size) {
     ImGui::SetTooltip("Avatar: %s", visibility_name(state.avatar_mode));
 }
 
+// ------------------------------------------------------------ the button bar
+//
+// M1c.1: a row of small buttons at the top of the panel, above the status
+// line. Every entry comes from ButtonRegistry — the settings cog and the
+// working-directory folder are simply its first two — so adding a button, from
+// here or from an ```aii``` block or later from the bus, never means editing
+// this layout.
+//
+// The two glyphs are drawn by hand over an InvisibleButton, the same pattern
+// and the same frame-height size as the avatar-mode disc and the chat arrow on
+// the row below. There is no icon font in this build and merging one is M4's
+// job; until then a cog and a folder are a handful of lines each and keep the
+// bar in the same vector register as the rest of the widget.
+
+void draw_cog(ImDrawList* dl, ImVec2 c, float r, ImU32 col) {
+  dl->AddCircle(c, r * 0.58f, col, 16, 1.5f);
+  dl->AddCircleFilled(c, r * 0.17f, col, 10);
+  for (int i = 0; i < 6; ++i) {
+    const float a = 3.14159265f * 2.0f * static_cast<float>(i) / 6.0f;
+    dl->AddLine(ImVec2(c.x + std::cos(a) * r * 0.52f, c.y + std::sin(a) * r * 0.52f),
+                ImVec2(c.x + std::cos(a) * r, c.y + std::sin(a) * r), col, 1.7f);
+  }
+}
+
+void draw_folder(ImDrawList* dl, ImVec2 c, float r, ImU32 col) {
+  const float w = r * 0.98f, h = r * 0.74f;
+  // The tab first, then the body over it, so the two read as one shape.
+  dl->AddRectFilled(ImVec2(c.x - w, c.y - h), ImVec2(c.x - w * 0.18f, c.y - h * 0.45f), col, 1.5f);
+  dl->AddRectFilled(ImVec2(c.x - w, c.y - h * 0.62f), ImVec2(c.x + w, c.y + h), col, 2.0f);
+}
+
+// One bar button. Returns true on a click. Glyph buttons are square and match
+// the controls on the status row; a label button is as wide as its (already
+// capped) text. `avail` is what is left of the row: a button that would not fit
+// is not drawn at all, which is the second guard on the layout contract — the
+// registry's caps are sized for this font, and this holds even if it is not.
+bool bar_button(const ToolbarButton& b, float size, float& avail, bool& first) {
+  const ImGuiStyle& style = ImGui::GetStyle();
+  const float w = b.glyph == ButtonGlyph::Label
+                      ? ImGui::CalcTextSize(b.label.c_str()).x + 2.0f * style.FramePadding.x
+                      : size;
+  const float gap = first ? 0.0f : style.ItemSpacing.x;
+  if (w + gap > avail) return false;
+  avail -= w + gap;
+  if (!first) ImGui::SameLine(0.0f, style.ItemSpacing.x);
+  first = false;
+
+  bool clicked = false;
+  if (b.glyph == ButtonGlyph::Label) {
+    clicked = ImGui::Button(b.label.c_str(), ImVec2(w, size));
+  } else {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    clicked = ImGui::InvisibleButton(("##bar_" + b.id).c_str(), ImVec2(size, size));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImGuiCol bg = ImGui::IsItemActive()    ? ImGuiCol_ButtonActive
+                        : ImGui::IsItemHovered() ? ImGuiCol_ButtonHovered
+                                                 : ImGuiCol_Button;
+    dl->AddRectFilled(p, ImVec2(p.x + size, p.y + size), ImGui::GetColorU32(bg),
+                      style.FrameRounding);
+    const ImVec2 c(p.x + size * 0.5f, p.y + size * 0.5f);
+    const ImU32 col = ImGui::GetColorU32(fg());
+    if (b.glyph == ButtonGlyph::Cog)
+      draw_cog(dl, c, size * 0.30f, col);
+    else
+      draw_folder(dl, c, size * 0.30f, col);
+  }
+  if (ImGui::IsItemHovered() && !b.tooltip.empty()) ImGui::SetTooltip("%s", b.tooltip.c_str());
+  return clicked;
+}
+
+// Draws the whole bar and acts on whatever was clicked. Live while loading,
+// like the avatar-mode button beside it: none of these route into an engine,
+// and the row has to occupy its height from the first frame or the window
+// would change size the moment loading ended.
+void button_bar(AvatarUiState& state, float width) {
+  const ImGuiStyle& style = ImGui::GetStyle();
+  const float size = ImGui::GetFrameHeight();
+  float avail = width - 2.0f * style.WindowPadding.x;
+  bool first = true;
+  bool open_settings = false;
+
+  for (const ToolbarButton& b : ButtonRegistry::instance().snapshot()) {
+    if (!bar_button(b, size, avail, first)) continue;
+    switch (b.action.kind) {
+      case ButtonActionKind::OpenSettings:
+        open_settings = true;
+        break;
+      case ButtonActionKind::OpenPath:
+        // A failure here is the user's answer to their own click, so it goes
+        // on the same reserved row that says why an Enter did nothing rather
+        // than into a log they are not reading. The path was checked when the
+        // button was registered, so this is the rare case of it having gone
+        // away since.
+        if (std::string err; !open_directory(b.action.path, &err)) {
+          state.refusal = err;
+          state.refusal_left = kRefusalSeconds;
+        }
+        break;
+    }
+  }
+  // A placeholder until M1c.3 builds the real surface. It is a popup rather
+  // than a panel row on purpose: the settings surface is specced to grow into
+  // voices, paths and themes, and none of that belongs in a 360 px column.
+  if (open_settings) ImGui::OpenPopup("##settings");
+  if (ImGui::BeginPopup("##settings")) {
+    ImGui::TextColored(dim(), "Settings");
+    ImGui::Separator();
+    ImGui::TextColored(dim(), "Avatar and theme pickers land in M1c.3.");
+    ImGui::EndPopup();
+  }
+}
+
 void separator() {
   ImGui::SameLine(0.0f, 6.0f);
   ImGui::TextColored(dim(), "|");
@@ -218,8 +336,6 @@ void chat(const VoiceSession::Snapshot& snap) {
   ImGui::PopStyleColor();
 }
 
-// How long the reason an Enter did nothing stays under the field.
-constexpr float kRefusalSeconds = 2.5f;
 constexpr int kMessageLinesMax = 4;
 
 bool blank(const char* s) {
@@ -473,6 +589,12 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
                    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
                    ImGuiWindowFlags_AlwaysAutoResize);
+
+  // M1c.1: the toolbar, above everything else in the panel. The milestone
+  // calls for it "above the status line", and the status row (usage, the
+  // avatar-mode button, the chat arrow) is the first thing the panel draws, so
+  // above it is the top of the panel.
+  button_bar(state, w);
 
   status_bar(state, snap.usage_stats, loading, w);
 

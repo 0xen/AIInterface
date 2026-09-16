@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "core/button_registry.h"
 #include "core/config.h"
 #include "core/text_util.h"
 
@@ -232,13 +233,22 @@ std::vector<Command> parse_commands(const std::string& text) {
       const size_t sp = line.find(' ');
       c.verb = sp == std::string::npos ? line : line.substr(0, sp);
       std::string rest = sp == std::string::npos ? "" : trim(line.substr(sp + 1));
-      // key=value pairs; `task=` runs to the end of the line.
+      // key=value pairs. A value may be "quoted" when it contains spaces —
+      // needed once `button` arrived, whose label and tooltip are prose and
+      // whose path may sit under Program Files. Unquoted, `task=` and `path=`
+      // still run to the end of the line: both are usually last, both usually
+      // contain spaces, and requiring quotes there would break every reply the
+      // assistant has been taught to write.
       while (!rest.empty()) {
         const size_t eq = rest.find('=');
         if (eq == std::string::npos) break;
         const std::string key = trim(rest.substr(0, eq));
         std::string value;
-        if (key == "task") {
+        if (eq + 1 < rest.size() && rest[eq + 1] == '"') {
+          const size_t quote = rest.find('"', eq + 2);
+          value = rest.substr(eq + 2, quote == std::string::npos ? std::string::npos : quote - eq - 2);
+          rest = quote == std::string::npos ? "" : trim(rest.substr(quote + 1));
+        } else if (key == "task" || key == "path") {
           value = trim(rest.substr(eq + 1));
           rest.clear();
         } else {
@@ -249,8 +259,22 @@ std::vector<Command> parse_commands(const std::string& text) {
         if (key == "name") c.name = value;
         else if (key == "cwd") c.cwd = value;
         else if (key == "task") c.task = value;
+        else if (key == "id") c.id = value;
+        else if (key == "label") c.label = value;
+        else if (key == "tip") c.tip = value;
+        else if (key == "path") c.path = value;
       }
-      if (!c.verb.empty() && !c.name.empty()) out.push_back(std::move(c));
+      if (c.verb.empty()) continue;
+      // App-owned verbs are applied here and dropped: see the header. A
+      // refusal is not spoken and does not reach the transcript — the button
+      // is the agent's own housekeeping, and reading "I could not add that
+      // button" aloud would spend a spoken sentence on something the user
+      // never asked for. It is recorded for the log instead.
+      if (c.verb == "button") {
+        ButtonRegistry::instance().add_path_button(c.id, c.label, c.tip, c.path, nullptr);
+        continue;
+      }
+      if (!c.name.empty()) out.push_back(std::move(c));
     }
   }
   return out;

@@ -56,6 +56,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -64,7 +66,9 @@
 #include "avatar_def.h"
 #include "avatar_renderer.h"
 #include "avatar_ui.h"
+#include "core/button_registry.h"
 #include "core/config.h"
+#include "core/worker_pool.h"
 #include "imgui_layer.h"
 #include "loader_anim.h"
 #include "settings.h"
@@ -151,6 +155,7 @@ int main(int /*argc*/, char** /*argv*/) {
     std::string avatarName = "default";
     std::string clipName;
     std::vector<std::string> spriteNames;
+    std::string buttonsFile;
     {
         // Wide command line so Japanese survives (argv is ANSI-mangled).
         int wargc = 0;
@@ -166,11 +171,25 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (a == L"--clip" && i + 1 < wargc) clipName = utf8FromWide(wargv[++i]);
             else if (a == L"--sprite" && i + 1 < wargc)
                 spriteNames.push_back(utf8FromWide(wargv[++i]));
+            else if (a == L"--buttons" && i + 1 < wargc) buttonsFile = utf8FromWide(wargv[++i]);
         }
         if (wargv) LocalFree(wargv);
     }
     const bool transparent = !opaque;
     const gpu::Api api = vulkan ? gpu::Api::Vulkan : gpu::Api::D3D12;
+
+    // --buttons applies a file of `aii` command lines at startup, exactly as if
+    // the assistant had ended a reply with them. The toolbar registry's
+    // validation and caps (M1c.2) are the paths that most need exercising and
+    // the ones a live turn can least be made to produce on demand, so they get
+    // the same kind of escape hatch AII_SETTINGS_FILE and AII_AVATAR_DIR give
+    // the settings and avatar loaders. It is also the shape M2.5's bus will
+    // use: one block of text, the same single entry point, no second channel.
+    if (!buttonsFile.empty()) {
+        std::ifstream f(buttonsFile, std::ios::binary);
+        const std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        aii::parse_commands("```aii\n" + body + "\n```");
+    }
 
     // The voice loop loads its engines in the background while the window comes up.
     std::unique_ptr<aii::VoiceSession> session;
@@ -566,6 +585,11 @@ int main(int /*argc*/, char** /*argv*/) {
         // is reported once, the same way a failed avatar reload is.
         settings.tick(dt);
         if (settings.take_status_change()) log::warn("{}", settings.status());
+        // A toolbar button the agent asked for and did not get. Refusals happen
+        // on the turn thread and are deliberately never spoken (config.cpp), so
+        // this line is the only record that one was turned away.
+        for (const std::string& note : aii::ButtonRegistry::instance().take_status())
+            log::warn("[button] {}", note);
 
         // Clip playback and the hot-reload poll, then the policy, then the
         // composition — in that order, and after the session tick and the
