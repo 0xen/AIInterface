@@ -33,11 +33,11 @@
 
 #include "audio/audio_out.h"
 #include "audio/mic_in.h"
+#include "core/config.h"
+#include "core/engines.h"
 #include "core/sentence_splitter.h"
 #include "core/speech_queue.h"
 #include "core/text_util.h"
-#include "llm/claude_client.h"
-#include "llm/claude_code_client.h"
 #include "llm/llm_client.h"
 #include "stt/recognizer.h"
 #include "tts/kokoro_tts.h"
@@ -46,17 +46,6 @@
 using clk = std::chrono::steady_clock;
 
 namespace {
-
-std::string env_or(const char* name, const std::string& def) {
-  char* v = nullptr;
-  size_t len = 0;
-  if (_dupenv_s(&v, &len, name) == 0 && v) {
-    std::string s(v);
-    free(v);
-    if (!s.empty()) return s;
-  }
-  return def;
-}
 
 double secs(clk::time_point a, clk::time_point b) { return std::chrono::duration<double>(b - a).count(); }
 
@@ -76,15 +65,6 @@ std::string read_console_line_utf8() {
   while (n > 0 && (wbuf[n - 1] == L'\n' || wbuf[n - 1] == L'\r')) --n;
   return utf8_from_wide(wbuf, (int)n);
 }
-
-const char* kSystemPrompt =
-    "You are a voice assistant running on the user's Windows PC. The user speaks English (primary) and Japanese. "
-    "Always reply in the language the user just used; if they mix languages, use the dominant one. "
-    "Your reply is read aloud by a text-to-speech engine, so write plain spoken prose: short sentences, "
-    "one to three sentences unless the user asks for detail, no markdown, no lists, no headings, no emoji, no URLs. "
-    "Write Japanese in normal Japanese script, never romaji. "
-    "If something must be shown rather than spoken (code, a table, a long quote), put it inside a ``` fence and say "
-    "briefly that it is shown on screen; text inside fences is displayed but not spoken.";
 
 }  // namespace
 
@@ -107,64 +87,26 @@ int main(int argc, char** argv) {
   }
   const bool scripted = !say_text.empty() || !speak_text.empty();
 
-  const std::string backend = env_or("AII_BACKEND", "code");
-  const std::string effort = env_or("AII_EFFORT", "low");
-  const std::string model_override = env_or("AII_MODEL", "");
-  const int kokoro_sid = std::atoi(env_or("AII_KOKORO_SID", "3").c_str());
-  const unsigned vv_style = (unsigned)std::atoi(env_or("AII_VOICEVOX_STYLE", "2").c_str());
-  const std::string stt_lang = env_or("AII_STT_LANG", "auto");
-  const int early_words = std::atoi(env_or("AII_EARLY_WORDS", "12").c_str());  // 0 = wait for full sentences
+  const aii::Config cfg = aii::Config::from_env();
+  const int early_words = cfg.early_words;  // 0 = wait for full sentences
+  std::printf("voiceloop  backend=%s effort=%s\n", cfg.backend.c_str(), cfg.effort.c_str());
 
-  const std::string models = AII_MODELS_DIR;
-  const std::string stt_dir = models + "/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11";
-  const std::string kokoro_dir = models + "/kokoro-multi-lang-v1_0";
-  const std::string vv_models = models + "/voicevox";
-  const std::string vv_core = AII_VV_CORE_DIR;
-
-  std::printf("voiceloop  backend=%s effort=%s\n", backend.c_str(), effort.c_str());
-
-  // ---- LLM backend (started first: Claude Code takes a few seconds to initialise) ----
-  std::unique_ptr<aii::LlmClient> llm;
-  auto t_llm = clk::now();
-  if (speak_text.empty()) {
-    if (backend == "api") {
-      const std::string api_key = env_or("ANTHROPIC_API_KEY", "");
-      if (api_key.empty()) { std::fprintf(stderr, "AII_BACKEND=api needs ANTHROPIC_API_KEY\n"); return 1; }
-      llm = std::make_unique<aii::ApiLlmClient>(api_key, model_override.empty() ? "claude-opus-5" : model_override,
-                                                effort, kSystemPrompt);
-      std::printf("  api backend           model=%s\n", model_override.empty() ? "claude-opus-5" : model_override.c_str());
-    } else {
-      aii::ClaudeCodeClient::Options o;
-      o.exe = env_or("AII_CLAUDE_EXE", env_or("USERPROFILE", "C:\\Users\\Default") + "\\.local\\bin\\claude.exe");
-      o.system_prompt = kSystemPrompt;
-      o.model = model_override;
-      o.effort = effort;
-      o.tools = false;
-      auto cc = std::make_unique<aii::ClaudeCodeClient>(o);
-      std::string err;
-      if (!cc->start(&err)) { std::fprintf(stderr, "claude code backend failed: %s\n", err.c_str()); return 1; }
-      std::printf("  claude code launched  %.2f s  (%s)\n", secs(t_llm, clk::now()),
-                  model_override.empty() ? "default model" : model_override.c_str());
-      llm = std::move(cc);
-    }
+  // ---- engines (Claude Code first: it takes a few seconds to initialise) ----
+  aii::Engines eng;
+  std::string err;
+  auto logger = [](const std::string& s) { std::printf("  %s\n", s.c_str()); };
+  if (speak_text.empty() && !aii::build_llm(cfg, eng, logger, &err)) {
+    std::fprintf(stderr, "%s\n", err.c_str());
+    return 1;
   }
-
-  auto t0 = clk::now();
-  aii::Recognizer stt(stt_dir, 8);
-  if (!stt.ok()) { std::fprintf(stderr, "recogniser failed to load from %s\n", stt_dir.c_str()); return 1; }
-  stt.set_language(stt_lang);
-  std::printf("  recogniser ready      %.2f s\n", secs(t0, clk::now()));
-
-  auto t1 = clk::now();
-  aii::KokoroTts kokoro(kokoro_dir, kokoro_sid, 1.0f, 4);
-  if (!kokoro.ok()) { std::fprintf(stderr, "kokoro failed to load from %s\n", kokoro_dir.c_str()); return 1; }
-  std::printf("  kokoro ready          %.2f s  (%d Hz, sid %d)\n", secs(t1, clk::now()), kokoro.sample_rate(),
-              kokoro_sid);
-
-  auto t2 = clk::now();
-  aii::VoicevoxTts voicevox(vv_core, vv_models, vv_style);
-  if (!voicevox.ok()) { std::fprintf(stderr, "voicevox failed: %s\n", voicevox.last_error().c_str()); return 1; }
-  std::printf("  voicevox ready        %.2f s  (style %u)\n", secs(t2, clk::now()), vv_style);
+  if (!aii::build_speech(cfg, eng, logger, &err)) {
+    std::fprintf(stderr, "%s\n", err.c_str());
+    return 1;
+  }
+  std::unique_ptr<aii::LlmClient>& llm = eng.llm;
+  aii::Recognizer& stt = *eng.stt;
+  aii::KokoroTts& kokoro = *eng.kokoro;
+  aii::VoicevoxTts& voicevox = *eng.voicevox;
 
   aii::AudioOut speaker;
   if (!speaker.start(kokoro.sample_rate())) { std::fprintf(stderr, "no playback device\n"); return 1; }

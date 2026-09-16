@@ -1,21 +1,56 @@
 # AIInterface
 
-Voice interface to Claude for Windows 11, in C++. Current milestone: `voiceloop`, a console
-push-to-talk loop. Speech recognition and synthesis run locally on the CPU; Claude runs
-through the locally installed Claude Code CLI on your subscription (no API key needed).
-No audio is ever written to disk.
+Voice interface to Claude for Windows 11, in C++. Two executables share one core:
+
+- `avatar`: a small transparent always-on-top window in the bottom-right corner (a spinning
+  cube stands in for the avatar) with the transcript, a usage readout and Talk / Silence /
+  Pause buttons. Built on the sibling Renderer engine.
+- `voiceloop`: the same loop as a console push-to-talk program (milestone 1).
+
+Speech recognition and synthesis run locally on the CPU; Claude runs through the locally
+installed Claude Code CLI on your subscription (no API key needed). No audio is ever written
+to disk.
 
 Plan: `PROJECT_OUTLINE.md`. Research: `docs/`. Engine experiments and evidence: `spikes/`.
 
 ## Build
 
 Requires Visual Studio 2022, CMake 3.24+, the Claude Code CLI signed in to your subscription,
-and the prebuilt engines and models described in the next section (about 1.3 GB, none of it in git).
+the prebuilt engines and models described in the next section (about 1.3 GB, none of it in git),
+and for `avatar` the Renderer engine checked out beside this repo (`..\Renderer`, or set
+`AII_RENDERER_DIR`) plus the Vulkan SDK (its `dxc` compiles the shaders). Pass
+`-DAII_BUILD_AVATAR=OFF` to build only `voiceloop`.
 
 ```
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release --target voiceloop
+cmake --build build --config Release --target avatar voiceloop
 ```
+
+Everything lands in `build\bin\Release\` next to `rend.dll` and the engine DLLs.
+
+## Avatar window
+
+```
+build\bin\Release\avatar.exe
+```
+
+| Control | Action |
+|---|---|
+| SPACE or Talk | start listening; again to stop and send (also barges in while Claude speaks) |
+| S or Silence | stop the audio, keep the text coming |
+| E or Pause | cancel the reply in flight |
+| Esc or Q | quit |
+
+Flags: `--say "text"` sends one turn as soon as the engines are up, `--seconds N` quits after N
+seconds, `--no-voice` shows the window without loading any engine, `--opaque` gives a normal
+window. Engines load on a background thread, so the window appears at once and the status
+line reports progress.
+
+The window uses the engine's D3D12 backend: on the AMD driver here only a DirectComposition
+swapchain gives per-pixel alpha (the engine's Vulkan path composites opaque). The text panel
+is drawn with GDI into a bitmap each time something changes and blitted by a shader, which is
+what makes Japanese text work through the system fonts. Shaders live in
+`src/avatar/shaders/` and are compiled to DXIL and SPIR-V at build time.
 
 ## Getting the engines and models
 
@@ -130,6 +165,7 @@ build\Release\voiceloop.exe --speak "Text to speak. 日本語も。"    # synthe
 | `AII_STT_LANG` | `auto` | `auto`, `en` or `ja` for the recogniser |
 | `AII_KOKORO_SID` | `3` | English voice (3 = af_heart, 2 = af_bella) |
 | `AII_VOICEVOX_STYLE` | `2` | Japanese voice style (2 = 四国めたん ノーマル; 3 = ずんだもん, 8 = 春日部つむぎ, 10 = 雨晴はう) |
+| `AII_EARLY_WORDS` | `12` | the first chunk of a reply is spoken at a comma or after this many words; `0` waits for full sentences |
 
 ## How a turn flows
 

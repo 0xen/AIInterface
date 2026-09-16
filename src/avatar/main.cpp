@@ -1,14 +1,22 @@
 // avatar: the corner window of AIInterface. A small borderless, transparent,
 // always-on-top window on the rend engine (D3D12 backend: on this AMD GPU
 // only D3D12's composition swapchain gives per-pixel alpha; Vulkan's WSI
-// composites opaque). For now it draws a spinning cube as the placeholder
-// avatar; the voice loop's transcript, usage readout and controls come next.
+// composites opaque). The top shows the placeholder avatar (a spinning cube);
+// below it a GDI-rendered panel carries the usage readout, the transcript
+// and the Talk / Silence / Pause buttons. The voice loop itself lives in
+// VoiceSession (engines from aii_core).
 //
-//   avatar [--opaque] [--size N] [--seconds S] [--vulkan]
-//     --opaque   decorated opaque window (fallback / debugging)
-//     --size N   window edge in pixels (default 320)
-//     --seconds  quit automatically after S seconds (scripted runs)
-//     --vulkan   use the Vulkan backend (transparency will not work here)
+//   avatar [--opaque] [--seconds S] [--vulkan] [--say "text"] [--no-voice]
+//     --opaque    decorated opaque window (fallback / debugging)
+//     --seconds   quit automatically after S seconds (scripted runs)
+//     --vulkan    use the Vulkan backend (transparency will not work here)
+//     --say       send this text as the first user turn once the engines are up
+//     --no-voice  window only, no engines (layout work)
+//
+//   SPACE / Talk    start listening; again to stop and send (barge-in while speaking)
+//   S / Silence     stop the audio, keep the text
+//   E / Pause       cancel the reply in flight
+//   Esc / Q         quit
 #include "rend/core/log.h"
 #include "rend/core/math.h"
 #include "rend/core/paths.h"
@@ -25,17 +33,35 @@
 #include "rend/platform/backend.h"
 
 #include <windows.h>
+#include <shellapi.h>
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <vector>
+
+#include "core/config.h"
+#include "ui/gdi_canvas.h"
+#include "voice_session.h"
 
 using namespace rend;
 
 namespace {
+
+// ---- layout (pixels) ----
+constexpr std::uint32_t kWindowW = 360;
+constexpr std::uint32_t kWindowH = 640;
+constexpr std::uint32_t kCubeH = 260;                      // avatar area at the top
+constexpr std::uint32_t kPanelY = kCubeH;                  // panel below it
+constexpr std::uint32_t kPanelH = kWindowH - kPanelY;
+constexpr float kPanelAlpha = 0.96f;
+constexpr int kButtonH = 40;
+constexpr int kPad = 8;
 
 // Mirrors CubeFrame in shaders/cube.hlsl.
 struct CubeFrame {
@@ -45,6 +71,14 @@ struct CubeFrame {
     float tint[4];
 };
 static_assert(sizeof(CubeFrame) == 160);
+
+// Mirrors the header in shaders/panel.hlsl.
+struct PanelHeader {
+    std::uint32_t winW, winH, x, y, w, h;
+    float alpha;
+    std::uint32_t stride; // bytes per slot region (read from slot 0 by the shader)
+};
+static_assert(sizeof(PanelHeader) == 32);
 
 struct Push {
     std::uint32_t slot;
@@ -91,26 +125,116 @@ void pinToCorner(HWND hwnd, int width, int height) {
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_FRAMECHANGED);
 }
 
+std::string utf8FromWide(const wchar_t* w) {
+    int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 1) return {};
+    std::string s(static_cast<std::size_t>(len - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), len, nullptr, nullptr);
+    return s;
+}
+
+struct Button {
+    const char* label;
+    int x, y, w, h;
+    bool hit(float px, float py) const {
+        return px >= x && px < x + w && py >= y && py < y + h;
+    }
+};
+
+// Draws the whole panel (usage, status, transcript, buttons) into the canvas.
+// Coordinates are panel-local; the shader places the panel at kPanelY.
+void drawPanel(aii::GdiCanvas& canvas, const aii::VoiceSession::Snapshot& snap,
+               const std::array<Button, 3>& buttons, bool voiceEnabled) {
+    using aii::Color;
+    const Color bg{22, 24, 30};
+    const Color dim{150, 155, 170};
+    const Color fg{232, 234, 240};
+    const Color user{255, 196, 120};
+    const Color claude{150, 205, 255};
+    const Color accent{214, 84, 74};
+    const Color button{54, 58, 72};
+    const int w = canvas.width();
+    canvas.clear(bg);
+
+    int y = kPad;
+    // Usage readout under the avatar.
+    const std::string usage = snap.usage.empty() ? "usage: (after the first reply)" : snap.usage;
+    y += canvas.text(kPad, y, w - 2 * kPad, 36, usage, 13, dim, false, DT_WORD_ELLIPSIS) + 4;
+    // State + status line.
+    std::string status = voiceEnabled ? std::string("[") + aii::VoiceSession::state_name(snap.state) + "] " + snap.status
+                                      : "(no voice: --no-voice)";
+    canvas.text(kPad, y, w - 2 * kPad, 18, status, 13,
+                snap.state == aii::VoiceSession::State::Listening ? accent : fg, true,
+                DT_END_ELLIPSIS | DT_SINGLELINE);
+    y += 24;
+
+    // Transcript: newest at the bottom, filling upward.
+    const int transcriptTop = y;
+    const int transcriptBottom = buttons[0].y - kPad;
+    const int textW = w - 2 * kPad;
+    int cursor = transcriptBottom;
+    if (!snap.partial.empty()) {
+        const std::string line = "You: " + snap.partial;
+        const int h = canvas.measure(textW, line, 14);
+        cursor -= h;
+        canvas.text(kPad, cursor, textW, h, line, 14, accent);
+        cursor -= 4;
+    }
+    for (auto it = snap.lines.rbegin(); it != snap.lines.rend() && cursor > transcriptTop; ++it) {
+        if (it->text.empty()) continue;
+        const std::string line = (it->user ? "You: " : "Claude: ") + it->text;
+        const int h = canvas.measure(textW, line, 14);
+        cursor -= h;
+        if (cursor < transcriptTop) {
+            // Clip the oldest visible line at the top rather than skipping it.
+            canvas.text(kPad, transcriptTop, textW, cursor + h - transcriptTop, line, 14,
+                        it->user ? user : claude);
+            break;
+        }
+        canvas.text(kPad, cursor, textW, h, line, 14, it->user ? user : claude);
+        cursor -= 6;
+    }
+
+    // Buttons.
+    for (std::size_t i = 0; i < buttons.size(); ++i) {
+        const Button& b = buttons[i];
+        Color fill = button;
+        if (i == 0 && snap.state == aii::VoiceSession::State::Listening) fill = accent;
+        canvas.fill_rect(b.x, b.y, b.w, b.h, fill);
+        canvas.frame_rect(b.x, b.y, b.w, b.h, Color{90, 95, 115});
+        canvas.text(b.x, b.y + (b.h - 18) / 2, b.w, 18, b.label, 14, fg, true, DT_CENTER | DT_SINGLELINE);
+    }
+}
+
 } // namespace
 
-int main(int argc, char** argv) {
+int main(int /*argc*/, char** /*argv*/) {
+    SetConsoleOutputCP(CP_UTF8);
     bool opaque = false;
     bool vulkan = false;
-    int size = 320;
+    bool voiceEnabled = true;
     double seconds = -1.0;
-    for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--opaque") == 0) {
-            opaque = true;
-        } else if (std::strcmp(argv[i], "--vulkan") == 0) {
-            vulkan = true;
-        } else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
-            size = std::atoi(argv[++i]);
-        } else if (std::strcmp(argv[i], "--seconds") == 0 && i + 1 < argc) {
-            seconds = std::atof(argv[++i]);
+    std::string sayText;
+    {
+        // Wide command line so Japanese survives (argv is ANSI-mangled).
+        int wargc = 0;
+        wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+        for (int i = 1; wargv && i < wargc; ++i) {
+            const std::wstring a = wargv[i];
+            if (a == L"--opaque") opaque = true;
+            else if (a == L"--vulkan") vulkan = true;
+            else if (a == L"--no-voice") voiceEnabled = false;
+            else if (a == L"--seconds" && i + 1 < wargc) seconds = _wtof(wargv[++i]);
+            else if (a == L"--say" && i + 1 < wargc) sayText = utf8FromWide(wargv[++i]);
         }
+        if (wargv) LocalFree(wargv);
     }
     const bool transparent = !opaque;
     const gpu::Api api = vulkan ? gpu::Api::Vulkan : gpu::Api::D3D12;
+
+    // The voice loop loads its engines in the background while the window comes up.
+    std::unique_ptr<aii::VoiceSession> session;
+    if (voiceEnabled) session = std::make_unique<aii::VoiceSession>(aii::Config::from_env());
 
     auto backendResult = platform::createBackend(platform::BackendKind::SDL3);
     if (!backendResult) {
@@ -147,7 +271,7 @@ int main(int argc, char** argv) {
     auto targetResult = backend->createTarget({
         .style = transparent ? platform::WindowStyle::BorderlessTransparent
                              : platform::WindowStyle::Decorated,
-        .size = {static_cast<std::uint32_t>(size), static_cast<std::uint32_t>(size)},
+        .size = {kWindowW, kWindowH},
         .title = "AIInterface",
         .vulkan = api == gpu::Api::Vulkan,
     });
@@ -159,7 +283,7 @@ int main(int argc, char** argv) {
 
     HWND hwnd = static_cast<HWND>(backend->nativeWindowHandle(*target));
     if (hwnd && transparent) {
-        pinToCorner(hwnd, size, size);
+        pinToCorner(hwnd, kWindowW, kWindowH);
     }
 
     void* nativeSurface = nullptr;
@@ -199,67 +323,112 @@ int main(int argc, char** argv) {
         return 1;
     }
     auto renderer = std::move(rendererResult).value();
-    // Premultiplied (0,0,0,0): the desktop shows through wherever the cube is not.
+    // Premultiplied (0,0,0,0): the desktop shows through wherever nothing is drawn.
     renderer->setClearColor(0.0f, 0.0f, 0.0f, transparent ? 0.0f : 1.0f);
 
-    // ---- cube pass: one per-slot storage buffer at user binding 40 ----
+    // ---- GPU resources: cube frames (binding 40) and the panel pixels (binding 41) ----
     auto tableResult = gpu::DescriptorTable::create(
-        *device, gpu::DescriptorTableDesc{.maxTextures = 1, .userStorageBuffers = 1});
+        *device, gpu::DescriptorTableDesc{.maxTextures = 1, .userStorageBuffers = 2});
     if (!tableResult) {
         log::error("descriptor table: {}", tableResult.error().message);
         return 1;
     }
     auto table = std::move(tableResult).value();
 
-    auto bufferResult = gpu::Buffer::create(*device, {
-        .size = std::uint64_t{kSlots} * sizeof(CubeFrame),
-        .usage = gpu::kUsageStorage,
-        .location = gpu::MemoryLocation::HostVisible,
-    });
-    if (!bufferResult) {
-        log::error("frame buffer: {}", bufferResult.error().message);
-        return 1;
-    }
-    auto frameBuffer = std::move(bufferResult).value();
-    std::memset(frameBuffer->mapped(), 0, static_cast<std::size_t>(frameBuffer->size()));
-    table->writeStorageBuffer(table->userStorageBinding(0), *frameBuffer);
+    auto makeHostBuffer = [&](std::uint64_t size, const char* what) -> std::unique_ptr<gpu::Buffer> {
+        auto r = gpu::Buffer::create(*device, {.size = size,
+                                               .usage = gpu::kUsageStorage,
+                                               .location = gpu::MemoryLocation::HostVisible});
+        if (!r) {
+            log::error("{} buffer: {}", what, r.error().message);
+            return nullptr;
+        }
+        std::memset(r.value()->mapped(), 0, static_cast<std::size_t>(size));
+        return std::move(r).value();
+    };
+    auto cubeBuffer = makeHostBuffer(std::uint64_t{kSlots} * sizeof(CubeFrame), "cube");
+    const std::uint32_t panelStride = static_cast<std::uint32_t>(sizeof(PanelHeader)) + kWindowW * kPanelH * 4;
+    auto panelBuffer = makeHostBuffer(std::uint64_t{kSlots} * panelStride, "panel");
+    if (!cubeBuffer || !panelBuffer) return 1;
+    table->writeStorageBuffer(table->userStorageBinding(0), *cubeBuffer);
+    table->writeStorageBuffer(table->userStorageBinding(1), *panelBuffer);
 
     const auto shaderDir = executableDirectory() / "data" / "shaders";
-    auto vs = gpu::Shader::createFromFile(*device, shaderDir / "cube.vert.spv");
-    auto ps = gpu::Shader::createFromFile(*device, shaderDir / "cube.frag.spv");
-    if (!vs || !ps) {
-        log::error("shaders in {}: {}", shaderDir.string(),
-                   !vs ? vs.error().message : ps.error().message);
-        return 1;
-    }
-    auto vertexShader = std::move(vs).value();
-    auto fragmentShader = std::move(ps).value();
+    auto loadShader = [&](const char* file) -> std::unique_ptr<gpu::Shader> {
+        auto r = gpu::Shader::createFromFile(*device, shaderDir / file);
+        if (!r) {
+            log::error("shader {}: {}", file, r.error().message);
+            return nullptr;
+        }
+        return std::move(r).value();
+    };
+    auto cubeVs = loadShader("cube.vert.spv");
+    auto cubePs = loadShader("cube.frag.spv");
+    auto panelVs = loadShader("panel.vert.spv");
+    auto panelPs = loadShader("panel.frag.spv");
+    if (!cubeVs || !cubePs || !panelVs || !panelPs) return 1;
 
-    gpu::GraphicsPipelineDesc pipelineDesc{};
-    pipelineDesc.vertexShader = vertexShader.get();
-    pipelineDesc.fragmentShader = fragmentShader.get();
-    pipelineDesc.colorFormat = swapchain->imageFormat();
-    pipelineDesc.pushConstantBytes = sizeof(Push);
-    pipelineDesc.descriptorTable = table.get();
-    auto pipelineResult = gpu::Pipeline::createGraphics(*device, pipelineDesc);
-    if (!pipelineResult) {
-        log::error("pipeline: {}", pipelineResult.error().message);
-        return 1;
-    }
-    auto pipeline = std::move(pipelineResult).value();
+    auto makePipeline = [&](gpu::Shader& vs, gpu::Shader& ps, const char* what) -> std::unique_ptr<gpu::Pipeline> {
+        gpu::GraphicsPipelineDesc desc{};
+        desc.vertexShader = &vs;
+        desc.fragmentShader = &ps;
+        desc.colorFormat = swapchain->imageFormat();
+        desc.pushConstantBytes = sizeof(Push);
+        desc.descriptorTable = table.get();
+        auto r = gpu::Pipeline::createGraphics(*device, desc);
+        if (!r) {
+            log::error("{} pipeline: {}", what, r.error().message);
+            return nullptr;
+        }
+        return std::move(r).value();
+    };
+    auto cubePipeline = makePipeline(*cubeVs, *cubePs, "cube");
+    auto panelPipeline = makePipeline(*panelVs, *panelPs, "panel");
+    if (!cubePipeline || !panelPipeline) return 1;
 
-    renderer->setFramePasses({gpu::FramePass{
-        .point = gpu::PassPoint::InScene,
-        .name = "avatar-cube",
-        .record =
-            [&](gpu::CommandContext& cmd, const gpu::PassContext& ctx) {
-                cmd.bindPipeline(*pipeline);
-                cmd.bindDescriptorTable(*pipeline, *table);
-                const Push push{.slot = ctx.slot, .pad = 0};
-                cmd.pushConstants(*pipeline, &push, sizeof(push));
-                cmd.draw(36);
-            },
-    }});
+    renderer->setFramePasses({
+        gpu::FramePass{
+            .point = gpu::PassPoint::InScene,
+            .name = "avatar-cube",
+            .record =
+                [&](gpu::CommandContext& cmd, const gpu::PassContext& ctx) {
+                    cmd.setViewport(0.0f, 0.0f, static_cast<float>(ctx.width), static_cast<float>(kCubeH));
+                    cmd.setScissor(0, 0, ctx.width, kCubeH);
+                    cmd.bindPipeline(*cubePipeline);
+                    cmd.bindDescriptorTable(*cubePipeline, *table);
+                    const Push push{.slot = ctx.slot, .pad = 0};
+                    cmd.pushConstants(*cubePipeline, &push, sizeof(push));
+                    cmd.draw(36);
+                },
+        },
+        gpu::FramePass{
+            .point = gpu::PassPoint::InScene,
+            .name = "avatar-panel",
+            .record =
+                [&](gpu::CommandContext& cmd, const gpu::PassContext& ctx) {
+                    cmd.setViewport(0.0f, 0.0f, static_cast<float>(ctx.width), static_cast<float>(ctx.height));
+                    cmd.setScissor(0, 0, ctx.width, ctx.height);
+                    cmd.bindPipeline(*panelPipeline);
+                    cmd.bindDescriptorTable(*panelPipeline, *table);
+                    const Push push{.slot = ctx.slot, .pad = 0};
+                    cmd.pushConstants(*panelPipeline, &push, sizeof(push));
+                    cmd.draw(6);
+                },
+        },
+    });
+
+    // ---- the panel canvas and its buttons (panel-local coordinates) ----
+    aii::GdiCanvas canvas(static_cast<int>(kWindowW), static_cast<int>(kPanelH));
+    const int buttonW = (static_cast<int>(kWindowW) - 4 * kPad) / 3;
+    const int buttonY = static_cast<int>(kPanelH) - kButtonH - kPad;
+    const std::array<Button, 3> buttons{{
+        {"Talk", kPad, buttonY, buttonW, kButtonH},
+        {"Silence", 2 * kPad + buttonW, buttonY, buttonW, kButtonH},
+        {"Pause", 3 * kPad + 2 * buttonW, buttonY, buttonW, kButtonH},
+    }};
+    std::array<std::uint64_t, kSlots> slotPanelVersion{};
+    std::uint64_t panelVersion = 1;
+    std::string lastPanelKey;
 
     log::info("avatar live: {}x{} {} {}", extent.width, extent.height,
               transparent ? "transparent" : "opaque", gpu::apiName(api));
@@ -268,6 +437,7 @@ int main(int argc, char** argv) {
     std::uint32_t width = extent.width;
     std::uint32_t height = extent.height;
     bool running = true;
+    bool saidOnce = sayText.empty();
     while (running) {
         for (const auto& event : backend->pumpEvents()) {
             switch (event.type) {
@@ -275,8 +445,18 @@ int main(int argc, char** argv) {
                 running = false;
                 break;
             case platform::Event::Type::KeyDown:
-                if (event.key == platform::Key::Escape || event.key == platform::Key::Q) {
-                    running = false;
+                if (event.key == platform::Key::Escape || event.key == platform::Key::Q) running = false;
+                else if (session && event.key == platform::Key::Space) session->toggle_talk();
+                else if (session && event.key == platform::Key::S) session->silence();
+                else if (session && event.key == platform::Key::E) session->pause();
+                break;
+            case platform::Event::Type::MouseButtonDown:
+                if (session && event.button == platform::MouseButton::Left) {
+                    const float px = event.mouseX;
+                    const float py = event.mouseY - static_cast<float>(kPanelY);
+                    if (buttons[0].hit(px, py)) session->toggle_talk();
+                    else if (buttons[1].hit(px, py)) session->silence();
+                    else if (buttons[2].hit(px, py)) session->pause();
                 }
                 break;
             case platform::Event::Type::Resized:
@@ -290,18 +470,36 @@ int main(int argc, char** argv) {
         }
         const double t =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        if (seconds >= 0.0 && t >= seconds) {
-            running = false;
+        if (seconds >= 0.0 && t >= seconds) running = false;
+        if (width == 0 || height == 0) continue;
+
+        // ---- voice loop tick + panel redraw when anything changed ----
+        aii::VoiceSession::Snapshot snap;
+        if (session) {
+            session->update();
+            snap = session->snapshot();
+            if (!saidOnce && snap.state == aii::VoiceSession::State::Idle) {
+                saidOnce = true;
+                session->say(sayText);
+            }
         }
-        if (width == 0 || height == 0) {
-            continue;
+        std::string panelKey = aii::VoiceSession::state_name(snap.state);
+        panelKey += '|' + snap.status + '|' + snap.usage + '|' + snap.partial;
+        for (const auto& l : snap.lines) panelKey += (l.user ? "\nU:" : "\nC:") + l.text;
+        if (panelKey != lastPanelKey) {
+            lastPanelKey = std::move(panelKey);
+            drawPanel(canvas, snap, buttons, session != nullptr);
+            ++panelVersion;
         }
 
         if (auto r = renderer->waitFrameSlot(); !r) {
             log::error("wait: {}", r.error().message);
             break;
         }
-        const float aspect = static_cast<float>(width) / static_cast<float>(height);
+        const std::uint32_t slot = renderer->frameSlot();
+
+        // Cube: this slot's frame record.
+        const float aspect = static_cast<float>(width) / static_cast<float>(kCubeH);
         const math::Vec3 eye{0.0f, 0.0f, 3.2f};
         const math::Mat4 model = math::mul(rotationY(static_cast<float>(t) * 0.9f),
                                            rotationX(static_cast<float>(t) * 0.55f));
@@ -314,8 +512,24 @@ int main(int argc, char** argv) {
         frame.cameraPos[1] = eye.y;
         frame.cameraPos[2] = eye.z;
         frame.tint[0] = frame.tint[1] = frame.tint[2] = 1.0f;
-        auto* slots = static_cast<CubeFrame*>(frameBuffer->mapped());
-        slots[renderer->frameSlot()] = frame;
+        if (snap.state == aii::VoiceSession::State::Listening) {
+            frame.tint[0] = 1.0f; frame.tint[1] = 0.55f; frame.tint[2] = 0.5f;  // reddish while listening
+        } else if (snap.state == aii::VoiceSession::State::Thinking) {
+            const float pulse = 0.75f + 0.25f * std::sin(static_cast<float>(t) * 6.0f);
+            frame.tint[0] = frame.tint[1] = frame.tint[2] = pulse;
+        }
+        static_cast<CubeFrame*>(cubeBuffer->mapped())[slot] = frame;
+
+        // Panel: copy the canvas into this slot's region when it is stale.
+        if (slotPanelVersion[slot] != panelVersion) {
+            slotPanelVersion[slot] = panelVersion;
+            auto* region = static_cast<std::uint8_t*>(panelBuffer->mapped()) + std::size_t{slot} * panelStride;
+            PanelHeader header{.winW = width, .winH = height, .x = 0, .y = kPanelY,
+                               .w = kWindowW, .h = kPanelH, .alpha = transparent ? kPanelAlpha : 1.0f,
+                               .stride = panelStride};
+            std::memcpy(region, &header, sizeof(header));
+            std::memcpy(region + sizeof(header), canvas.pixels(), canvas.bytes());
+        }
 
         if (auto r = renderer->drawFrame(nullptr); !r) {
             log::error("draw: {}", r.error().message);
@@ -325,5 +539,6 @@ int main(int argc, char** argv) {
     const auto stats = renderer->takeStats();
     log::info("avatar exit: {} frames", stats.frames);
     renderer->waitIdle();
+    session.reset();
     return 0;
 }
