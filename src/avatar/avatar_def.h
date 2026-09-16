@@ -112,6 +112,24 @@ struct AvatarDefinition {
   std::vector<AvatarSprite> sprites;
   std::string default_clip;
 
+  // M1c.4: the named palette variants this definition declares, in the order
+  // they are declared — which is the order the settings picker shows them in,
+  // so the author decides what comes first. Always non-empty: a definition
+  // with no `themes` block reports the one implicit theme, its bare palette.
+  //
+  // The colours themselves are *not* here. A theme is resolved into the
+  // frames at load time (parse_clip_file writes RGBA, not palette indices),
+  // so what a loaded definition carries is the theme it was loaded *with*,
+  // and changing theme means loading again. That is a deliberate trade: the
+  // alternative is storing every frame as indices and resolving per cell on
+  // every compose, which would put a palette lookup in the frame loop to save
+  // a reload the user asks for by hand a handful of times a session. The
+  // reload path is already the hot-reload path, which runs on every save.
+  std::vector<std::string> themes;
+  std::string theme;  // the one that was applied to the frames above
+
+  bool has_theme(const std::string& theme_name) const;
+
   const AvatarClip* find_clip(const std::string& clip_name) const;
   const AvatarAnchor* find_anchor(const std::string& anchor_name) const;
   const AvatarSprite* find_sprite(const std::string& sprite_name) const;
@@ -163,8 +181,14 @@ AvatarStage avatar_stage_layout(const AvatarDefinition& def, std::uint32_t band_
 // Loads `dir/avatar.json` and the clip files it names. Returns false with a
 // one-line reason in `error` — the caller shows that line and falls back, so
 // it names the file and, where there is one, the line number.
-bool load_avatar_definition(const std::filesystem::path& dir, AvatarDefinition& out,
-                            std::string* error);
+//
+// `theme` names one of the definition's palette variants (M1c.4). Empty means
+// the definition's own `default_theme`. A name the definition does not have is
+// **not** an error: it falls back to the default and says so in `out.theme`,
+// because the name comes from a settings file or, later, from the bus, and a
+// theme deleted from the art must not leave the user with no avatar at all.
+bool load_avatar_definition(const std::filesystem::path& dir, const std::string& theme,
+                            AvatarDefinition& out, std::string* error);
 
 // %APPDATA%\AIInterface\avatars — where the user's editable copies live.
 std::filesystem::path avatar_user_root();
@@ -174,6 +198,14 @@ std::filesystem::path avatar_user_root();
 // way, so a failed copy still yields a path whose loader failure is the one
 // the user sees.
 std::filesystem::path seed_avatar_definition(const std::string& name);
+
+// Every avatar definition that could be opened, by name: the directories under
+// assets/avatars that ship with the app, unioned with any the user has added
+// to %APPDATA%\AIInterface\avatars, sorted, with "default" first. This is the
+// avatar picker's list (M1c.3); it is a directory listing rather than a
+// manifest because a definition *is* a directory and a manifest would be a
+// second thing to keep in step with it.
+std::vector<std::string> avatar_definition_names();
 
 // Holds the definition, plays one clip and watches the directory.
 //
@@ -189,6 +221,23 @@ class AvatarSource {
   // for the definition's default; `sprites` are accessories to force on (the
   // single name "all" turns on every sprite the definition declares).
   void open(std::filesystem::path dir, std::string clip, std::vector<std::string> sprites);
+
+  // M1c.4: the whole of the theme mechanism's outside, deliberately narrow.
+  //
+  // A theme is chosen by *name*, never by index and never by colour, so every
+  // caller that will ever set one — the settings picker today, M2.5's app bus
+  // tomorrow, a Python driver after that — is the same one-line call against
+  // the same vocabulary the art declares. Wiring the bus to it is a call site,
+  // not a redesign.
+  //
+  // Returns false only when the name is not one this definition declares; the
+  // theme is unchanged then and the caller keeps whatever it had, which is
+  // what makes a stale settings file harmless. Asking for the theme that is
+  // already on is a no-op, so a frame loop may mirror a stored value into this
+  // every frame the same way it mirrors `muted`.
+  bool set_theme(const std::string& theme_name);
+  const std::string& theme() const { return def_.theme; }
+  const std::vector<std::string>& themes() const { return def_.themes; }
 
   // Polls the directory on a fixed cadence and advances the current clip by
   // wall-clock time. `dt` is the frame's own delta, in seconds.
@@ -255,6 +304,11 @@ class AvatarSource {
   bool status_new_ = false;
 
   std::string wanted_clip_;  // the --clip request, kept across reloads
+  // The theme asked for, kept by name across reloads for the same reason the
+  // clip is: a save that renames or removes it must not silently strand the
+  // avatar on a palette the user did not choose, and a save that adds it back
+  // must pick it up again.
+  std::string wanted_theme_;
   std::size_t clip_index_ = 0;
   std::size_t frame_index_ = 0;
   float frame_time_ = 0.0f;

@@ -102,6 +102,37 @@ struct Palette {
   std::array<bool, 128> known{};
 };
 
+// Reads a `{ "#": "#000000", ... }` object into `pal`, leaving keys it does
+// not mention alone. Shared by the base palette and by every theme's override
+// (M1c.4), so a theme's colour is held to exactly the same rules as the base
+// one and there is one place that knows what a palette entry may be. `what`
+// names the object in any error, since "palette" and "theme \"jade\" palette"
+// are the two things this can be looking at.
+bool apply_palette(const nlohmann::json& obj, const std::string& what, Palette& pal,
+                   std::string& error) {
+  for (const auto& [key, value] : obj.items()) {
+    if (key.size() != 1) {
+      error = "avatar.json: " + what + " key \"" + key + "\" must be a single character";
+      return false;
+    }
+    const auto idx = static_cast<unsigned char>(key[0]);
+    if (key[0] == kTransparent) {
+      error = "avatar.json: '.' is reserved for transparent and cannot be in the " + what;
+      return false;
+    }
+    if (idx >= pal.known.size()) {
+      error = "avatar.json: " + what + " key \"" + key + "\" must be ASCII";
+      return false;
+    }
+    if (!value.is_string() || !parse_rgba(value.get<std::string>(), pal.rgba[idx])) {
+      error = "avatar.json: " + what + " \"" + key + "\" is not a #rrggbb or #rrggbbaa colour";
+      return false;
+    }
+    pal.known[idx] = true;
+  }
+  return true;
+}
+
 }  // namespace
 
 const AvatarClip* AvatarDefinition::find_clip(const std::string& clip_name) const {
@@ -109,6 +140,13 @@ const AvatarClip* AvatarDefinition::find_clip(const std::string& clip_name) cons
     if (c.name == clip_name) return &c;
   }
   return nullptr;
+}
+
+bool AvatarDefinition::has_theme(const std::string& theme_name) const {
+  for (const auto& t : themes) {
+    if (t == theme_name) return true;
+  }
+  return false;
 }
 
 const AvatarAnchor* AvatarDefinition::find_anchor(const std::string& anchor_name) const {
@@ -364,7 +402,8 @@ Envelope envelope_of(const AvatarDefinition& def, const std::vector<bool>* visib
 
 }  // namespace
 
-bool load_avatar_definition(const fs::path& dir, AvatarDefinition& out, std::string* error) {
+bool load_avatar_definition(const fs::path& dir, const std::string& theme,
+                            AvatarDefinition& out, std::string* error) {
   auto fail = [&](std::string what) {
     if (error) *error = std::move(what);
     return false;
@@ -404,21 +443,80 @@ bool load_avatar_definition(const fs::path& dir, AvatarDefinition& out, std::str
     return fail("avatar.json: \"palette\" must be a non-empty object");
   }
   Palette pal{};
-  for (const auto& [key, value] : palette.items()) {
-    if (key.size() != 1) {
-      return fail("avatar.json: palette key \"" + key + "\" must be a single character");
+  if (std::string why; !apply_palette(palette, "palette", pal, why)) return fail(why);
+
+  // ---- M1c.4: named themes -------------------------------------------------
+  //
+  // `themes` is an array, not an object, because the order is the picker's
+  // order and JSON objects have none worth relying on (nlohmann sorts keys, so
+  // an object would list them alphabetically and the author would lose the say
+  // in which palette the user meets first).
+  //
+  // Each theme's palette is *merged over* the base rather than replacing it,
+  // so a theme states only the inks it changes. That is not brevity for its
+  // own sake: the base is the one place a new ink character is declared, and a
+  // theme that had to be a complete palette would silently omit any ink added
+  // to the art after it was written — the new cells would then fail to load
+  // with "character 'x' is not in the palette" under that theme alone, which
+  // is about the worst shape of bug this format could have. Merging makes a
+  // new ink appear in every theme at its base colour until someone tints it.
+  const json& themes = member(root, "themes");
+  std::vector<const json*> theme_palettes;
+  if (!themes.is_null()) {
+    if (!themes.is_array() || themes.empty()) {
+      return fail("avatar.json: \"themes\" must be a non-empty array");
     }
-    const auto idx = static_cast<unsigned char>(key[0]);
-    if (key[0] == kTransparent) {
-      return fail("avatar.json: '.' is reserved for transparent and cannot be in the palette");
+    for (const auto& entry : themes) {
+      if (!entry.is_object() || !member(entry, "name").is_string()) {
+        return fail("avatar.json: every theme needs a string \"name\"");
+      }
+      const auto theme_name = member(entry, "name").get<std::string>();
+      if (theme_name.empty()) return fail("avatar.json: a theme name may not be empty");
+      if (def.has_theme(theme_name)) {
+        return fail("avatar.json: theme \"" + theme_name + "\" is declared twice");
+      }
+      const json& tp = member(entry, "palette");
+      // An absent or empty palette is legal and means "the base as it is" —
+      // which is how the definition's original colours keep a name of their
+      // own (`mono` here) without being written out twice.
+      if (!tp.is_null() && !tp.is_object()) {
+        return fail("avatar.json: theme \"" + theme_name + "\" has a \"palette\" that is not an object");
+      }
+      // Validated now, against a throwaway copy of the base, so a bad colour
+      // in a theme nobody has selected is still reported at the save that
+      // introduced it rather than months later when someone picks it.
+      Palette probe = pal;
+      if (std::string why;
+          tp.is_object() && !apply_palette(tp, "theme \"" + theme_name + "\" palette", probe, why)) {
+        return fail(why);
+      }
+      def.themes.push_back(theme_name);
+      theme_palettes.push_back(tp.is_object() ? &tp : nullptr);
     }
-    if (idx >= pal.known.size()) {
-      return fail("avatar.json: palette key \"" + key + "\" must be ASCII");
+  } else {
+    // No themes block at all: the bare palette is the one theme there is. It
+    // gets a name so every caller above can speak in names, and so the picker
+    // has something honest to show for a definition that has never heard of
+    // this feature.
+    def.themes.push_back("default");
+    theme_palettes.push_back(nullptr);
+  }
+
+  const json& dflt_theme = member(root, "default_theme");
+  const std::string default_theme =
+      dflt_theme.is_string() ? dflt_theme.get<std::string>() : def.themes.front();
+  if (!def.has_theme(default_theme)) {
+    return fail("avatar.json: default_theme \"" + default_theme + "\" is not a declared theme");
+  }
+  // A requested theme that is gone is not an error — see the header. It falls
+  // back to the default, and `out.theme` is what the caller reads back to find
+  // out what it actually got.
+  def.theme = def.has_theme(theme) ? theme : default_theme;
+  for (std::size_t i = 0; i < def.themes.size(); ++i) {
+    if (def.themes[i] != def.theme || !theme_palettes[i]) continue;
+    if (std::string why; !apply_palette(*theme_palettes[i], "theme palette", pal, why)) {
+      return fail(why);
     }
-    if (!value.is_string() || !parse_rgba(value.get<std::string>(), pal.rgba[idx])) {
-      return fail("avatar.json: palette \"" + key + "\" is not a #rrggbb or #rrggbbaa colour");
-    }
-    pal.known[idx] = true;
   }
 
   if (const json& anchors = member(root, "anchors"); !anchors.is_null()) {
@@ -593,11 +691,52 @@ fs::path seed_avatar_definition(const std::string& name) {
   return dest;
 }
 
+std::vector<std::string> avatar_definition_names() {
+  std::vector<std::string> names;
+  auto scan = [&names](const fs::path& root) {
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(root, ec)) {
+      if (!entry.is_directory(ec)) continue;
+      // A directory is an avatar only if it has the one file that makes it
+      // one. Otherwise a stray folder — a backup, a half-finished sketch, the
+      // editor's own scratch directory — would show up in the picker and pick
+      // as an avatar that cannot load.
+      if (!fs::exists(entry.path() / "avatar.json", ec)) continue;
+      const std::string name = entry.path().filename().string();
+      if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+    }
+  };
+  scan(fs::path(AII_ASSETS_DIR) / "avatars");
+  scan(avatar_user_root());
+  std::sort(names.begin(), names.end());
+  // "default" first whatever it sorts as: it is the one every install has and
+  // the one an avatar that failed to load falls back to.
+  const auto it = std::find(names.begin(), names.end(), std::string("default"));
+  if (it != names.end()) std::rotate(names.begin(), it, it + 1);
+  return names;
+}
+
 void AvatarSource::open(fs::path dir, std::string clip, std::vector<std::string> sprites) {
   dir_ = std::move(dir);
   wanted_clip_ = std::move(clip);
   wanted_sprites_ = std::move(sprites);
   reload(true);
+}
+
+bool AvatarSource::set_theme(const std::string& theme_name) {
+  if (theme_name == wanted_theme_) return true;
+  // Before the first load there is nothing to validate against, so the name is
+  // simply remembered and the load that follows decides. That is what lets
+  // main.cpp push the stored theme in *before* open(), so the avatar's first
+  // frame is already in the user's colours rather than flashing the default.
+  if (loaded_ && !def_.has_theme(theme_name)) return false;
+  wanted_theme_ = theme_name;
+  // A reload, because the palette is resolved into the frames (see the note on
+  // AvatarDefinition::themes). It is the same path a hot-reload takes and has
+  // the same contract: a definition that will not load leaves the art that is
+  // on screen exactly where it is.
+  if (loaded_) reload(false);
+  return true;
 }
 
 bool AvatarSource::show_sprite(const std::string& sprite, bool on) {
@@ -639,7 +778,7 @@ void AvatarSource::reload(bool initial) {
   AvatarDefinition fresh;
   std::string error;
   stamp_ = directory_stamp();
-  if (load_avatar_definition(dir_, fresh, &error)) {
+  if (load_avatar_definition(dir_, wanted_theme_, fresh, &error)) {
     def_ = std::move(fresh);
     loaded_ = true;
     // The clip the user asked for on the command line outlives a reload; if
@@ -682,7 +821,12 @@ void AvatarSource::reload(bool initial) {
       else missing += " (no sprite \"" + wanted + "\")";
     }
 
-    status_ = (initial ? "avatar " : "avatar reloaded ") + def_.name + ": " +
+    // A theme that is no longer declared is reported at the volume of a
+    // problem, exactly as a missing clip is: the avatar is on screen in the
+    // wrong colours, which is quiet enough to go unnoticed otherwise.
+    if (!wanted_theme_.empty() && wanted_theme_ != def_.theme)
+      missing += " (no theme \"" + wanted_theme_ + "\")";
+    status_ = (initial ? "avatar " : "avatar reloaded ") + def_.name + " [" + def_.theme + "]: " +
               std::to_string(def_.clips.size()) + " clips, playing \"" +
               def_.clips[clip_index_].name + "\", " + std::to_string(def_.sprites.size()) +
               " sprites (" + std::to_string(shown) + " shown)" + missing;

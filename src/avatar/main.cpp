@@ -162,6 +162,14 @@ int main(int /*argc*/, char** /*argv*/) {
     double seconds = -1.0;
     std::string sayText;
     std::string avatarName = "default";
+    // M1c.4. Empty means "whatever the settings file says", which in turn
+    // falls back to the definition's own default_theme. A name given here
+    // outranks the stored one and is *not* written back: --theme is for
+    // looking at a palette (the candidate captures were taken with it), and a
+    // look should not change what the user comes back to.
+    std::string themeName;
+    bool avatarFromArgs = false;
+    bool themeFromArgs = false;
     std::string clipName;
     std::vector<std::string> spriteNames;
     std::string buttonsFile;
@@ -176,7 +184,14 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (a == L"--no-voice") voiceEnabled = false;
             else if (a == L"--seconds" && i + 1 < wargc) seconds = _wtof(wargv[++i]);
             else if (a == L"--say" && i + 1 < wargc) sayText = utf8FromWide(wargv[++i]);
-            else if (a == L"--avatar" && i + 1 < wargc) avatarName = utf8FromWide(wargv[++i]);
+            else if (a == L"--avatar" && i + 1 < wargc) {
+                avatarName = utf8FromWide(wargv[++i]);
+                avatarFromArgs = true;
+            }
+            else if (a == L"--theme" && i + 1 < wargc) {
+                themeName = utf8FromWide(wargv[++i]);
+                themeFromArgs = true;
+            }
             else if (a == L"--clip" && i + 1 < wargc) clipName = utf8FromWide(wargv[++i]);
             else if (a == L"--sprite" && i + 1 < wargc)
                 spriteNames.push_back(utf8FromWide(wargv[++i]));
@@ -373,11 +388,24 @@ int main(int /*argc*/, char** /*argv*/) {
     // AII_AVATAR_DIR points the loader straight at a directory instead, which
     // is how the failure paths get tested without touching the user's copy.
     aii::AvatarSource avatarSource;
+    const std::string avatarDirOverride = aii::env_or("AII_AVATAR_DIR", "");
     {
-        const std::string override = aii::env_or("AII_AVATAR_DIR", "");
-        const std::filesystem::path dir = override.empty()
+        // M1c.3/M1c.4: which avatar, and which of its themes, are stored by
+        // name in the same settings file the panel's own state comes from.
+        // Read here rather than with the panel's fields further down, because
+        // this is where the definition is opened: reading them later would
+        // load the default art and the default palette and then swap both on
+        // the first frame, which on a window whose height follows its content
+        // is a visible flash and a resize.
+        if (!avatarFromArgs) avatarName = settings.get_string("avatar", "name", avatarName);
+        if (!themeFromArgs) themeName = settings.get_string("avatar", "theme", themeName);
+        const std::filesystem::path dir = avatarDirOverride.empty()
                                               ? aii::seed_avatar_definition(avatarName)
-                                              : std::filesystem::path(override);
+                                              : std::filesystem::path(avatarDirOverride);
+        // Before open(), not after: with nothing loaded yet this only records
+        // the name, and the load that follows resolves it — so the avatar's
+        // very first frame is already in the user's colours.
+        avatarSource.set_theme(themeName);
         avatarSource.open(dir, clipName, spriteNames);
     }
     aii::AvatarGrid grid;
@@ -487,6 +515,18 @@ int main(int /*argc*/, char** /*argv*/) {
     uiState.avatar_mode = static_cast<aii::AvatarVisibility>(
         settings.get_enum("panel", "avatar_mode", aii::kAvatarVisibilityNames,
                           aii::kAvatarVisibilityCount, static_cast<int>(uiState.avatar_mode)));
+    // The pickers show what is actually in force, not what was asked for: the
+    // definition has already been opened above, so a stored theme that the art
+    // no longer declares shows as the fallback it really got. Seeded from the
+    // source rather than from the settings file for exactly that reason.
+    uiState.avatar_name = avatarName;
+    uiState.theme = avatarSource.theme();
+    // The avatar picker's list. Re-read whenever the surface is opened rather
+    // than every frame — it is a directory scan, and the answer only changes
+    // when the user puts a folder somewhere, which they cannot do while
+    // looking at this window.
+    std::vector<std::string> avatarNames = aii::avatar_definition_names();
+    bool settingsWasOpen = false;
 
     log::info("avatar live: {}x{} {} {}", extent.width, extent.height,
               transparent ? "transparent" : "opaque", gpu::apiName(api));
@@ -673,6 +713,34 @@ int main(int /*argc*/, char** /*argv*/) {
         // decides on, and `width` is what the stage is laid out against. The
         // same `width` reaches write_slot below, so the art is never laid out
         // for a band the frame does not have.
+        // M1c.3: the pickers wrote a wish into uiState last frame; this is
+        // where it becomes true, before update() and so before this frame's
+        // status is read below — which is what puts a failed choice's reason
+        // on screen on the same frame the choice was made.
+        //
+        // Both are applied by *name* through one call each, and neither the
+        // panel nor this block knows what a palette is. That is the shape
+        // M2.5's bus needs: setting a theme from a message is this same
+        // set_theme() at a different call site, not a second mechanism.
+        if (avatarDirOverride.empty() && !uiState.avatar_name.empty() &&
+            uiState.avatar_name != avatarName) {
+            avatarName = uiState.avatar_name;
+            // Seeded on the way in, like the first one: an avatar the user has
+            // never opened before has no copy under %APPDATA% yet, and this is
+            // the call that makes one (and refreshes a stale one).
+            avatarSource.open(aii::seed_avatar_definition(avatarName), clipName, spriteNames);
+        }
+        if (uiState.theme != avatarSource.theme()) avatarSource.set_theme(uiState.theme);
+        // Written back from what is actually loaded, every frame. A theme the
+        // art no longer declares was refused above and the picker corrects
+        // itself here rather than showing a setting that is not in force; and
+        // because only the truth is ever stored, the settings file cannot
+        // accumulate a name that stopped meaning anything.
+        uiState.avatar_name = avatarName;
+        uiState.theme = avatarSource.theme();
+        if (avatarDirOverride.empty()) settings.set_string("avatar", "name", avatarName);
+        if (!themeFromArgs) settings.set_string("avatar", "theme", avatarSource.theme());
+
         avatarSource.update(dt);
         if (avatarSource.take_status_change()) {
             if (avatarSource.status_ok()) log::info("{}", avatarSource.status());
@@ -779,8 +847,16 @@ int main(int /*argc*/, char** /*argv*/) {
             ui->sync_pointer(hwnd);
             ui->begin_frame(width, height, dt);
             const bool submit = textInput && textInput->take_submit();
+            // Rescanned on the edge of the surface opening, not every frame.
+            if (uiState.settings_open && !settingsWasOpen) avatarNames = aii::avatar_definition_names();
+            settingsWasOpen = uiState.settings_open;
+            aii::AvatarOptions avatarOptions;
+            avatarOptions.avatars = avatarNames;
+            avatarOptions.themes = avatarSource.themes();
+            avatarOptions.art_status = avatarSource.status();
+            avatarOptions.art_status_ok = avatarSource.status_ok();
             const aii::AvatarUiResult r =
-                aii::draw_avatar_ui(uiState, snap, session != nullptr,
+                aii::draw_avatar_ui(uiState, snap, avatarOptions, session != nullptr,
                                     session && session->mic_open(),
                                     session && session->mic_hold(), kWindowW, band, submit);
             if (session) {

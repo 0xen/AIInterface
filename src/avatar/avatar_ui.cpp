@@ -376,7 +376,7 @@ bool bar_button(const ToolbarButton& b, float size, float& avail, bool& first) {
 // like the avatar-mode button beside it: none of these route into an engine,
 // and the row has to occupy its height from the first frame or the window
 // would change size the moment loading ended.
-void button_bar(AvatarUiState& state, float width) {
+void button_bar(AvatarUiState& state, bool loading, float width) {
   const ImGuiStyle& style = ImGui::GetStyle();
   const float size = ImGui::GetFrameHeight();
   float avail = width - 2.0f * style.WindowPadding.x;
@@ -384,7 +384,15 @@ void button_bar(AvatarUiState& state, float width) {
   bool open_settings = false;
 
   for (const ToolbarButton& b : ButtonRegistry::instance().snapshot()) {
-    if (!bar_button(b, size, avail, first)) continue;
+    // The cog alone stands down while the loading screen is up, for the same
+    // reason the chat arrow does: the region it opens is withheld until the
+    // engines are up, so the click would do nothing visible. The folder is
+    // unaffected — opening Explorer works from the first frame.
+    const bool off = loading && b.action.kind == ButtonActionKind::OpenSettings;
+    ImGui::BeginDisabled(off);
+    const bool hit = bar_button(b, size, avail, first);
+    ImGui::EndDisabled();
+    if (!hit) continue;
     switch (b.action.kind) {
       case ButtonActionKind::OpenSettings:
         open_settings = true;
@@ -402,16 +410,143 @@ void button_bar(AvatarUiState& state, float width) {
         break;
     }
   }
-  // A placeholder until M1c.3 builds the real surface. It is a popup rather
-  // than a panel row on purpose: the settings surface is specced to grow into
-  // voices, paths and themes, and none of that belongs in a 360 px column.
-  if (open_settings) ImGui::OpenPopup("##settings");
-  if (ImGui::BeginPopup("##settings")) {
-    ImGui::TextColored(dim(), "Settings");
-    ImGui::Separator();
-    ImGui::TextColored(dim(), "Avatar and theme pickers land in M1c.3.");
-    ImGui::EndPopup();
+  // M1c.3: the cog is a toggle on a region of the panel, not a popup.
+  //
+  // The placeholder it replaces *was* a popup, and a popup is wrong here for a
+  // reason worth writing down: an ImGui popup is a floating window, and this
+  // window is 360 px wide and as short as 168 px tall, with a transparent
+  // DirectComposition surface that nothing may be drawn outside of. A popup
+  // tall enough to hold voices, paths and timings would simply be cut off at
+  // the window's edge — silently, since ImGui has no idea the viewport is the
+  // whole of the app. A region inside the panel cannot be clipped by anything
+  // but itself.
+  if (open_settings) state.settings_open = !state.settings_open;
+}
+
+// ---------------------------------------------------------- the settings surface
+//
+// M1c.3. Built to grow, which here means three properties rather than three
+// controls:
+//
+//  - It is a **scrolling child of a fixed height**, so adding a setting costs
+//    scrollback and never costs window height. The window's height is the one
+//    quantity in this app that is expensive to change: it moves every control
+//    on screen, it goes through main.cpp's deferred `pendingH` path, and it is
+//    capped by a DirectComposition ceiling the engine commits once. A surface
+//    that grew with its contents would put every future setting back in front
+//    of that.
+//  - It is **sections of rows**, not a bespoke layout. A row is a label and
+//    one control at a fixed split, so the next setting is one call.
+//  - It reports choices by **name**, into `AvatarUiState`, and knows nothing
+//    about how they are applied. The avatar picker does not know what an
+//    avatar directory is and the theme picker does not know what a palette is.
+
+// The label column. Wide enough for "Theme" and the words that are coming
+// (Voice, Language, Endpoint), narrow enough to leave a usable combo in 360 px.
+constexpr float kSettingsLabel = 96.0f;
+
+void settings_heading(const char* text) {
+  ImGui::Spacing();
+  ImGui::TextColored(dim(), "%s", text);
+  ImGui::Separator();
+}
+
+// One "label: control" row. Returns with the cursor on the control, already
+// sized to the rest of the row, so the caller submits exactly one widget.
+void settings_row(const char* label) {
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextUnformatted(label);
+  ImGui::SameLine(kSettingsLabel);
+  ImGui::SetNextItemWidth(-FLT_MIN);
+}
+
+// A picker over names the app discovered at runtime. `current` is both the
+// value shown and where a new choice is written; it is left alone if nothing
+// was clicked. Names come from the art, so the list can be empty (no avatar
+// directory at all) and the current value can be absent from it (a theme
+// deleted from the file since it was chosen) — both are shown as they are
+// rather than corrected, because the correction is somebody else's job and a
+// picker that quietly changed the setting it was showing would hide it.
+bool name_picker(const char* id, const std::vector<std::string>& names, std::string& current) {
+  bool changed = false;
+  const char* preview = current.empty() ? "(none)" : current.c_str();
+  if (ImGui::BeginCombo(id, preview)) {
+    for (const std::string& name : names) {
+      const bool selected = name == current;
+      if (ImGui::Selectable(name.c_str(), selected) && !selected) {
+        current = name;
+        changed = true;
+      }
+      if (selected) ImGui::SetItemDefaultFocus();
+    }
+    ImGui::EndCombo();
   }
+  return changed;
+}
+
+void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, ui_color(0.055f, 0.063f, 0.082f));
+  ImGui::BeginChild("##settings", ImVec2(0.0f, kChatHeight), ImGuiChildFlags_None, 0);
+
+  // The controls are toned to the panel, the same way the message field is:
+  // this window is a calm dark strip in the corner of somebody's desktop and
+  // ImGui's default frame blue reads as a row of lit controls in it. Pushed
+  // before the first widget, so the close button is in the same register as
+  // the pickers below it.
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, ui_color(0.071f, 0.078f, 0.098f));
+  ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ui_color(0.110f, 0.120f, 0.150f));
+  ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ui_color(0.130f, 0.142f, 0.178f));
+  ImGui::PushStyleColor(ImGuiCol_Button, ui_color(0.110f, 0.120f, 0.150f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui_color(0.150f, 0.163f, 0.205f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ui_color(0.180f, 0.196f, 0.245f));
+  ImGui::PushStyleColor(ImGuiCol_Header, ui_color(0.140f, 0.153f, 0.192f));
+  ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ui_color(0.170f, 0.185f, 0.232f));
+  ImGui::PushStyleColor(ImGuiCol_Border, ui_color(0.16f, 0.17f, 0.21f));
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextColored(fg(), "Settings");
+  ImGui::SameLine();
+  // A way out that is not the cog. The cog is at the top of the panel and the
+  // panel's top moves up when this opens — closing from inside the surface is
+  // the one control guaranteed not to have gone anywhere since it appeared.
+  ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - ImGui::GetFrameHeight());
+  if (ImGui::SmallButton("x##settings_close")) state.settings_open = false;
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close settings");
+
+  settings_heading("Appearance");
+  settings_row("Avatar");
+  name_picker("##avatar_pick", options.avatars, state.avatar_name);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Which definition is drawn.\nOne directory per avatar, under\n%%APPDATA%%\\AIInterface\\avatars.");
+  settings_row("Theme");
+  name_picker("##theme_pick", options.themes, state.theme);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("A named palette in this avatar's avatar.json.\nEvery sprite shares it, so the thought bubble\nfollows the body.");
+
+  if (!options.art_status.empty()) {
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Text, options.art_status_ok ? dim() : warn());
+    ImGui::TextWrapped("%s", options.art_status.c_str());
+    ImGui::PopStyleColor();
+  }
+
+  // The rest of the surface, stated rather than implied. These are the
+  // settings the milestone plan already names as coming here (voices,
+  // endpoint timing, paths); they are listed so that what this surface is for
+  // is visible from inside it, and so the next section is an addition to a
+  // shape that exists rather than a decision to be taken again.
+  settings_heading("Voice");
+  ImGui::TextColored(dim(), "Speech voices and language: M8.");
+  settings_heading("Timing");
+  ImGui::TextColored(dim(), "Endpointing and early speech: M2.8.");
+  settings_heading("Paths");
+  ImGui::TextColored(dim(), "Models, avatars and the working directory.");
+
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor(9);
+  ImGui::EndChild();
+  ImGui::PopStyleColor();
 }
 
 void separator() {
@@ -664,6 +799,23 @@ void message_field(AvatarUiState& state, const VoiceSession::Snapshot& snap, boo
       state.dictation_prefix.clear();
       state.dictation_last.clear();
       state.refusal_left = 0.0f;
+      // HANDOFF follow-up 7: "after Enter sends a message the field loses
+      // keyboard focus, so typing again needs a re-click." Asserted here
+      // rather than repaired, because on this build the loss **could not be
+      // reproduced** — driven with real WM_KEYDOWN/WM_CHAR through the
+      // subclass, a typed send followed by two more keystrokes put both of
+      // them in the field, with the message both one line and wrapped to two
+      // (which resizes the window, the likeliest suspect). Enter never reaches
+      // ImGui at all (WinTextInput withholds it), so there is no obvious way
+      // for the widget to deactivate on a send.
+      //
+      // This line costs nothing when focus was never lost — the field is empty
+      // and already active, so re-asserting it is a no-op the user cannot see
+      // — and states the invariant the report is really about: a typed send
+      // leaves the field ready for the next message. If the user still sees
+      // it, the cause is outside this function and the next investigation has
+      // one fewer explanation to rule out.
+      state.refocus_field = true;
     }
   }
 
@@ -687,6 +839,12 @@ void message_field(AvatarUiState& state, const VoiceSession::Snapshot& snap, boo
   ImGui::PushStyleColor(ImGuiCol_Border, ui_color(0.16f, 0.17f, 0.21f));
   ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
   ImGui::BeginDisabled(loading);
+  // Claimed on the frame the send happens, so the clear and the focus land
+  // together and there is never a frame in which the field is empty and dead.
+  if (state.refocus_field) {
+    state.refocus_field = false;
+    ImGui::SetKeyboardFocusHere();
+  }
   ImGui::InputTextMultiline("##message", state.message, sizeof(state.message),
                             ImVec2(-FLT_MIN, h),
                             ImGuiInputTextFlags_NoHorizontalScroll |
@@ -987,8 +1145,8 @@ bool avatar_visible(AvatarVisibility mode, VoiceSession::State state) {
 }
 
 AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot& snap,
-                              bool voice_enabled, bool mic_on, bool mic_hold,
-                              std::uint32_t width, std::uint32_t top, bool submit) {
+                              const AvatarOptions& options, bool voice_enabled, bool mic_on,
+                              bool mic_hold, std::uint32_t width, std::uint32_t top, bool submit) {
   AvatarUiResult out;
   const float w = static_cast<float>(width);
   // Everything below reacts to this one flag. With --no-voice there is no
@@ -1012,7 +1170,7 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
   // calls for it "above the status line", and the status row (usage, the
   // avatar-mode button, the chat arrow) is the first thing the panel draws, so
   // above it is the top of the panel.
-  button_bar(state, w);
+  button_bar(state, loading, w);
 
   status_bar(state, snap.usage_stats, loading, w);
 
@@ -1036,7 +1194,22 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
   // `chat_open` is untouched) the panel shrinks to its two text rows and the
   // transport, so the loader centres clear of both and the widget sits compact
   // in the corner until the engines are up.
-  if (state.chat_open && !loading) chat(snap);
+  //
+  // M1c.3: the settings surface takes this same region when it is open, and
+  // takes it in preference to the chat. Both are kChatHeight tall, so opening
+  // the cog over an open chat changes the window's height by exactly nothing
+  // and not one control on screen moves — which is the whole reason the two
+  // share a region rather than stacking. Opening it over a *closed* chat grows
+  // the window the same way the chat arrow does, through the same deferred
+  // path, and the click that did it has already completed on the release that
+  // toggled the flag.
+  if (loading) {
+    // nothing here while the loading screen owns the window
+  } else if (state.settings_open) {
+    settings_surface(state, options);
+  } else if (state.chat_open) {
+    chat(snap);
+  }
 
   // M1b.2: the message field, then the transport row at the very bottom of the
   // window (the user asked for that order).

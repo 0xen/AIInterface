@@ -1,14 +1,50 @@
 {
   "name": "default",
-  "_about": "The default avatar: a 16x16 black-and-white slime. The body is black with white features, and nothing here uses a colour -- if you retint the palette the whole character follows, because the sprites share it.",
+  "_about": "The default avatar: a 16x16 slime, drawn in two inks. '#' is the body and 'o' is everything on it -- eyes, mouth, and the highlight on the top-left of the dome -- so the art assumes throughout that 'o' is the *lighter* of the two. A theme that inverts that relationship turns the highlight into a scuff mark. Every sprite shares these inks: the thought bubble is a '#' cloud with 'o' dots, the muted bubble a '#' bubble with an 'o' cross, so a theme reaches all of them at once and there is nothing to keep in step by hand.",
   "grid": { "width": 16, "height": 16 },
 
-  "_palette": "Palette keys are the single characters used in the .txt frames; '.' is always transparent and may not appear here. Colours are #rrggbb or #rrggbbaa. '*' is the only translucent ink: over body cells it composites to the one grey in the avatar, and think.txt uses it for a glint.",
+  "_palette": "Palette keys are the single characters used in the .txt frames; '.' is always transparent and may not appear here. Colours are #rrggbb or #rrggbbaa. '*' is the only translucent ink: over body cells it composites to the one grey in the avatar, and think.txt uses it for a glint. This block is the *base* palette: it declares which characters exist, and every theme below is merged over it, so a new ink added here appears in every theme at this colour until one tints it.",
   "palette": {
     "#": "#000000",
     "o": "#ffffff",
     "*": "#ffffffcc"
   },
+
+  "_themes": "M1c.4. Named palette variants, in picker order; each one states only the inks it changes. Chosen in Settings (the cog), stored per avatar in settings.json, and settable by name from code -- AvatarSource::set_theme. Changing one costs a reload of this directory, which is the same path a hot edit takes, so tuning a colour here shows up as soon as the file is saved.\n\nThe brief these were drawn to: the mono slime reads as a hole in a dark desktop, and the black thought bubble beside it is close to invisible. The lever is the body ink, and the answer is a *mid-tone*: a body far enough above the desktop's black to be a shape, and far enough below 'o' that white eyes still read on it. Mid-tones are also the only values that survive the widget being dragged onto a bright wallpaper, since black and white each vanish on one of them.",
+  "default_theme": "mono",
+  "themes": [
+    {
+      "name": "mono",
+      "_about": "What shipped before themes existed: black body, white features. Kept because it is the register the art was drawn in, and because on a mid-grey desktop it is still the sharpest of the four."
+    },
+    {
+      "name": "jade",
+      "_about": "The classic coloured slime -- one saturated mid-tone body, white features, unchanged composition. The most conservative of the three: it changes nothing about how the character reads, only that it is now a shape rather than an absence.",
+      "palette": {
+        "#": "#1f7a4a",
+        "o": "#f2fff7",
+        "*": "#ffffffcc"
+      }
+    },
+    {
+      "name": "ember",
+      "_about": "A warm duotone: the white ink goes too, replaced by a pale gold, so the character is built out of two hues rather than a hue and white. Reads hotter and more arcade than jade, and the gold keeps its contrast against the body without ever being as bright as paper.",
+      "palette": {
+        "#": "#9e3520",
+        "o": "#ffd9a0",
+        "*": "#fff1d8cc"
+      }
+    },
+    {
+      "name": "jelly",
+      "_about": "The one that takes the word slime literally: the body ink is translucent, so the desktop shows faintly through it and the character is made of the same stuff a jelly is. The only theme that uses the format's alpha. The gloss is pushed to a near-opaque white so there is still one hard specular on a body that is otherwise soft.",
+      "palette": {
+        "#": "#1e7f8ed6",
+        "o": "#f4feff",
+        "*": "#ffffffee"
+      }
+    }
+  ],
 
   "_anchors": "Cells on the character that accessories hang off, so the art and the placements agree by name instead of by number. head_top is deliberately unused: the band is 260 px, which at scale 16 is exactly the 16 cells the body already fills, so anything placed above row 0 enlarges the envelope and the whole avatar is scaled down to fit it -- one cell above the head costs 16 px off the body. There is horizontal slack, so accessories go beside the head instead and cost nothing.",
   "anchors": {

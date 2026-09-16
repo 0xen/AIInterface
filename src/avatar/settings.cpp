@@ -101,6 +101,32 @@ int Settings::get_enum(const char* section, const char* key, const char* const* 
   return def;
 }
 
+std::string Settings::get_string(const char* section, const char* key,
+                                 const std::string& def) const {
+  const json& v = member(member(root_, section), key);
+  // Non-empty, because every string this file stores is a *name* — an avatar
+  // directory, a theme, later a voice — and an empty name is never a thing
+  // that exists. A hand edit that blanks one therefore means "the default"
+  // rather than "look for the avatar called nothing".
+  if (!v.is_string()) return def;
+  std::string s = v.get<std::string>();
+  return s.empty() ? def : s;
+}
+
+void Settings::set_string(const char* section, const char* key, const std::string& value) {
+  // Unlike set_bool there is a value that is not ours to write: a name the
+  // caller could not resolve. Writing it would persist a typo or a theme that
+  // has since been deleted, and the next run would show the fallback while the
+  // file went on claiming otherwise.
+  if (value.empty()) return;
+  const json& cur = member(member(root_, section), key);
+  if (cur.is_string() && cur.get<std::string>() == value) return;
+  if (!root_[section].is_object()) root_[section] = json::object();
+  root_[section][key] = value;
+  dirty_ = true;
+  since_change_ = 0.0f;
+}
+
 void Settings::set_bool(const char* section, const char* key, bool value) {
   const json& cur = member(member(root_, section), key);
   if (cur.is_boolean() && cur.get<bool>() == value) return;

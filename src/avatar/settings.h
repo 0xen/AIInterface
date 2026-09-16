@@ -69,6 +69,13 @@ class Settings {
   // but only in range: `7` is not a mode and falls back to `def`.
   int get_enum(const char* section, const char* key, const char* const* names, int count,
                int def) const;
+  // A free-form name, for the settings whose vocabulary is not a fixed enum
+  // the program can list at compile time: which avatar definition is shown and
+  // which of *its* themes (M1c.3/M1c.4). Those live in the art, so the set of
+  // legal values changes when the user adds a directory, and validation
+  // belongs where the art is read rather than here. This stores the name and
+  // nothing else; the loader is what decides whether it still means anything.
+  std::string get_string(const char* section, const char* key, const std::string& def) const;
 
   // Both are no-ops when the value already matches what is stored, so the
   // frame loop can call them unconditionally every frame and "on change" is
@@ -76,6 +83,8 @@ class Settings {
   void set_bool(const char* section, const char* key, bool value);
   void set_enum(const char* section, const char* key, const char* const* names, int count,
                 int value);
+  // An empty value is ignored rather than written: see the note in the .cpp.
+  void set_string(const char* section, const char* key, const std::string& value);
 
   // Advances the debounce. A settings file is not worth a write per frame,
   // and the avatar mode button in particular is cycled through three states

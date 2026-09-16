@@ -9,6 +9,7 @@
 // hole that still swallows desktop clicks.
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "voice_session.h"
 
@@ -49,6 +50,26 @@ constexpr float kTalkHoldSeconds = 0.40f;
 // the frame loop, which only turns the answer into a fade.
 bool avatar_visible(AvatarVisibility mode, VoiceSession::State state);
 
+// M1c.3: what the settings surface has to offer this frame, from the parts of
+// the app the panel has no business reaching into. The panel owns no art, no
+// files and no engines; it renders lists and reports a choice back through
+// `AvatarUiState`, which is what keeps the surface addable-to without the
+// panel growing dependencies on everything it can set.
+struct AvatarOptions {
+  // Every avatar definition that could be opened, and every theme the one
+  // currently open declares. Both come from the art, so both can change while
+  // the app is running (a hot edit that adds a theme, a directory dropped into
+  // %APPDATA%) and both are re-read every frame rather than cached here.
+  std::vector<std::string> avatars;
+  std::vector<std::string> themes;
+  // AvatarSource's one-line status, shown under the pickers. A theme that did
+  // not exist, or art that failed to load, is a thing the user did with the
+  // control they are looking at, so the answer belongs beside it and not only
+  // in a log nobody is reading.
+  std::string art_status;
+  bool art_status_ok = true;
+};
+
 struct AvatarUiState {
   // Closed until the user clicks the chat arrow (user, 16 Sep 2026). The
   // widget lives in the corner of a desktop that is being worked in, so it
@@ -72,6 +93,31 @@ struct AvatarUiState {
   // Same contract as `chat_open`, persistence included: user state, written
   // only by its button. Defaults to the behaviour that predates the button.
   AvatarVisibility avatar_mode = AvatarVisibility::Always;
+
+  // M1c.3. The settings surface is open, i.e. the cog has been clicked.
+  //
+  // Deliberately *not* persisted, unlike the two fields above it. Those are
+  // preferences about how the widget sits on the desktop; this is a drawer the
+  // user opened to change one, and an app that comes back up showing its own
+  // settings has forgotten what it is for.
+  //
+  // It takes the same region of the panel the chat does, and takes it in
+  // preference — the chat is withheld while it is open, exactly as the loading
+  // screen withholds it, and `chat_open` is not touched, so closing the cog
+  // gives back whatever was there. That is what keeps the widget's tallest
+  // layout the height it already was: the settings surface adds no height to
+  // the window that the chat had not already asked for, and the ceiling this
+  // window can never exceed (kWindowH in main.cpp, a DirectComposition limit)
+  // is 87 px above the tallest layout today. A surface that stacked on top of
+  // the chat instead of replacing it would have gone straight through it.
+  bool settings_open = false;
+  // Which avatar definition and which of its themes the user has chosen
+  // (M1c.3/M1c.4). Persisted by name in settings.json. The panel writes these
+  // and main.cpp is what makes them true — and then writes back what actually
+  // loaded, so a name that no longer resolves corrects itself in the picker
+  // instead of sitting there claiming to be in force.
+  std::string avatar_name;
+  std::string theme;
   // What is in the message field (M1b.2). A fixed buffer rather than a
   // std::string because imgui_stdlib is not in this build, and a corner
   // window's typed message has no business being longer than this anyway.
@@ -102,6 +148,10 @@ struct AvatarUiState {
   // The last finalised-but-unsent utterance this panel has written into the
   // field, against `Snapshot::dictated_seq`. Equal means there is nothing new.
   unsigned dictated_seq = 0;
+  // A typed Enter sent this frame, so the message field takes the keyboard
+  // again before it is submitted. Set and cleared inside one draw(); it is a
+  // member only because the send is decided before the widget is built.
+  bool refocus_field = false;
   // When the Talk button went down, on ImGui's clock. Only meaningful between
   // the press and the release that reads it.
   double talk_pressed_at = 0.0;
@@ -145,7 +195,7 @@ struct AvatarUiResult {
 // latch look identical from the snapshot, and a SPACE hold never touches the
 // button at all.
 AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot& snap,
-                              bool voice_enabled, bool mic_on, bool mic_hold,
-                              std::uint32_t width, std::uint32_t top, bool submit);
+                              const AvatarOptions& options, bool voice_enabled, bool mic_on,
+                              bool mic_hold, std::uint32_t width, std::uint32_t top, bool submit);
 
 }  // namespace aii
