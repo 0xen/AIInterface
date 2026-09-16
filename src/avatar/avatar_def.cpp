@@ -570,16 +570,26 @@ fs::path avatar_user_root() {
 fs::path seed_avatar_definition(const std::string& name) {
   const fs::path dest = avatar_user_root() / name;
   std::error_code ec;
-  if (fs::exists(dest, ec)) return dest;
-
   const fs::path source = fs::path(AII_ASSETS_DIR) / "avatars" / name;
   if (!fs::exists(source, ec)) return dest;  // the loader reports the miss
   fs::create_directories(dest.parent_path(), ec);
-  // copy_options::none, not overwrite_existing: this runs on every start, and
-  // the one thing it must never do is stamp on art the user has edited. The
-  // exists() check above already makes that impossible for the directory as a
-  // whole; this keeps it true for a file added to assets/ later, too.
-  fs::copy(source, dest, fs::copy_options::recursive, ec);
+  // `update_existing`, and it used to be a bare `exists()` check that returned
+  // early. That was a silent one-way door: the copy ran exactly once, so any
+  // art added to assets/ afterwards never reached a machine that had already
+  // started the app once. It cost a round on 16 Sep 2026 — a new sprite was
+  // authored, declared, wired up, and simply never appeared, because the
+  // definition being read was the one seeded days earlier and it had never
+  // heard of it. Every clip and sprite the milestone plan still has to add
+  // would have hit the same wall.
+  //
+  // The rule this replaces it with is the ordinary installer one: a file is
+  // refreshed only when the shipped copy is *newer* than the user's. Art the
+  // user has edited since the last release keeps their edit — which is the
+  // property the old early return was reaching for — and art they have never
+  // touched follows the app. `recursive` also adds files that are simply not
+  // there yet, which is most of what this has to do.
+  fs::copy(source, dest,
+           fs::copy_options::recursive | fs::copy_options::update_existing, ec);
   return dest;
 }
 
