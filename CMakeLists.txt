@@ -5,6 +5,22 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# ---- avatar window on the Renderer engine (sibling checkout) ----
+# One shared bin directory: the engine writes rend.dll (and SDL3.dll) to
+# ${CMAKE_BINARY_DIR}/bin/<Config>, so every executable here lands beside it.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+option(AII_BUILD_AVATAR "Build the avatar window (needs the Renderer checkout and the Vulkan SDK's dxc)" ON)
+set(AII_RENDERER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Renderer" CACHE PATH "Checkout of the rend engine")
+if(AII_BUILD_AVATAR)
+  if(NOT EXISTS "${AII_RENDERER_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "Renderer not found at ${AII_RENDERER_DIR}; set AII_RENDERER_DIR or AII_BUILD_AVATAR=OFF")
+  endif()
+  set(REND_BUILD_APPS OFF CACHE BOOL "" FORCE)
+  set(REND_PYTHON OFF CACHE BOOL "" FORCE)
+  add_subdirectory("${AII_RENDERER_DIR}" "${CMAKE_BINARY_DIR}/renderer")
+  add_subdirectory(src/avatar)
+endif()
+
 # Prebuilt engines set up by the spikes (paths are kept there on purpose until
 # the project graduates to a proper dependency layout).
 set(SHERPA_DIR  "${CMAKE_CURRENT_SOURCE_DIR}/spikes/stt/bin/sherpa-onnx-v1.13.8-win-x64-shared-MD-Release")
