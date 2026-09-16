@@ -19,12 +19,12 @@
 //     --say       send this text as the first user turn once the engines are up
 //     --no-voice  window only, no engines (layout work)
 //     --avatar    which definition under %APPDATA%\AIInterface\avatars to load
-//     --clip      which clip to play, instead of the definition's default.
-//                 Nothing maps state to clips yet (M2.4); until it does this
-//                 is how a clip gets exercised at all.
+//     --clip      pin one clip, instead of letting AvatarController choose.
+//                 Either of --clip and --sprite switches the controller off
+//                 entirely: they exist to look at one piece of art, and a
+//                 policy quietly overwriting the thing you asked to look at
+//                 is worse than no policy at all.
 //     --sprite    force an accessory on, repeatable, "all" for every one.
-//                 Same reason: M2.4 decides when a thought bubble belongs on
-//                 screen, so until then this is the only way to see one.
 //
 //   SPACE / Talk    click (or tap) toggles the mic: conversation mode. While
 //                   the mic is on, a pause in speech sends that utterance and
@@ -60,6 +60,7 @@
 #include <string>
 #include <vector>
 
+#include "avatar_controller.h"
 #include "avatar_def.h"
 #include "avatar_renderer.h"
 #include "avatar_ui.h"
@@ -325,6 +326,23 @@ int main(int /*argc*/, char** /*argv*/) {
     }
     aii::AvatarGrid grid;
 
+    // M2.4: the policy that decides which clip and which accessory, from the
+    // snapshot the frame loop already takes. It is off whenever the command
+    // line pinned something, so --clip and --sprite stay a straight look at
+    // the art.
+    aii::AvatarTuning tuning;
+    if (const std::string s = aii::env_or("AII_SLEEPY_SEC", ""); !s.empty()) {
+        // Only so the sleepy path can be exercised without sitting through
+        // two minutes of idle. Nothing else here is tunable from outside;
+        // when M2.5's bus exists it is the place for this.
+        tuning.sleepy_seconds = std::max(1.0f, static_cast<float>(atof(s.c_str())));
+    }
+    aii::AvatarController controller(tuning);
+    const bool controllerOwnsAvatar = clipName.empty() && spriteNames.empty();
+    if (controllerOwnsAvatar && avatarSource.loaded())
+        controller.note_definition(avatarSource.definition());
+    std::string lastClipLogged;
+
     // The loader's full-screen triangle. It shares the descriptor table only
     // because the D3D12 backend's root signature lives there; the shader
     // reads nothing from it, so the pass never binds it — ImGui has just set
@@ -499,18 +517,6 @@ int main(int /*argc*/, char** /*argv*/) {
         if (seconds >= 0.0 && t >= seconds) running = false;
         if (width == 0 || height == 0) continue;
 
-        // Clip playback and the hot-reload poll. It runs before the early-out
-        // paths below so that a definition fixed while the window is hidden
-        // is picked up all the same.
-        avatarSource.update(dt);
-        if (avatarSource.take_status_change()) {
-            if (avatarSource.status_ok()) log::info("{}", avatarSource.status());
-            else log::warn("{}", avatarSource.status());
-        }
-        // The same band the grid is drawn into below: the stage is sized to
-        // it, so a mismatch would lay the art out for a window we do not have.
-        avatarSource.compose(grid, width, kAvatarH);
-
         // The height the panel asked for last frame. Everything that sizes
         // itself from the window reads `height`, the loading overlay included,
         // so the swapchain has to follow the window rather than be cropped by
@@ -541,6 +547,30 @@ int main(int /*argc*/, char** /*argv*/) {
                 session->say(sayText);
             }
         }
+
+        // Clip playback and the hot-reload poll, then the policy, then the
+        // composition — in that order, and after the session tick and the
+        // resize above, because all three feed it: the reload is what the
+        // policy re-measures its clip lengths from, the snapshot is what it
+        // decides on, and `width` is what the stage is laid out against. The
+        // same `width` reaches write_slot below, so the art is never laid out
+        // for a band the frame does not have.
+        avatarSource.update(dt);
+        if (avatarSource.take_status_change()) {
+            if (avatarSource.status_ok()) log::info("{}", avatarSource.status());
+            else log::warn("{}", avatarSource.status());
+            if (controllerOwnsAvatar && avatarSource.loaded())
+                controller.note_definition(avatarSource.definition());
+        }
+        if (controllerOwnsAvatar) {
+            aii::avatar_apply(controller.update(snap, dt), avatarSource);
+            if (controller.clip() != lastClipLogged) {
+                lastClipLogged = controller.clip();
+                log::info("avatar clip: {} ({}) after {:.2f}s", lastClipLogged,
+                          controller.reason(), controller.last_dwell());
+            }
+        }
+        avatarSource.compose(grid, width, kAvatarH);
 
         // ---- the loading overlay, and the handoff out of it ----
         // With --no-voice there is no session and the snapshot stays Loading,

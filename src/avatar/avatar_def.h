@@ -205,7 +205,20 @@ class AvatarSource {
   // is what advances the slide.
   void compose(AvatarGrid& grid, std::uint32_t band_w, std::uint32_t band_h);
 
-  bool play(const std::string& clip);
+  // `start_frame` is where the clip is entered, and exists for exactly one
+  // case: blink.txt spends its first frame holding the open eye for two
+  // seconds, which *is* the interval between blinks. M2.4 owns that interval
+  // (randomised, so it does not look mechanical), so it enters the clip at
+  // the lid instead. Out of range is clamped to 0, which is also what every
+  // other caller wants.
+  bool play(const std::string& clip, std::size_t start_frame = 0);
+
+  // Multiplies the character clip's clock. The frames are fixed art, so the
+  // only continuous lever a policy has over a clip is how fast it runs
+  // through it: this is how mic RMS reaches the listen lean and the playback
+  // level reaches the talk bounce. Sprites are deliberately left at 1 — a
+  // thought bubble's dots are the bubble's own rhythm, not the body's.
+  void set_speed(float speed) { speed_ = speed; }
 
   // Accessories are off until something turns them on. Deciding *when* is
   // M2.4's policy; this is the switch it will throw, and what --sprite throws
@@ -245,6 +258,7 @@ class AvatarSource {
   std::size_t clip_index_ = 0;
   std::size_t frame_index_ = 0;
   float frame_time_ = 0.0f;
+  float speed_ = 1.0f;
 
   // A sprite runs its own clip on its own clock: a bubble's dots have nothing
   // to do with the body's breathe, and tying them to one cursor would force

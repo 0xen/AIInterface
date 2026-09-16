@@ -690,13 +690,16 @@ void AvatarSource::reload(bool initial) {
   status_new_ = true;
 }
 
-bool AvatarSource::play(const std::string& clip) {
+bool AvatarSource::play(const std::string& clip, std::size_t start_frame) {
   if (!loaded_) return false;
   for (std::size_t i = 0; i < def_.clips.size(); ++i) {
     if (def_.clips[i].name != clip) continue;
+    // Asking for the clip that is already running is a no-op, not a restart:
+    // M2.4's policy states its wish every frame, and restarting on each of
+    // them would freeze every clip on its first drawing.
     if (i != clip_index_) {
       clip_index_ = i;
-      frame_index_ = 0;
+      frame_index_ = start_frame < def_.clips[i].frames.size() ? start_frame : 0;
       frame_time_ = 0.0f;
     }
     return true;
@@ -747,7 +750,10 @@ void AvatarSource::update(float dt) {
   // moves it along, so a frame where nothing changed costs an add.
   if (slide_t_ < 1.0f) slide_t_ = std::min(1.0f, slide_t_ + dt / kSlideSeconds);
 
-  advance_clip(def_.clips[clip_index_], dt, frame_index_, frame_time_);
+  // Only the body takes the speed multiplier; the slide above and the sprites
+  // below keep wall clock, so a loud talker does not also hurry the move that
+  // makes room for an accessory.
+  advance_clip(def_.clips[clip_index_], dt * std::max(0.0f, speed_), frame_index_, frame_time_);
   // Each accessory runs on its own cursor, so a bubble's dots keep their own
   // fps no matter what the body is doing.
   for (std::size_t i = 0; i < def_.sprites.size() && i < sprite_state_.size(); ++i) {

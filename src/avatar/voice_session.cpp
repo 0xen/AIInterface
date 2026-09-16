@@ -222,9 +222,14 @@ void VoiceSession::update() {
 
       eng_.stt->feed(chunk_.data(), (int)chunk_.size(), kMicRate);
       std::string p = eng_.stt->partial();
+      // Published against the gate rather than raw (see Snapshot::mic_level):
+      // the gate already encodes what this room's silence sounds like, so the
+      // avatar leans to the *voice* and not to the air conditioning.
+      const float loud = std::min(1.0f, level / std::max(gate * 6.0f, 1e-6f));
       {
         std::lock_guard<std::mutex> l(mutex_);
         partial_ = p;
+        mic_level_ = loud;
       }
       // A pause long enough to end the utterance sends it, so one click
       // carries a back-and-forth conversation rather than a single turn.
@@ -502,6 +507,7 @@ void VoiceSession::run_turn(std::string text) {
     if (!r.ok) {
       status_ = "error: " + r.error;
       state_ = State::Idle;
+      ++turn_failed_seq_;
       return;
     }
     state_ = State::Speaking;  // update() returns to Idle once the audio drains
@@ -572,6 +578,9 @@ VoiceSession::Snapshot VoiceSession::snapshot() const {
   // here would be the classic AB/BA deadlock.
   UsageStats stats;
   if (loaded_ && eng_.llm) stats = eng_.llm->usage();
+  // An atomic on the device callback's side, so it is read here rather than
+  // mirrored into a member the frame loop would have to remember to clear.
+  const float speaking = (loaded_ && speaker_) ? speaker_->level() : 0.0f;
   std::lock_guard<std::mutex> l(mutex_);
   Snapshot s;
   s.state = state_;
@@ -580,6 +589,13 @@ VoiceSession::Snapshot VoiceSession::snapshot() const {
   s.usage_stats = stats;
   s.partial = partial_;
   s.dictated_seq = dictated_seq_;
+  s.turn_failed_seq = turn_failed_seq_;
+  // Gated on the state here rather than zeroed wherever the microphone
+  // closes: there are five paths out of Listening and only one of them would
+  // have remembered, and a stale level would leave the avatar leaning at
+  // something that stopped talking.
+  s.mic_level = state_ == State::Listening ? mic_level_ : 0.0f;
+  s.speak_level = speaking;
   s.load_progress = load_progress_;
   s.load_stage = load_stage_;
   s.lines = lines_;

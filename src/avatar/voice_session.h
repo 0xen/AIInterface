@@ -43,6 +43,23 @@ class VoiceSession {
     // other way of leaving Listening leaves this alone, so the Pause and
     // Silence behaviour M1b.4 settled is untouched.
     unsigned dictated_seq = 0;
+    // Bumped once each time a turn comes back with an error. The status line
+    // carries the text, but a front-end that wants to *react* to the failure
+    // needs an edge, and "status happens to start with error:" is not one.
+    // AvatarController is the first reader (M2.4: a failed turn is what puts
+    // the `?` over the avatar's head).
+    unsigned turn_failed_seq = 0;
+    // The two continuous signals the avatar's motion is driven by (M2.4).
+    // Both are already computed inside the loop; neither had a way out of it.
+    //
+    // `mic_level` is the RMS of the microphone measured against the noise
+    // gate this session is already tracking, not a raw amplitude: the gate is
+    // what "the user is talking" means here, and a raw level would read as
+    // loud in a noisy room and silent in a quiet one. 0 unless listening.
+    // `speak_level` is the raw RMS of what the speaker is playing, 0 when it
+    // is not playing anything.
+    float mic_level = 0.0f;
+    float speak_level = 0.0f;
     // Engine bring-up, for the loading screen. The progress is weighted by
     // measured load times, so it tracks the wait rather than the stage count,
     // and it never goes backwards: it stops where it is if a stage fails.
@@ -157,6 +174,8 @@ class VoiceSession {
   std::string usage_;
   std::string partial_;
   unsigned dictated_seq_ = 0;
+  unsigned turn_failed_seq_ = 0;
+  float mic_level_ = 0.0f;
   std::vector<Line> lines_;
   // Worker reports waiting for a gap in which to be spoken.
   std::vector<std::string> pending_announce_;

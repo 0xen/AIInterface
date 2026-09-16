@@ -1,6 +1,7 @@
 #include "audio/audio_out.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace aii {
@@ -63,6 +64,13 @@ void AudioOut::callback(ma_device* dev, void* out, const void*, ma_uint32 frames
   if (n > 0) std::memcpy(dst, self->buffer_.data() + self->read_pos_, n * sizeof(float));
   if (n < frames) std::memset(dst + n, 0, (frames - n) * sizeof(float));
   self->read_pos_ += n;
+  // Over the whole block, silence included: a half-filled block is genuinely
+  // half as loud, and the tail of a reply has to fall to zero rather than hold
+  // the last full block's level.
+  double sum = 0.0;
+  for (ma_uint32 i = 0; i < frames; ++i) sum += double(dst[i]) * double(dst[i]);
+  self->level_.store(frames ? static_cast<float>(std::sqrt(sum / double(frames))) : 0.0f,
+                     std::memory_order_relaxed);
 }
 
 }  // namespace aii
