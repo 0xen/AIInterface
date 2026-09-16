@@ -3,6 +3,7 @@
 #include "core/button_registry.h"
 #include "imgui.h"
 #include "imgui_layer.h"
+#include "pixel_icons.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -50,17 +51,13 @@ ImVec4 red_deep() { return ui_color(0.62f, 0.10f, 0.10f); }
 // folder on the toolbar and the arrows beside them, which are already drawn in
 // code. Chrome that could fail to load is chrome that can leave a button blank.
 //
-// Drawn as filled cells at a whole-number scale, and only a whole-number scale.
-// A 13-cell grid at 2x is 26 px and every cell is exactly 2x2; at 2.3x the
-// cells would alternate 2 and 3 px wide and the icon would read as mush, which
-// is the one thing an 8-bit icon may not do. The button is sized from the icon
-// rather than the icon fitted to the button, so the scale is never in question.
-constexpr int kIconCells = 13;
-constexpr float kIconScale = 2.0f;
-constexpr float kIconPx = kIconCells * kIconScale;
+// The grid, the integer scale and the draw call itself now live in
+// pixel_icons.h, because the sidebar strip (M4.3) draws its icons the same
+// way: same 13 cells, same whole-number scale, same two inks. The transport
+// row's own grids stay here — they are this panel's chrome — while the
+// sidebar's live with the shared code, since the strip will not be the only
+// surface that ever wants a cog.
 constexpr float kTransportButton = 30.0f;  // kIconPx plus 2 px of air all round
-
-using IconRows = const char* [kIconCells];
 
 // The microphone, five ways. Idle is the bare capsule-and-cradle; everything
 // else is that same shape with something added, so the button never changes
@@ -182,21 +179,6 @@ constexpr IconRows kIconStop = {
     ".............",
 };
 
-// One cell per filled character, snapped to whole pixels. `p` is the icon's
-// top-left in screen space and is floored for the same reason the scale is an
-// integer: half a pixel of origin undoes every bit of the alignment above.
-void draw_icon(ImDrawList* dl, const char* const* rows, ImVec2 p, ImU32 ink, ImU32 mark) {
-  const float x0 = std::floor(p.x), y0 = std::floor(p.y);
-  for (int r = 0; r < kIconCells; ++r) {
-    for (int c = 0; rows[r][c]; ++c) {
-      const char ch = rows[r][c];
-      if (ch == '.') continue;
-      const float x = x0 + c * kIconScale, y = y0 + r * kIconScale;
-      dl->AddRectFilled(ImVec2(x, y), ImVec2(x + kIconScale, y + kIconScale),
-                        ch == 'o' ? mark : ink);
-    }
-  }
-}
 
 // Same grading the shell status line uses: green below `amber`, amber up to
 // `red`, red from there. `pct` is 0..100.
@@ -316,23 +298,6 @@ void visibility_button(AvatarUiState& state, float size) {
 // job; until then a cog and a folder are a handful of lines each and keep the
 // bar in the same vector register as the rest of the widget.
 
-void draw_cog(ImDrawList* dl, ImVec2 c, float r, ImU32 col) {
-  dl->AddCircle(c, r * 0.58f, col, 16, 1.5f);
-  dl->AddCircleFilled(c, r * 0.17f, col, 10);
-  for (int i = 0; i < 6; ++i) {
-    const float a = 3.14159265f * 2.0f * static_cast<float>(i) / 6.0f;
-    dl->AddLine(ImVec2(c.x + std::cos(a) * r * 0.52f, c.y + std::sin(a) * r * 0.52f),
-                ImVec2(c.x + std::cos(a) * r, c.y + std::sin(a) * r), col, 1.7f);
-  }
-}
-
-void draw_folder(ImDrawList* dl, ImVec2 c, float r, ImU32 col) {
-  const float w = r * 0.98f, h = r * 0.74f;
-  // The tab first, then the body over it, so the two read as one shape.
-  dl->AddRectFilled(ImVec2(c.x - w, c.y - h), ImVec2(c.x - w * 0.18f, c.y - h * 0.45f), col, 1.5f);
-  dl->AddRectFilled(ImVec2(c.x - w, c.y - h * 0.62f), ImVec2(c.x + w, c.y + h), col, 2.0f);
-}
-
 // One bar button. Returns true on a click. Glyph buttons are square and match
 // the controls on the status row; a label button is as wide as its (already
 // capped) text. `avail` is what is left of the row: a button that would not fit
@@ -361,12 +326,15 @@ bool bar_button(const ToolbarButton& b, float size, float& avail, bool& first) {
                                                  : ImGuiCol_Button;
     dl->AddRectFilled(p, ImVec2(p.x + size, p.y + size), ImGui::GetColorU32(bg),
                       style.FrameRounding);
-    const ImVec2 c(p.x + size * 0.5f, p.y + size * 0.5f);
-    const ImU32 col = ImGui::GetColorU32(fg());
-    if (b.glyph == ButtonGlyph::Cog)
-      draw_cog(dl, c, size * 0.30f, col);
-    else
-      draw_folder(dl, c, size * 0.30f, col);
+    // The same 13x13 grids the strip draws, at 1x rather than 2x: this button
+    // is one frame height (~21 px) and 26 px would not fit in it. One icon,
+    // two sizes, no second drawing of a cog to keep in step with the first.
+    if (const char* const* rows = icon_for_glyph(b.glyph)) {
+      const ImU32 col = ImGui::GetColorU32(fg());
+      draw_icon(dl, rows, ImVec2(p.x + (size - kIconCells) * 0.5f,
+                                 p.y + (size - kIconCells) * 0.5f),
+                col, col, 1.0f);
+    }
   }
   if (ImGui::IsItemHovered() && !b.tooltip.empty()) ImGui::SetTooltip("%s", b.tooltip.c_str());
   return clicked;
@@ -383,7 +351,13 @@ void button_bar(AvatarUiState& state, bool loading, float width) {
   bool first = true;
   bool open_settings = false;
 
-  for (const ToolbarButton& b : ButtonRegistry::instance().snapshot()) {
+  // Only this surface's buttons. With the sidebar up that is the registered
+  // (text) ones alone — the cog and the folder moved to the strip, which is
+  // where an icon button belongs — and the row is empty until an agent
+  // registers something, costing the widget the ~27 px it used to spend on it.
+  // Without a strip the registry hands them back here (snapshot_for), so the
+  // settings surface is never unreachable.
+  for (const ToolbarButton& b : ButtonRegistry::instance().snapshot_for(ButtonSurface::Toolbar)) {
     // The cog alone stands down while the loading screen is up, for the same
     // reason the chat arrow does: the region it opens is withheld until the
     // engines are up, so the click would do nothing visible. The folder is
@@ -407,6 +381,11 @@ void button_bar(AvatarUiState& state, bool loading, float width) {
           state.refusal = err;
           state.refusal_left = kRefusalSeconds;
         }
+        break;
+      case ButtonActionKind::Invoke:
+        // M4.4: a window that registered itself. Only reachable here in the
+        // fallback (no strip), and it does exactly what the strip would do.
+        if (b.action.callback) b.action.callback();
         break;
     }
   }

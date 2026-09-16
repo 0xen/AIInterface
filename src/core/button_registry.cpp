@@ -60,11 +60,20 @@ ButtonRegistry::ButtonRegistry() {
   // The built-ins are entries like any other, first in the row. They are
   // constructed here rather than in the panel so that the panel never has a
   // list of its own to keep in step with this one.
+  //
+  // Both built-ins ask for the **sidebar** (M4.2/M4.3). They are icon buttons
+  // already — the only two this app had — and the strip is where an icon
+  // button belongs now that there is one; the panel's row keeps the text
+  // buttons an agent registers, which is the only place 8 characters can be
+  // read. Neither is mirrored: one button in two places is two things the
+  // user has to tell apart. snapshot_for() drops them back into the toolbar
+  // when the strip could not be created, so nothing is ever unreachable.
   ToolbarButton cog;
   cog.id = "settings";
   cog.glyph = ButtonGlyph::Cog;
   cog.tooltip = "Settings";
   cog.action.kind = ButtonActionKind::OpenSettings;
+  cog.surface = ButtonSurface::Sidebar;
   cog.builtin = true;
   buttons_.push_back(std::move(cog));
 
@@ -82,8 +91,77 @@ ButtonRegistry::ButtonRegistry() {
   dir.action.path = ec ? std::string() : cwd.string();
   dir.tooltip = "Open the working directory" +
                 (dir.action.path.empty() ? std::string() : "\n" + dir.action.path);
+  dir.surface = ButtonSurface::Sidebar;
   dir.builtin = true;
   buttons_.push_back(std::move(dir));
+}
+
+bool ButtonRegistry::add_app_button(const std::string& id, ButtonGlyph glyph,
+                                    const std::string& tooltip, ButtonSurface surface,
+                                    ButtonAction action, std::string* error) {
+  std::lock_guard<std::mutex> l(mutex_);
+  const auto refuse = [&](std::string why) {
+    if (error) *error = why;
+    status_.push_back(std::move(why));
+    return false;
+  };
+  if (!valid_id(id)) return refuse("app button id '" + id + "' is not a plain short name");
+  if (action.kind == ButtonActionKind::Invoke && !action.callback)
+    return refuse("app button '" + id + "' has no callback");
+  if (action.kind == ButtonActionKind::OpenPath) {
+    // The same check add_path_button makes, for the same reason: a button that
+    // does nothing when clicked is worse than one that was never added. The
+    // caller is trusted about intent, not about the filesystem — the avatar
+    // art directory is created by a seed that can fail.
+    std::error_code ec;
+    const std::filesystem::path p(action.path);
+    if (action.path.empty() || !std::filesystem::is_directory(p, ec) || ec)
+      return refuse("app button '" + id + "': not a directory: " + action.path);
+    action.path = p.string();
+  }
+
+  ToolbarButton b;
+  b.id = id;
+  b.glyph = glyph;
+  b.tooltip = tooltip;
+  b.action = std::move(action);
+  b.surface = surface;
+  b.builtin = true;  // not a registered button: the caps below do not apply
+  for (auto& existing : buttons_) {
+    if (existing.id != b.id) continue;
+    existing = std::move(b);
+    return true;
+  }
+  if (surface == ButtonSurface::Sidebar) {
+    std::size_t on_strip = 0;
+    for (const auto& e : buttons_)
+      if (e.surface == ButtonSurface::Sidebar) ++on_strip;
+    if (on_strip >= kSidebarButtonsMax)
+      return refuse("app button '" + b.id + "' refused: the strip already holds " +
+                    std::to_string(kSidebarButtonsMax));
+  }
+  buttons_.push_back(std::move(b));
+  return true;
+}
+
+void ButtonRegistry::set_sidebar_available(bool available) {
+  std::lock_guard<std::mutex> l(mutex_);
+  sidebar_available_ = available;
+}
+
+std::vector<ToolbarButton> ButtonRegistry::snapshot_for(ButtonSurface surface) const {
+  std::lock_guard<std::mutex> l(mutex_);
+  std::vector<ToolbarButton> out;
+  for (const ToolbarButton& b : buttons_) {
+    // The fallback, in its one place: without a strip, a sidebar button is a
+    // toolbar button. It keeps its glyph — the panel can draw a cog — and it
+    // keeps its order.
+    const ButtonSurface effective =
+        (b.surface == ButtonSurface::Sidebar && !sidebar_available_) ? ButtonSurface::Toolbar
+                                                                    : b.surface;
+    if (effective == surface) out.push_back(b);
+  }
+  return out;
 }
 
 bool ButtonRegistry::add_path_button(const std::string& id, const std::string& label,

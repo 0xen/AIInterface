@@ -17,8 +17,12 @@ add_executable(avatar
   imgui_layer.h
   loader_anim.cpp
   loader_anim.h
+  pixel_icons.cpp
+  pixel_icons.h
   settings.cpp
   settings.h
+  sidebar_window.cpp
+  sidebar_window.h
   voice_session.cpp
   voice_session.h
   watermark.cpp

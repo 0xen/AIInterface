@@ -26,11 +26,26 @@
 // rebuilt from the process's own working directory on every start, which is
 // the value that can actually change between runs.
 #include <cstddef>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace aii {
+
+// Where a button is drawn (M4.4). The sidebar is a real second OS window down
+// the left edge of the widget; the toolbar is the row inside the panel.
+//
+// The two surfaces are not interchangeable and the difference is what a button
+// *is*, not where it happens to sit: the sidebar is 48 px of icon, so only a
+// button with a pixel icon can live there, and the toolbar is a 360 px row of
+// text, which is the only place an agent's `Projects` label can be read. A
+// button therefore states its surface once, here, and neither drawing site has
+// a list of its own to keep in step.
+enum class ButtonSurface {
+  Toolbar,  // the row in the panel: text labels, agent-registered buttons
+  Sidebar,  // the strip beside the widget: icon-only, one pixel glyph each
+};
 
 // What a button does when it is clicked: a tagged value, not a callback, so
 // that the set of things a *registered* button can do stays closed. Adding a
@@ -38,8 +53,15 @@ namespace aii {
 // here and a case in the panel's dispatch; it does not reshape the registry or
 // widen what a script may ask for.
 enum class ButtonActionKind {
-  OpenSettings,  // M1c.3 fills this in; today it opens a placeholder popup
+  OpenSettings,  // toggles the panel's settings region
   OpenPath,      // opens `path` in Explorer — the only kind a script may ask for
+  // M4.4. An in-process callback, reachable only through add_app_button() and
+  // therefore never from anything a script or a reply can say. This is the
+  // kind M5's inspector and M6's editor use: a window registers its own
+  // button, with its own icon and its own toggle, and no layout code anywhere
+  // learns that it exists. It does not widen what a *registered* button may
+  // do, because the untrusted entry point (add_path_button) cannot produce it.
+  Invoke,
 };
 
 struct ButtonAction {
@@ -48,14 +70,22 @@ struct ButtonAction {
   // directory, or the button is refused rather than added, so a click can
   // never be the first time anyone finds out the path was nonsense.
   std::string path;
+  // Invoke only. Called on the frame loop's thread, from whichever surface
+  // drew the button.
+  std::function<void()> callback;
 };
 
-// There is no icon font in this build and merging one is M4's job, so a button
-// either draws one of the hand-drawn vector glyphs (the same register as the
-// chat arrow and the avatar-mode disc beside it) or shows a short text label.
+// Which glyph a button draws. `Label` is short text; everything else names a
+// picture. M4 decided against merging an icon font: this app already has an
+// icon idiom — 13x13 ASCII grids drawn at an integer scale through ImDrawList
+// (94ee2a7, the transport row) — and the sidebar uses the same one, so the
+// widget and the strip look like one thing. The grids themselves live in
+// `src/avatar/pixel_icons.*`; this enum is only the name, because the registry
+// is in aii_core and knows nothing about drawing.
+//
 // Registered buttons are always `Label`: a script cannot invent a glyph, and
 // letting it pick from the built-in ones would only produce two cogs.
-enum class ButtonGlyph { Label, Cog, Folder };
+enum class ButtonGlyph { Label, Cog, Folder, Avatar };
 
 struct ToolbarButton {
   std::string id;
@@ -63,6 +93,7 @@ struct ToolbarButton {
   std::string label;    // drawn when glyph == Label
   std::string tooltip;
   ButtonAction action;
+  ButtonSurface surface = ButtonSurface::Toolbar;
   bool builtin = false;
 };
 
@@ -77,6 +108,13 @@ constexpr std::size_t kButtonsMax = 4;         // registered buttons, built-ins 
 constexpr std::size_t kButtonLabelMax = 8;     // in characters, not bytes
 constexpr std::size_t kButtonTooltipMax = 96;  // ditto; a tooltip is one line
 constexpr std::size_t kButtonIdMax = 32;
+// The sidebar's own cap, and it is a physical one: the strip is as tall as its
+// buttons and it is docked to the top of the panel, which at its shortest is
+// ~168 px. Eight 40 px buttons plus their gaps is 356 px, taller than the
+// widget ever is when the chat is shut — so this is the number at which a
+// strip stops looking like part of the widget, not a security bound. M5, M6,
+// the workers panel and the terminal are four of the eight.
+constexpr std::size_t kSidebarButtonsMax = 8;
 
 class ButtonRegistry {
  public:
@@ -98,9 +136,37 @@ class ButtonRegistry {
                        const std::string& tooltip, const std::string& path,
                        std::string* error);
 
+  // M4.4. Registers a button from *inside this process*: a panel, a window or
+  // the frame loop, never a script and never a reply. That is why it may carry
+  // a callback and its own glyph when add_path_button may not — the input is
+  // code, so there is nothing to validate but the shape.
+  //
+  // This is the call M5's inspector and M6's editor make to put themselves on
+  // the sidebar. Neither the strip nor the panel is edited when they do: the
+  // surface picks the button up from the registry on the next frame.
+  //
+  // A duplicate id replaces in place, exactly as add_path_button does, so a
+  // window re-registering after a reopen does not grow a second button.
+  bool add_app_button(const std::string& id, ButtonGlyph glyph, const std::string& tooltip,
+                      ButtonSurface surface, ButtonAction action, std::string* error);
+
   // A copy, because the panel iterates it for a whole frame while the turn
   // thread may be registering into it. The list is tiny by construction.
   std::vector<ToolbarButton> snapshot() const;
+
+  // The buttons one surface should draw this frame, in registration order.
+  //
+  // It is a method rather than a filter at each call site because of the
+  // fallback rule, which has to live in exactly one place: **when there is no
+  // sidebar, its buttons fall back into the toolbar.** The strip is a second
+  // OS window, and there are three real ways not to have one — `--opaque`,
+  // `--vulkan`, and a `createTarget` that failed — and a build where the
+  // settings cog simply does not exist is a worse outcome than a cog in the
+  // row it used to be in. Nothing is ever drawn on both surfaces at once.
+  std::vector<ToolbarButton> snapshot_for(ButtonSurface surface) const;
+
+  // Told once, by whoever tried to create the strip, before the first frame.
+  void set_sidebar_available(bool available);
 
   // Drops every registered button, keeping the built-ins. Nothing calls this
   // yet; it is what a future `button clear` verb or a project switch needs.
@@ -120,6 +186,7 @@ class ButtonRegistry {
   mutable std::mutex mutex_;
   std::vector<ToolbarButton> buttons_;
   std::vector<std::string> status_;
+  bool sidebar_available_ = false;
 };
 
 // Opens a directory in Explorer. Separate from the registry because the
