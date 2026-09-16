@@ -2,18 +2,26 @@
 // always-on-top window on the rend engine (D3D12 backend: on this AMD GPU
 // only D3D12's composition swapchain gives per-pixel alpha; Vulkan's WSI
 // composites opaque). The top shows the placeholder avatar (a spinning cube);
-// below it a GDI-rendered panel carries the usage readout, the transcript
+// below it an ImGui panel carries the usage status bar, the collapsible chat
 // and the Talk / Silence / Pause buttons. The voice loop itself lives in
 // VoiceSession (engines from aii_core).
+//
+// The panel auto-sizes to its content and the window follows it, so closing
+// the chat shrinks the whole widget back into the corner instead of leaving a
+// transparent rectangle that still swallows clicks meant for the desktop.
 //
 //   avatar [--opaque] [--seconds S] [--vulkan] [--say "text"] [--no-voice]
 //     --opaque    decorated opaque window (fallback / debugging)
 //     --seconds   quit automatically after S seconds (scripted runs)
-//     --vulkan    use the Vulkan backend (transparency will not work here)
+//     --vulkan    use the Vulkan backend (no transparency, and no UI: the
+//                 ImGui layer is D3D12 only)
 //     --say       send this text as the first user turn once the engines are up
 //     --no-voice  window only, no engines (layout work)
 //
-//   SPACE / Talk    start listening; again to stop and send (barge-in while speaking)
+//   SPACE / Talk    toggle the mic: click to listen, click again to mute
+//                   (unmuting mid-reply barges in). While the mic is on, a
+//                   pause in speech sends that utterance and the mic reopens
+//                   after the reply, so one click carries a conversation
 //   S / Silence     stop the audio, keep the text
 //   E / Pause       cancel the reply in flight
 //   Esc / Q         quit
@@ -35,7 +43,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
-#include <array>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -45,8 +53,10 @@
 #include <string>
 #include <vector>
 
+#include "avatar_ui.h"
 #include "core/config.h"
-#include "ui/gdi_canvas.h"
+#include "imgui_layer.h"
+#include "loader_anim.h"
 #include "voice_session.h"
 
 using namespace rend;
@@ -55,13 +65,20 @@ namespace {
 
 // ---- layout (pixels) ----
 constexpr std::uint32_t kWindowW = 360;
-constexpr std::uint32_t kWindowH = 640;
-constexpr std::uint32_t kCubeH = 260;                      // avatar area at the top
-constexpr std::uint32_t kPanelY = kCubeH;                  // panel below it
-constexpr std::uint32_t kPanelH = kWindowH - kPanelY;
-constexpr float kPanelAlpha = 0.96f;
-constexpr int kButtonH = 40;
-constexpr int kPad = 8;
+constexpr std::uint32_t kWindowH = 640;   // starting height; the panel sets the rest
+constexpr std::uint32_t kCubeH = 260;     // avatar area at the top
+constexpr float kFontPx = 15.0f;
+constexpr int kCornerMargin = 16;
+// M1.5: the loading screen hands over to the avatar across this many seconds,
+// the loader fading out as the cube fades in. Long enough to read as the
+// widget settling, short enough that it is not a dissolve you wait through.
+constexpr float kHandoffSeconds = 0.42f;
+// M1.6: how long the avatar takes to fade in or out when the visibility mode
+// changes, or when "shown when talking" follows the session in and out of a
+// turn. Much shorter than the handoff on purpose — this is an answer to
+// something that just happened, not an opening — but long enough that the
+// listening → thinking → speaking sequence reads as a fade and not a blink.
+constexpr float kVisibilitySeconds = 0.16f;
 
 // Mirrors CubeFrame in shaders/cube.hlsl.
 struct CubeFrame {
@@ -72,14 +89,6 @@ struct CubeFrame {
 };
 static_assert(sizeof(CubeFrame) == 160);
 
-// Mirrors the header in shaders/panel.hlsl.
-struct PanelHeader {
-    std::uint32_t winW, winH, x, y, w, h;
-    float alpha;
-    std::uint32_t stride; // bytes per slot region (read from slot 0 by the shader)
-};
-static_assert(sizeof(PanelHeader) == 32);
-
 struct Push {
     std::uint32_t slot;
     std::uint32_t pad;
@@ -87,6 +96,14 @@ struct Push {
 
 constexpr std::uint32_t kSlots = gpu::FrameRenderer::kFramesInFlight;
 constexpr float kPi = 3.14159265358979f;
+
+// Hermite ramp from 0 at `a` to 1 at `b`. Both ends of the handoff need to
+// start and stop without an edge, and the two fades run over different
+// sub-ranges of it, so a bare t*t*(3-2t) is not enough.
+float smoothstep(float a, float b, float x) {
+    const float s = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
+    return s * s * (3.0f - 2.0f * s);
+}
 
 math::Mat4 rotationY(float a) {
     math::Mat4 m{};
@@ -112,17 +129,23 @@ math::Mat4 rotationX(float a) {
     return m;
 }
 
-// Pins the window to the bottom-right of the primary monitor's work area,
-// keeps it above every other window and off the taskbar.
-void pinToCorner(HWND hwnd, int width, int height) {
+// Places the window in the bottom-right of the primary monitor's work area.
+// The anchor is the bottom edge, so a height change grows or shrinks the
+// window upward and the corner it sits in never moves.
+void placeInCorner(HWND hwnd, int width, int height) {
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    const int margin = 16;
-    const int x = work.right - width - margin;
-    const int y = work.bottom - height - margin;
+    SetWindowPos(hwnd, HWND_TOPMOST, work.right - width - kCornerMargin,
+                 work.bottom - height - kCornerMargin, width, height, SWP_NOACTIVATE);
+}
+
+// Keeps the window above every other one and off the taskbar, then places it.
+void pinToCorner(HWND hwnd, int width, int height) {
     LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW);
-    SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+    placeInCorner(hwnd, width, height);
 }
 
 std::string utf8FromWide(const wchar_t* w) {
@@ -131,104 +154,6 @@ std::string utf8FromWide(const wchar_t* w) {
     std::string s(static_cast<std::size_t>(len - 1), '\0');
     WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), len, nullptr, nullptr);
     return s;
-}
-
-struct Button {
-    const char* label;
-    int x, y, w, h;
-    bool hit(float px, float py) const {
-        return px >= x && px < x + w && py >= y && py < y + h;
-    }
-};
-
-// Draws the whole panel (usage, status, transcript, buttons) into the canvas.
-// Coordinates are panel-local; the shader places the panel at kPanelY.
-void drawPanel(aii::GdiCanvas& canvas, const aii::VoiceSession::Snapshot& snap,
-               const std::array<Button, 3>& buttons, bool voiceEnabled) {
-    using aii::Color;
-    const Color bg{22, 24, 30};
-    const Color dim{150, 155, 170};
-    const Color fg{232, 234, 240};
-    const Color user{255, 196, 120};
-    const Color claude{150, 205, 255};
-    const Color accent{214, 84, 74};
-    const Color button{54, 58, 72};
-    const int w = canvas.width();
-    canvas.clear(bg);
-
-    int y = kPad;
-    // Usage readout under the avatar.
-    const std::string usage = snap.usage.empty() ? "usage: (after the first reply)" : snap.usage;
-    y += canvas.text(kPad, y, w - 2 * kPad, 36, usage, 13, dim, false, DT_WORD_ELLIPSIS) + 4;
-    // State + status line.
-    std::string status = voiceEnabled ? std::string("[") + aii::VoiceSession::state_name(snap.state) + "] " + snap.status
-                                      : "(no voice: --no-voice)";
-    canvas.text(kPad, y, w - 2 * kPad, 18, status, 13,
-                snap.state == aii::VoiceSession::State::Listening ? accent : fg, true,
-                DT_END_ELLIPSIS | DT_SINGLELINE);
-    y += 24;
-
-    // Worker strip: one line per background instance, with what it is doing.
-    if (!snap.workers.empty()) {
-        const Color barBg{34, 38, 48};
-        const int rows = static_cast<int>(snap.workers.size());
-        const int stripH = rows * 17 + 8;
-        canvas.fill_rect(kPad, y, w - 2 * kPad, stripH, barBg);
-        int wy = y + 4;
-        for (const auto& k : snap.workers) {
-            Color tone = dim;
-            switch (k.state) {
-                case aii::WorkerPool::State::Working: tone = Color{140, 225, 170}; break;
-                case aii::WorkerPool::State::Done: tone = Color{150, 205, 255}; break;
-                case aii::WorkerPool::State::Failed: tone = accent; break;
-                default: break;
-            }
-            const std::string line =
-                k.name + " [" + aii::worker_state_name(k.state) + "] " + k.activity +
-                (k.tool_calls ? "  x" + std::to_string(k.tool_calls) : std::string());
-            canvas.text(kPad + 6, wy, w - 2 * kPad - 12, 16, line, 12, tone, false,
-                        DT_END_ELLIPSIS | DT_SINGLELINE);
-            wy += 17;
-        }
-        y += stripH + 6;
-    }
-
-    // Transcript: newest at the bottom, filling upward.
-    const int transcriptTop = y;
-    const int transcriptBottom = buttons[0].y - kPad;
-    const int textW = w - 2 * kPad;
-    int cursor = transcriptBottom;
-    if (!snap.partial.empty()) {
-        const std::string line = "You: " + snap.partial;
-        const int h = canvas.measure(textW, line, 14);
-        cursor -= h;
-        canvas.text(kPad, cursor, textW, h, line, 14, accent);
-        cursor -= 4;
-    }
-    for (auto it = snap.lines.rbegin(); it != snap.lines.rend() && cursor > transcriptTop; ++it) {
-        if (it->text.empty()) continue;
-        const std::string line = (it->user ? "You: " : "Claude: ") + it->text;
-        const int h = canvas.measure(textW, line, 14);
-        cursor -= h;
-        if (cursor < transcriptTop) {
-            // Clip the oldest visible line at the top rather than skipping it.
-            canvas.text(kPad, transcriptTop, textW, cursor + h - transcriptTop, line, 14,
-                        it->user ? user : claude);
-            break;
-        }
-        canvas.text(kPad, cursor, textW, h, line, 14, it->user ? user : claude);
-        cursor -= 6;
-    }
-
-    // Buttons.
-    for (std::size_t i = 0; i < buttons.size(); ++i) {
-        const Button& b = buttons[i];
-        Color fill = button;
-        if (i == 0 && snap.state == aii::VoiceSession::State::Listening) fill = accent;
-        canvas.fill_rect(b.x, b.y, b.w, b.h, fill);
-        canvas.frame_rect(b.x, b.y, b.w, b.h, Color{90, 95, 115});
-        canvas.text(b.x, b.y + (b.h - 18) / 2, b.w, 18, b.label, 14, fg, true, DT_CENTER | DT_SINGLELINE);
-    }
 }
 
 } // namespace
@@ -351,32 +276,36 @@ int main(int /*argc*/, char** /*argv*/) {
     // Premultiplied (0,0,0,0): the desktop shows through wherever nothing is drawn.
     renderer->setClearColor(0.0f, 0.0f, 0.0f, transparent ? 0.0f : 1.0f);
 
-    // ---- GPU resources: cube frames (binding 40) and the panel pixels (binding 41) ----
+    // ---- the UI ----
+    // D3D12 only. Under --vulkan the window still runs, just without a panel;
+    // that path exists to compare backends, and transparency is already gone
+    // there anyway.
+    std::string uiError;
+    auto ui = aii::ImGuiLayer::create(*device, swapchain->imageFormat(), kFontPx, &uiError);
+    if (!ui) log::warn("no UI this run: {}", uiError);
+
+    // ---- GPU resources: the cubes' per-slot frame records (binding 40) ----
     auto tableResult = gpu::DescriptorTable::create(
-        *device, gpu::DescriptorTableDesc{.maxTextures = 1, .userStorageBuffers = 2});
+        *device, gpu::DescriptorTableDesc{.maxTextures = 1, .userStorageBuffers = 1});
     if (!tableResult) {
         log::error("descriptor table: {}", tableResult.error().message);
         return 1;
     }
     auto table = std::move(tableResult).value();
 
-    auto makeHostBuffer = [&](std::uint64_t size, const char* what) -> std::unique_ptr<gpu::Buffer> {
-        auto r = gpu::Buffer::create(*device, {.size = size,
-                                               .usage = gpu::kUsageStorage,
-                                               .location = gpu::MemoryLocation::HostVisible});
-        if (!r) {
-            log::error("{} buffer: {}", what, r.error().message);
-            return nullptr;
-        }
-        std::memset(r.value()->mapped(), 0, static_cast<std::size_t>(size));
-        return std::move(r).value();
-    };
-    auto cubeBuffer = makeHostBuffer(std::uint64_t{kSlots} * sizeof(CubeFrame), "cube");
-    const std::uint32_t panelStride = static_cast<std::uint32_t>(sizeof(PanelHeader)) + kWindowW * kPanelH * 4;
-    auto panelBuffer = makeHostBuffer(std::uint64_t{kSlots} * panelStride, "panel");
-    if (!cubeBuffer || !panelBuffer) return 1;
+    // One record per frame slot; the shader indexes it by the push constant.
+    constexpr std::size_t kRecords = kSlots;
+    auto cubeBufferResult = gpu::Buffer::create(
+        *device, {.size = std::uint64_t{kRecords} * sizeof(CubeFrame),
+                  .usage = gpu::kUsageStorage,
+                  .location = gpu::MemoryLocation::HostVisible});
+    if (!cubeBufferResult) {
+        log::error("cube buffer: {}", cubeBufferResult.error().message);
+        return 1;
+    }
+    auto cubeBuffer = std::move(cubeBufferResult).value();
+    std::memset(cubeBuffer->mapped(), 0, kRecords * sizeof(CubeFrame));
     table->writeStorageBuffer(table->userStorageBinding(0), *cubeBuffer);
-    table->writeStorageBuffer(table->userStorageBinding(1), *panelBuffer);
 
     const auto shaderDir = executableDirectory() / "data" / "shaders";
     auto loadShader = [&](const char* file) -> std::unique_ptr<gpu::Shader> {
@@ -389,27 +318,58 @@ int main(int /*argc*/, char** /*argv*/) {
     };
     auto cubeVs = loadShader("cube.vert.spv");
     auto cubePs = loadShader("cube.frag.spv");
-    auto panelVs = loadShader("panel.vert.spv");
-    auto panelPs = loadShader("panel.frag.spv");
-    if (!cubeVs || !cubePs || !panelVs || !panelPs) return 1;
+    if (!cubeVs || !cubePs) return 1;
 
-    auto makePipeline = [&](gpu::Shader& vs, gpu::Shader& ps, const char* what) -> std::unique_ptr<gpu::Pipeline> {
-        gpu::GraphicsPipelineDesc desc{};
-        desc.vertexShader = &vs;
-        desc.fragmentShader = &ps;
-        desc.colorFormat = swapchain->imageFormat();
-        desc.pushConstantBytes = sizeof(Push);
-        desc.descriptorTable = table.get();
-        auto r = gpu::Pipeline::createGraphics(*device, desc);
-        if (!r) {
-            log::error("{} pipeline: {}", what, r.error().message);
-            return nullptr;
-        }
-        return std::move(r).value();
-    };
-    auto cubePipeline = makePipeline(*cubeVs, *cubePs, "cube");
-    auto panelPipeline = makePipeline(*panelVs, *panelPs, "panel");
-    if (!cubePipeline || !panelPipeline) return 1;
+    gpu::GraphicsPipelineDesc cubeDesc{};
+    cubeDesc.vertexShader = cubeVs.get();
+    cubeDesc.fragmentShader = cubePs.get();
+    cubeDesc.colorFormat = swapchain->imageFormat();
+    cubeDesc.pushConstantBytes = sizeof(Push);
+    cubeDesc.descriptorTable = table.get();
+    auto cubePipelineResult = gpu::Pipeline::createGraphics(*device, cubeDesc);
+    if (!cubePipelineResult) {
+        log::error("cube pipeline: {}", cubePipelineResult.error().message);
+        return 1;
+    }
+    auto cubePipeline = std::move(cubePipelineResult).value();
+
+    // The loader's full-screen triangle. It shares the descriptor table only
+    // because the D3D12 backend's root signature lives there; the shader
+    // reads nothing from it, so the pass never binds it — ImGui has just set
+    // its own descriptor heap on this command list and re-pointing the root
+    // table into a heap that is no longer bound would be worse than leaving
+    // a parameter the shader does not touch unset.
+    auto loaderVs = loadShader("loader.vert.spv");
+    auto loaderPs = loadShader("loader.frag.spv");
+    if (!loaderVs || !loaderPs) return 1;
+
+    gpu::GraphicsPipelineDesc loaderDesc{};
+    loaderDesc.vertexShader = loaderVs.get();
+    loaderDesc.fragmentShader = loaderPs.get();
+    loaderDesc.colorFormat = swapchain->imageFormat();
+    loaderDesc.pushConstantBytes = sizeof(aii::LoaderPush);
+    loaderDesc.descriptorTable = table.get();
+    // The window is premultiplied-transparent and the cubes are antialiased
+    // by coverage, so their silhouette has to blend over the scrim and the
+    // panel rather than overwrite them.
+    loaderDesc.alphaBlend = true;
+    auto loaderPipelineResult = gpu::Pipeline::createGraphics(*device, loaderDesc);
+    if (!loaderPipelineResult) {
+        log::error("loader pipeline: {}", loaderPipelineResult.error().message);
+        return 1;
+    }
+    auto loaderPipeline = std::move(loaderPipelineResult).value();
+
+    std::uint32_t width = extent.width;
+    std::uint32_t height = extent.height;
+    // The loader's frame state. Both recorders below read it: the loading
+    // screen covers the whole window, so it also decides whether the avatar
+    // placeholder draws at all. During the M1.5 handoff the two overlap —
+    // `loading` stays true while the loader still has any opacity left, and
+    // `avatarAlpha` rises from 0 over the same frames.
+    bool loading = false;
+    float avatarAlpha = 0.0f;
+    aii::LoaderPush loaderPush{};
 
     renderer->setFramePasses({
         gpu::FramePass{
@@ -417,6 +377,13 @@ int main(int /*argc*/, char** /*argv*/) {
             .name = "avatar-cube",
             .record =
                 [&](gpu::CommandContext& cmd, const gpu::PassContext& ctx) {
+                    // Withheld outright until the handoff starts: while the
+                    // loading screen owns the window, a second unrelated cube
+                    // sitting behind the scrim is just noise. From the first
+                    // frame of the fade it draws at a rising alpha instead
+                    // (CubeFrame::tint.w). The frame renderer re-records this
+                    // pass every frame, so skipping the record is enough.
+                    if (avatarAlpha <= 0.0f) return;
                     cmd.setViewport(0.0f, 0.0f, static_cast<float>(ctx.width), static_cast<float>(kCubeH));
                     cmd.setScissor(0, 0, ctx.width, kCubeH);
                     cmd.bindPipeline(*cubePipeline);
@@ -426,63 +393,76 @@ int main(int /*argc*/, char** /*argv*/) {
                     cmd.draw(36);
                 },
         },
-        gpu::FramePass{
-            .point = gpu::PassPoint::InScene,
-            .name = "avatar-panel",
-            .record =
-                [&](gpu::CommandContext& cmd, const gpu::PassContext& ctx) {
-                    cmd.setViewport(0.0f, 0.0f, static_cast<float>(ctx.width), static_cast<float>(ctx.height));
-                    cmd.setScissor(0, 0, ctx.width, ctx.height);
-                    cmd.bindPipeline(*panelPipeline);
-                    cmd.bindDescriptorTable(*panelPipeline, *table);
-                    const Push push{.slot = ctx.slot, .pad = 0};
-                    cmd.pushConstants(*panelPipeline, &push, sizeof(push));
-                    cmd.draw(6);
-                },
-        },
     });
 
-    // ---- the panel canvas and its buttons (panel-local coordinates) ----
-    aii::GdiCanvas canvas(static_cast<int>(kWindowW), static_cast<int>(kPanelH));
-    const int buttonW = (static_cast<int>(kWindowW) - 4 * kPad) / 3;
-    const int buttonY = static_cast<int>(kPanelH) - kButtonH - kPad;
-    const std::array<Button, 3> buttons{{
-        {"Talk", kPad, buttonY, buttonW, kButtonH},
-        {"Silence", 2 * kPad + buttonW, buttonY, buttonW, kButtonH},
-        {"Pause", 3 * kPad + 2 * buttonW, buttonY, buttonW, kButtonH},
-    }};
-    std::array<std::uint64_t, kSlots> slotPanelVersion{};
-    std::uint64_t panelVersion = 1;
-    std::string lastPanelKey;
+    // The panel rides the engine's overlay pass: its own command buffer after
+    // the scene, inside a rendering pass on the swapchain image. The loading
+    // cubes are recorded after the panel, over the whole window with no
+    // scissor — that ordering is the whole reason they live here and not in
+    // the InScene pass, which runs before the overlay and is clipped to the
+    // avatar band.
+    if (ui) {
+        renderer->setOverlayRecorder([&](gpu::CommandContext& cmd) {
+            ui->end_frame(cmd);
+            if (!loading) return;
+            cmd.setViewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
+            cmd.setScissor(0, 0, width, height);
+            cmd.bindPipeline(*loaderPipeline);
+            cmd.pushConstants(*loaderPipeline, &loaderPush, sizeof(loaderPush));
+            cmd.draw(3, 1);
+        });
+    }
+
+    aii::AvatarUiState uiState;
 
     log::info("avatar live: {}x{} {} {}", extent.width, extent.height,
               transparent ? "transparent" : "opaque", gpu::apiName(api));
 
     const auto start = std::chrono::steady_clock::now();
-    std::uint32_t width = extent.width;
-    std::uint32_t height = extent.height;
+    double lastT = 0.0;
+    std::uint32_t windowH = kWindowH;  // what the OS window was last set to
+    // Resizing the window from inside the frame does not come back as a
+    // Resized event, so the swapchain has to be told separately — and only
+    // between frames, never after the panel has been built for the old size.
+    std::uint32_t pendingH = 0;
     bool running = true;
     bool saidOnce = sayText.empty();
+    bool spaceDown = false;  // SPACE is the keyboard half of the mic latch
+    // M1.5 handoff: 0 while the engines are still loading, then driven to 1
+    // over kHandoffSeconds. The last stage name and the bar are frozen at the
+    // moment loading ended, so the caption does not blank out mid-fade — the
+    // session clears them the instant it goes idle.
+    float handoff = 0.0f;
+    std::string loaderStage;
+    float loaderProgress = 0.0f;
+    // M1.6 visibility fade, 0..1. Negative means "no first frame yet": it then
+    // snaps to whatever the mode already asks for, so the default mode does
+    // not fade the avatar band in from nothing behind the loading screen.
+    float visFade = -1.0f;
     while (running) {
         for (const auto& event : backend->pumpEvents()) {
+            // The UI sees every event first. Nothing below competes for the
+            // mouse any more — the buttons are ImGui widgets — so the
+            // "consumed" answer only starts mattering once the panel grows a
+            // text field that wants the keyboard.
+            if (ui) ui->handle_event(event);
             switch (event.type) {
             case platform::Event::Type::CloseRequested:
                 running = false;
                 break;
             case platform::Event::Type::KeyDown:
                 if (event.key == platform::Key::Escape || event.key == platform::Key::Q) running = false;
-                else if (session && event.key == platform::Key::Space) session->toggle_talk();
+                // SDL repeats KeyDown while a key is held; only the first
+                // one is an edge, so a leaned-on SPACE does not flap the latch.
+                else if (event.key == platform::Key::Space) {
+                    if (!spaceDown && session) session->toggle_mic();
+                    spaceDown = true;
+                }
                 else if (session && event.key == platform::Key::S) session->silence();
                 else if (session && event.key == platform::Key::E) session->pause();
                 break;
-            case platform::Event::Type::MouseButtonDown:
-                if (session && event.button == platform::MouseButton::Left) {
-                    const float px = event.mouseX;
-                    const float py = event.mouseY - static_cast<float>(kPanelY);
-                    if (buttons[0].hit(px, py)) session->toggle_talk();
-                    else if (buttons[1].hit(px, py)) session->silence();
-                    else if (buttons[2].hit(px, py)) session->pause();
-                }
+            case platform::Event::Type::KeyUp:
+                if (event.key == platform::Key::Space) spaceDown = false;
                 break;
             case platform::Event::Type::Resized:
                 width = event.size.width;
@@ -495,10 +475,32 @@ int main(int /*argc*/, char** /*argv*/) {
         }
         const double t =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        const float dt = static_cast<float>(t - lastT);
+        lastT = t;
         if (seconds >= 0.0 && t >= seconds) running = false;
         if (width == 0 || height == 0) continue;
 
-        // ---- voice loop tick + panel redraw when anything changed ----
+        // The height the panel asked for last frame. Everything that sizes
+        // itself from the window reads `height`, the loading overlay included,
+        // so the swapchain has to follow the window rather than be cropped by
+        // it — the loader centres itself, and a stale height puts it low
+        // enough to land on the panel.
+        if (pendingH != 0) {
+            height = pendingH;
+            pendingH = 0;
+            // The OS window is moved here too, immediately before the
+            // swapchain that has to match it. Doing it where the panel asked
+            // (mid-frame) left one present in between, in which DWM showed the
+            // old surface pinned to the top of a window that had already grown
+            // — the panel jumping to the ceiling with bare desktop under it.
+            // Invisible at one resize per chat click, obvious now that "shown
+            // when talking" resizes on every turn.
+            if (transparent && hwnd) placeInCorner(hwnd, static_cast<int>(kWindowW),
+                                                   static_cast<int>(height));
+            renderer->resize(width, height);
+        }
+
+        // ---- voice loop tick ----
         aii::VoiceSession::Snapshot snap;
         if (session) {
             session->update();
@@ -508,17 +510,86 @@ int main(int /*argc*/, char** /*argv*/) {
                 session->say(sayText);
             }
         }
-        std::string panelKey = aii::VoiceSession::state_name(snap.state);
-        panelKey += '|' + snap.status + '|' + snap.usage + '|' + snap.partial;
-        for (const auto& l : snap.lines) panelKey += (l.user ? "\nU:" : "\nC:") + l.text;
-        for (const auto& k : snap.workers) {
-            panelKey += "\nW:" + k.name + aii::worker_state_name(k.state) + k.activity +
-                        std::to_string(k.tool_calls);
+
+        // ---- the loading overlay, and the handoff out of it ----
+        // With --no-voice there is no session and the snapshot stays Loading,
+        // which is the long window the animation is tuned in.
+        if (snap.state == aii::VoiceSession::State::Loading) {
+            handoff = 0.0f;
+            // Only while there is one: the session clears the stage name as
+            // the last stage completes, a frame or two before it leaves
+            // Loading, so taking it unconditionally would freeze an empty
+            // caption and the loading screen would lose its label first.
+            if (!snap.load_stage.empty()) loaderStage = snap.load_stage;
+            loaderProgress = snap.load_progress;
+        } else if (handoff < 1.0f) {
+            // The bar runs to full as the loader leaves rather than stopping
+            // wherever the last stage left it; the caption holds that stage.
+            loaderProgress = 1.0f;
+            handoff = std::min(1.0f, handoff + dt / kHandoffSeconds);
         }
-        if (panelKey != lastPanelKey) {
-            lastPanelKey = std::move(panelKey);
-            drawPanel(canvas, snap, buttons, session != nullptr);
-            ++panelVersion;
+        // Staggered rather than strictly complementary. An even crossfade puts
+        // both sets of cubes at half strength through the middle, which reads
+        // as two overlaid animations rather than one handing over; the loader
+        // is most of the way out before the avatar has any real presence, and
+        // the two still coexist across the middle third.
+        const float loaderAlpha = 1.0f - smoothstep(0.00f, 0.62f, handoff);
+        loading = loaderAlpha > 0.0f;
+
+        // M1.6: the same alpha the handoff drives, now also carrying the
+        // visibility mode. Multiplying rather than choosing is what makes the
+        // end of loading right in every mode: in a mode that does not want the
+        // avatar yet, `vis` is already 0, so the handoff fades the loader out
+        // to nothing instead of crossfading into a cube that then vanishes.
+        const bool avatarWanted = aii::avatar_visible(uiState.avatar_mode, snap.state);
+        if (visFade < 0.0f) visFade = avatarWanted ? 1.0f : 0.0f;
+        visFade = std::clamp(visFade + (avatarWanted ? dt : -dt) / kVisibilitySeconds, 0.0f, 1.0f);
+        const float vis = smoothstep(0.0f, 1.0f, visFade);
+        avatarAlpha = smoothstep(0.30f, 1.00f, handoff) * vis;
+        // The band is reserved while anything might still draw in it, and
+        // always while the loading screen is up: that overlay covers the whole
+        // window and is centred in it, so a mode that hides the avatar gives
+        // the 260 px back when the loader leaves rather than shrinking the
+        // window out from under it. The resize itself goes through pendingH
+        // below — never from inside the frame (M1.4).
+        const std::uint32_t band = (loading || visFade > 0.0f) ? kCubeH : 0;
+        if (loading) loaderPush = aii::loader_push(t, width, height, loaderAlpha);
+        // The panel is released on the first frame of the handoff, not held for
+        // it: its one discrete change (the usage row, the state line, the live
+        // buttons) then lands under the scrim at full strength, and everything
+        // after it is opacity alone. Holding it instead put that change a
+        // tenth of a second past the loader's last frame, on a window where
+        // nothing else was moving, which read as a glitch rather than a settle.
+        // With the chat closed by default the panel is the same height loading
+        // or idle, so nothing resizes across the fade and there is no window
+        // growth left to place — except in a mode that hides the avatar, where
+        // the band is given back on the frame the loader finally leaves.
+
+        // ---- the panel ----
+        if (ui) {
+            ui->begin_frame(width, height, dt);
+            const aii::AvatarUiResult r =
+                aii::draw_avatar_ui(uiState, snap, session != nullptr,
+                                    session && session->mic_open(), kWindowW, band);
+            if (session) {
+                if (r.talk_clicked) session->toggle_mic();
+                if (r.silence) session->silence();
+                if (r.pause) session->pause();
+            }
+            // The scrim and the caption belong to the loader, not the panel:
+            // the loading screen has to look the same whether or not there is
+            // anything underneath it. The foreground draw list puts them over
+            // the panel; the cubes then go over them in the overlay recorder.
+            if (loading) {
+                aii::draw_loader_backdrop(loaderStage, loaderProgress, width, height, loaderAlpha);
+            }
+            // Follow the panel's own height. Only the borderless window gets
+            // resized: the decorated fallback has a frame to account for and
+            // exists for debugging, where a fixed size is easier to reason about.
+            if (transparent && hwnd && r.desired_height != 0 && r.desired_height != windowH) {
+                windowH = r.desired_height;
+                pendingH = windowH;
+            }
         }
 
         if (auto r = renderer->waitFrameSlot(); !r) {
@@ -527,7 +598,8 @@ int main(int /*argc*/, char** /*argv*/) {
         }
         const std::uint32_t slot = renderer->frameSlot();
 
-        // Cube: this slot's frame record.
+        // Cube: this slot's frame record, written after the slot has been
+        // waited on so the GPU is no longer reading it.
         const float aspect = static_cast<float>(width) / static_cast<float>(kCubeH);
         const math::Vec3 eye{0.0f, 0.0f, 3.2f};
         const math::Mat4 model = math::mul(rotationY(static_cast<float>(t) * 0.9f),
@@ -541,6 +613,7 @@ int main(int /*argc*/, char** /*argv*/) {
         frame.cameraPos[1] = eye.y;
         frame.cameraPos[2] = eye.z;
         frame.tint[0] = frame.tint[1] = frame.tint[2] = 1.0f;
+        frame.tint[3] = avatarAlpha;  // the handoff fade; the shader premultiplies
         if (snap.state == aii::VoiceSession::State::Listening) {
             frame.tint[0] = 1.0f; frame.tint[1] = 0.55f; frame.tint[2] = 0.5f;  // reddish while listening
         } else if (snap.state == aii::VoiceSession::State::Thinking) {
@@ -548,17 +621,6 @@ int main(int /*argc*/, char** /*argv*/) {
             frame.tint[0] = frame.tint[1] = frame.tint[2] = pulse;
         }
         static_cast<CubeFrame*>(cubeBuffer->mapped())[slot] = frame;
-
-        // Panel: copy the canvas into this slot's region when it is stale.
-        if (slotPanelVersion[slot] != panelVersion) {
-            slotPanelVersion[slot] = panelVersion;
-            auto* region = static_cast<std::uint8_t*>(panelBuffer->mapped()) + std::size_t{slot} * panelStride;
-            PanelHeader header{.winW = width, .winH = height, .x = 0, .y = kPanelY,
-                               .w = kWindowW, .h = kPanelH, .alpha = transparent ? kPanelAlpha : 1.0f,
-                               .stride = panelStride};
-            std::memcpy(region, &header, sizeof(header));
-            std::memcpy(region + sizeof(header), canvas.pixels(), canvas.bytes());
-        }
 
         if (auto r = renderer->drawFrame(nullptr); !r) {
             log::error("draw: {}", r.error().message);
@@ -568,6 +630,9 @@ int main(int /*argc*/, char** /*argv*/) {
     const auto stats = renderer->takeStats();
     log::info("avatar exit: {} frames", stats.frames);
     renderer->waitIdle();
+    // The overlay recorder captures `ui`, so drop it from the renderer first.
+    renderer->setOverlayRecorder(nullptr);
+    ui.reset();
     session.reset();
     return 0;
 }

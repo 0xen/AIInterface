@@ -9,7 +9,13 @@ namespace aii {
 
 class Recognizer {
  public:
-  Recognizer(const std::string& model_dir, int num_threads);
+  // `endpoint_silence` is the trailing pause, in seconds, after which the
+  // decoder is willing to call the utterance finished. It counts frames the
+  // transducer decoded as blank, which is not the same as the microphone
+  // being quiet — a slow or hesitant speaker produces blanks mid-sentence —
+  // so callers that act on is_endpoint() should corroborate it with the
+  // actual input level rather than trusting it alone.
+  Recognizer(const std::string& model_dir, int num_threads, float endpoint_silence = 1.0f);
   ~Recognizer();
   Recognizer(const Recognizer&) = delete;
   Recognizer& operator=(const Recognizer&) = delete;
@@ -22,6 +28,10 @@ class Recognizer {
   void begin();                                     // start a fresh utterance
   void feed(const float* samples, int n, int rate); // decode as much as available
   std::string partial();                            // text so far
+  // True once the decoder has seen enough trailing silence to call the
+  // utterance finished (the rule* thresholds in the .cpp). Push-to-talk
+  // ignores this; hold-to-talk uses it to send on a natural pause.
+  bool is_endpoint();
   std::string finish();                             // flush, return final text
 
  private:

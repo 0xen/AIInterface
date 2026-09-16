@@ -49,6 +49,8 @@ Config Config::from_env() {
   c.kokoro_sid = std::atoi(env_or("AII_KOKORO_SID", "3").c_str());
   c.vv_style = (unsigned)std::atoi(env_or("AII_VOICEVOX_STYLE", "2").c_str());
   c.early_words = std::atoi(env_or("AII_EARLY_WORDS", "12").c_str());
+  c.endpoint_silence = (float)std::atof(env_or("AII_ENDPOINT_SILENCE", "1.0").c_str());
+  if (c.endpoint_silence < 0.2f) c.endpoint_silence = 0.2f;
   c.worker_bypass = env_or("AII_WORKER_BYPASS", "1") != "0";
 
   c.models_dir = AII_MODELS_DIR;

@@ -1,10 +1,17 @@
 #include "core/speech_queue.h"
 
 #include <chrono>
+#include <vector>
 
 #include "core/text_util.h"
 
 namespace aii {
+namespace {
+// Silence inserted where a sentence hands over from one voice to the other.
+// Long enough to hear as a deliberate beat, short enough not to read as the
+// end of a clause.
+constexpr size_t kVoiceSwitchPauseMs = 120;
+}  // namespace
 
 SpeechQueue::SpeechQueue(TtsEngine* english, TtsEngine* japanese, AudioOut* out)
     : en_(english), ja_(japanese), out_(out) {
@@ -56,18 +63,37 @@ void SpeechQueue::run() {
       gen = generation_;
       busy_ = true;
     }
-    TtsEngine* engine = has_japanese(sentence) ? ja_ : en_;
-    if (!engine || !engine->ok()) engine = (en_ && en_->ok()) ? en_ : ja_;
-    AudioChunk chunk;
-    bool okay = engine && engine->synthesize(sentence, chunk);
-    if (okay && gen == generation_) {  // discard if a clear() happened meanwhile
-      if (chunk.sample_rate != out_->sample_rate() && on_status_)
-        on_status_("warning: engine rate " + std::to_string(chunk.sample_rate) + " != output rate " +
-                   std::to_string(out_->sample_rate()));
-      out_->push(chunk.samples.data(), chunk.samples.size());
-      if (first_audio_pending_.exchange(false) && on_first_audio_) on_first_audio_();
-    } else if (!okay && on_status_) {
-      on_status_(std::string("synthesis failed (") + (engine ? engine->name() : "none") + "): " + sentence);
+    // A sentence can mix the two languages ("その file は ready です"), so it
+    // is spoken run by run, each in the voice that fits, in order.
+    const TtsEngine* spoke_last = nullptr;
+    for (const auto& run : split_by_script(sentence)) {
+      if (gen != generation_) break;  // a clear() landed mid-sentence
+      TtsEngine* engine = run.japanese ? ja_ : en_;
+      if (!engine || !engine->ok()) engine = (en_ && en_->ok()) ? en_ : ja_;
+      AudioChunk chunk;
+      bool okay = engine && engine->synthesize(run.text, chunk);
+      if (okay && gen == generation_) {  // discard if a clear() happened meanwhile
+        if (chunk.sample_rate != out_->sample_rate() && on_status_)
+          on_status_("warning: engine rate " + std::to_string(chunk.sample_rate) + " != output rate " +
+                     std::to_string(out_->sample_rate()));
+        // Handing straight from one voice to the other inside a sentence is
+        // jarring: the two engines have different timbre and neither leaves
+        // any room at its edges, so the switch lands as a splice. A beat of
+        // silence reads as the speaker changing language rather than as a
+        // glitch. Only between different voices, never before the first run
+        // or between two runs that ended up on the same engine anyway.
+        if (spoke_last && spoke_last != engine) {
+          const size_t n = static_cast<size_t>(out_->sample_rate()) * kVoiceSwitchPauseMs / 1000;
+          const std::vector<float> gap(n, 0.0f);
+          out_->push(gap.data(), gap.size());
+        }
+        out_->push(chunk.samples.data(), chunk.samples.size());
+        spoke_last = engine;
+        if (first_audio_pending_.exchange(false) && on_first_audio_) on_first_audio_();
+      } else if (!okay && on_status_) {
+        on_status_(std::string("synthesis failed (") + (engine ? engine->name() : "none") + "): " +
+                   run.text);
+      }
     }
     busy_ = false;
   }

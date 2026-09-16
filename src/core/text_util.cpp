@@ -35,6 +35,72 @@ bool has_japanese(const std::string& s) {
   return false;
 }
 
+// A code point either picks a voice or goes along with whichever voice is
+// already speaking. Digits and punctuation are shared between the two
+// languages, so they are Neutral and never force a switch.
+enum class Script { Neutral, Latin, Japanese };
+
+Script script_of(uint32_t cp) {
+  if (is_japanese_cp(cp)) return Script::Japanese;
+  // Fullwidth forms and CJK punctuation belong to whatever is being read.
+  if (cp >= 0x3000 && cp <= 0x303F) return Script::Neutral;   // 、。「」…
+  if (cp >= 0xFF00 && cp <= 0xFF65) return Script::Neutral;   // fullwidth ASCII
+  if (cp < 0x80) return std::isalpha((int)cp) ? Script::Latin : Script::Neutral;
+  // Latin-1 and the Latin extensions: accented letters are still English-ish.
+  if (cp <= 0x024F) return Script::Latin;
+  return Script::Neutral;
+}
+
+std::vector<ScriptRun> split_by_script(const std::string& s) {
+  std::vector<ScriptRun> runs;
+  std::string pending;  // neutral text seen before any voice was chosen
+  size_t i = 0;
+  while (i < s.size()) {
+    const size_t start = i;
+    const Script sc = script_of(next_cp(s, i));
+    const std::string piece = s.substr(start, i - start);
+    if (sc == Script::Neutral) {
+      if (runs.empty()) pending += piece;
+      else runs.back().text += piece;
+      continue;
+    }
+    const bool ja = sc == Script::Japanese;
+    if (runs.empty() || runs.back().japanese != ja) {
+      runs.push_back({ja, std::string()});
+      if (!pending.empty()) {
+        runs.back().text = std::move(pending);
+        pending.clear();
+      }
+    }
+    runs.back().text += piece;
+  }
+  if (runs.empty()) {
+    if (!pending.empty()) runs.push_back({false, std::move(pending)});
+    return runs;
+  }
+  // Fold away anything not worth its own trip through an engine: a run with
+  // no speakable content, or one so short it is almost certainly a loanword
+  // or a stray letter inside the other language's sentence.
+  constexpr size_t kMinRunBytes = 2;
+  std::vector<ScriptRun> out;
+  std::string carry;  // folded text waiting for a run to attach to
+  for (const auto& r : runs) {
+    const bool substantial = has_speakable_content(r.text) && trim(r.text).size() >= kMinRunBytes;
+    if (!substantial || (!out.empty() && out.back().japanese == r.japanese)) {
+      if (out.empty()) carry += r.text;
+      else out.back().text += r.text;
+      continue;
+    }
+    out.push_back({r.japanese, carry + r.text});
+    carry.clear();
+  }
+  if (!carry.empty()) {
+    if (out.empty()) out.push_back({false, carry});
+    else out.back().text += carry;
+  }
+  return out;
+}
+
 bool has_speakable_content(const std::string& s) {
   size_t i = 0;
   while (i < s.size()) {

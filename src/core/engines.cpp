@@ -53,33 +53,44 @@ bool build_llm(const Config& cfg, Engines& out, const LogFn& log, std::string* e
   return true;
 }
 
-bool build_speech(const Config& cfg, Engines& out, const LogFn& log, std::string* error) {
-  auto t0 = clk::now();
-  out.stt = std::make_unique<Recognizer>(cfg.stt_dir, 8);
+bool build_stt(const Config& cfg, Engines& out, const LogFn& log, std::string* error) {
+  auto t = clk::now();
+  out.stt = std::make_unique<Recognizer>(cfg.stt_dir, 8, cfg.endpoint_silence);
   if (!out.stt->ok()) {
     if (error) *error = "recogniser failed to load from " + cfg.stt_dir;
     return false;
   }
   out.stt->set_language(cfg.stt_lang);
-  say(log, "recogniser ready      " + fmt_secs(t0));
+  say(log, "recogniser ready      " + fmt_secs(t));
+  return true;
+}
 
-  auto t1 = clk::now();
+bool build_kokoro(const Config& cfg, Engines& out, const LogFn& log, std::string* error) {
+  auto t = clk::now();
   out.kokoro = std::make_unique<KokoroTts>(cfg.kokoro_dir, cfg.kokoro_sid, 1.0f, 4);
   if (!out.kokoro->ok()) {
     if (error) *error = "kokoro failed to load from " + cfg.kokoro_dir;
     return false;
   }
-  say(log, "kokoro ready          " + fmt_secs(t1) + "  (" + std::to_string(out.kokoro->sample_rate()) +
+  say(log, "kokoro ready          " + fmt_secs(t) + "  (" + std::to_string(out.kokoro->sample_rate()) +
                " Hz, sid " + std::to_string(cfg.kokoro_sid) + ")");
+  return true;
+}
 
-  auto t2 = clk::now();
+bool build_voicevox(const Config& cfg, Engines& out, const LogFn& log, std::string* error) {
+  auto t = clk::now();
   out.voicevox = std::make_unique<VoicevoxTts>(cfg.vv_core_dir, cfg.vv_models_dir, cfg.vv_style);
   if (!out.voicevox->ok()) {
     if (error) *error = "voicevox failed: " + out.voicevox->last_error();
     return false;
   }
-  say(log, "voicevox ready        " + fmt_secs(t2) + "  (style " + std::to_string(cfg.vv_style) + ")");
+  say(log, "voicevox ready        " + fmt_secs(t) + "  (style " + std::to_string(cfg.vv_style) + ")");
   return true;
+}
+
+bool build_speech(const Config& cfg, Engines& out, const LogFn& log, std::string* error) {
+  return build_stt(cfg, out, log, error) && build_kokoro(cfg, out, log, error) &&
+         build_voicevox(cfg, out, log, error);
 }
 
 }  // namespace aii

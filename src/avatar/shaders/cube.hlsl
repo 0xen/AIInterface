@@ -33,7 +33,7 @@ struct CubeFrameT {
     float4x4 mvpT;
     float4x4 modelT;
     float4 cameraPos; // world space, w unused
-    float4 tint;      // linear rgb, w unused
+    float4 tint;      // linear rgb; w is the M1.5 handoff fade (1 = fully present)
 };
 
 float4x4 loadMatrixT(uint offset) {
@@ -51,11 +51,29 @@ CubeFrameT loadFrame(uint slot) {
     return f;
 }
 
+// The swapchain view is sRGB, so the hardware encodes whatever this shader
+// writes. Alpha is not encoded, so anything that has to agree with alpha —
+// the premultiply below — has to cross into the encoded domain by hand.
+// lerp/step rather than a ternary: a vector condition in `?:` is an error
+// under HLSL 2021, which is what the engine's dxc rule compiles with.
+float3 linearToSrgb(float3 c) {
+    const float3 lo = c * 12.92;
+    const float3 hi = 1.055 * pow(abs(c), 1.0 / 2.4) - 0.055;
+    return lerp(hi, lo, step(c, 0.0031308));
+}
+
+float3 srgbToLinear(float3 c) {
+    const float3 lo = c / 12.92;
+    const float3 hi = pow(abs(c + 0.055) / 1.055, 2.4);
+    return lerp(hi, lo, step(c, 0.04045));
+}
+
 struct VSOutput {
     float4 position : SV_Position;
     float3 normal : NORMAL;
     float3 color : COLOR0;
     nointerpolation float facing : TEXCOORD0;
+    nointerpolation float alpha : TEXCOORD1;
 };
 
 static const float3 kCorners[8] = {
@@ -90,6 +108,7 @@ VSOutput VSMain(uint vertexId : SV_VertexID) {
     o.normal = normal;
     o.color = kFaceTints[face] * f.tint.rgb;
     o.facing = dot(normal, normalize(f.cameraPos.xyz - world));
+    o.alpha = f.tint.w;
     return o;
 }
 
@@ -98,5 +117,17 @@ float4 PSMain(VSOutput i) : SV_Target0 {
     const float3 lightDir = normalize(float3(0.4, 0.8, 0.6));
     const float diffuse = saturate(dot(normalize(i.normal), lightDir));
     const float3 rgb = i.color * (0.30 + 0.70 * diffuse);
-    return float4(rgb, 1.0); // premultiplied: fully opaque where the cube is
+    // Premultiplied, and the window's alpha is what the desktop is seen
+    // through: at tint.w < 1 (the M1.5 handoff) the cube is genuinely
+    // translucent rather than blended against a black that is not there. This
+    // pass does not blend, it writes the cleared (0,0,0,0) swapchain directly,
+    // so the premultiply has to happen here.
+    //
+    // And it has to happen in the ENCODED domain. The view is sRGB, so the
+    // hardware stores srgb(rgb * a) — but the desktop compositor blends the
+    // stored bytes, where premultiplied means srgb(rgb) * a. srgb() is concave,
+    // so the naive product is far brighter than it should be and the cube
+    // arrives at full strength a third of the way into the fade.
+    const float3 premul = srgbToLinear(linearToSrgb(rgb) * i.alpha);
+    return float4(premul, i.alpha);
 }

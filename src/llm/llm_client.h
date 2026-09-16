@@ -18,6 +18,18 @@ struct ChatResult {
   double cost_usd = -1.0;   // reported by the Claude Code backend only
 };
 
+// What the Claude Code CLI reports about the session: how full the context
+// window is and how much of each subscription window has been consumed. The
+// fractions are 0..1; a negative value means the CLI has not said yet.
+struct UsageStats {
+  double ctx = -1.0;      // context window in use / its size
+  double session = -1.0;  // five-hour window utilisation
+  double week = -1.0;     // seven-day window utilisation
+  long long session_reset = 0;  // unix seconds, 0 = unknown
+  long long week_reset = 0;
+  std::string model;
+};
+
 using DeltaFn = std::function<void(const std::string&)>;
 
 class LlmClient {
@@ -29,6 +41,9 @@ class LlmClient {
                           std::atomic<bool>* cancel = nullptr) = 0;
   // One-line usage/quota summary for the UI, empty if unknown.
   virtual std::string status_line() const { return {}; }
+  // The same numbers unformatted, for front-ends that lay them out
+  // themselves. Negative = not known yet.
+  virtual UsageStats usage() const { return {}; }
 };
 
 }  // namespace aii

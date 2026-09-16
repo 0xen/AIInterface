@@ -44,6 +44,7 @@ class ClaudeCodeClient final : public LlmClient {
   ChatResult turn(const std::string& user_text, const DeltaFn& on_delta,
                   std::atomic<bool>* cancel = nullptr) override;
   std::string status_line() const override;
+  UsageStats usage() const override;
   std::string session_id() const { std::lock_guard<std::mutex> l(mutex_); return session_id_; }
   std::string model() const { std::lock_guard<std::mutex> l(mutex_); return model_; }
 
@@ -70,6 +71,12 @@ class ClaudeCodeClient final : public LlmClient {
   std::string session_id_, model_, last_error_;
   double util_5h_ = -1, util_7d_ = -1;
   long long reset_5h_ = 0, reset_7d_ = 0;
+  // Context-window fill: the newest message_start from the MAIN model (the
+  // CLI also runs a small background model, whose usage must not count)
+  // over the window size the result event reports for it.
+  std::string canonical_model_;   // model_ without a "[1m]"-style suffix
+  long long ctx_tokens_ = -1;
+  long long ctx_window_ = 0;
   int request_counter_ = 0;
 };
 

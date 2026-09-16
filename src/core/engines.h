@@ -27,5 +27,12 @@ struct Engines {
 bool build_llm(const Config& cfg, Engines& out, const LogFn& log, std::string* error);
 // Recogniser + Kokoro + VOICEVOX (all CPU). Several seconds.
 bool build_speech(const Config& cfg, Engines& out, const LogFn& log, std::string* error);
+// The three halves of build_speech, separately, for a front-end that wants to
+// report progress between them: they take seconds each and very unequal ones,
+// so a loading bar that only ticks once for all three would sit still through
+// the longest part of startup. Same order and same failure contract.
+bool build_stt(const Config& cfg, Engines& out, const LogFn& log, std::string* error);
+bool build_kokoro(const Config& cfg, Engines& out, const LogFn& log, std::string* error);
+bool build_voicevox(const Config& cfg, Engines& out, const LogFn& log, std::string* error);
 
 }  // namespace aii

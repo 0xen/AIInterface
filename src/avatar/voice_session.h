@@ -4,6 +4,7 @@
 // turns run on a worker thread, and replies are spoken through the speech
 // queue. The window reads an immutable Snapshot each frame.
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -16,6 +17,7 @@
 #include "core/engines.h"
 #include "core/speech_queue.h"
 #include "core/worker_pool.h"
+#include "llm/llm_client.h"
 
 namespace aii {
 
@@ -31,7 +33,13 @@ class VoiceSession {
     State state = State::Loading;
     std::string status;   // one line: what is happening / last error
     std::string usage;    // subscription window readout, empty until known
+    UsageStats usage_stats;  // the same numbers unformatted (negative = unknown)
     std::string partial;  // live transcript while listening
+    // Engine bring-up, for the loading screen. The progress is weighted by
+    // measured load times, so it tracks the wait rather than the stage count,
+    // and it never goes backwards: it stops where it is if a stage fails.
+    float load_progress = 0.0f;  // 0..1, 1.0 once loading has finished
+    std::string load_stage;      // display name of the running stage, empty once loaded
     std::vector<Line> lines;
     std::vector<WorkerPool::Snapshot> workers;
   };
@@ -40,7 +48,16 @@ class VoiceSession {
   ~VoiceSession();
 
   void update();                       // once per frame, main thread
-  void toggle_talk();                  // start listening / stop and send (barge-in while speaking)
+  // The microphone latch. Click on to listen, click again to mute. The
+  // session owns the latch rather than the UI, because pause() drops it too
+  // and a UI-owned copy would just set it again on the next frame.
+  // While it is on, a pause long enough to look like the end of an
+  // utterance sends that utterance on its own, and the mic reopens once the
+  // reply finishes — so one click carries a whole conversation, and the
+  // speakers are never transcribed back in as the user. Turning it off sends
+  // whatever was captured but not yet sent.
+  void toggle_mic();
+  bool mic_open() const { return mic_open_; }
   void silence();                      // stop the audio, keep the text coming
   void pause();                        // cancel the reply and pause every worker
   void say(const std::string& text);   // send typed/scripted text as the user turn
@@ -51,12 +68,24 @@ class VoiceSession {
 
  private:
   void load();
+  // Moves the loading screen on to stage `index` of kLoadStages (loader thread
+  // only). Progress becomes the weight of everything before it, so it only
+  // ever climbs; an index past the end means loaded, 1.0 and no stage name.
+  // Returns the progress it published, for the trace line.
+  float begin_load_stage(size_t index);
+  void set_mic_open(bool open);
   void begin_listening();
+  // Closes the mic, decodes what is left and starts the turn. Leaves the
+  // state Idle instead when nothing intelligible was said.
+  void end_listening_and_send();
   void start_turn(std::string text);
   void run_turn(std::string text);
   void run_commands(const std::string& reply_text);
   // Speak a line from the app itself (worker reports) and show it.
   void announce(const std::string& text);
+  // Speaks anything announce() left queued, closing the microphone first.
+  // True if it took the floor. Frame loop only.
+  bool flush_announcements();
   void set_state(State s);
   void set_status(const std::string& s);
   void log(const std::string& s);
@@ -67,6 +96,15 @@ class VoiceSession {
   std::unique_ptr<MicIn> mic_;
   std::unique_ptr<SpeechQueue> speech_;
   std::unique_ptr<WorkerPool> workers_;
+
+  // Frame-loop state: touched only from update()/set_mic_open().
+  bool mic_open_ = false;
+  // The noise gate behind end-of-utterance detection: when the microphone
+  // last carried something louder than the room, and the room level it is
+  // being judged against.
+  std::chrono::steady_clock::time_point last_voice_{};
+  std::chrono::steady_clock::time_point listen_began_{};
+  float noise_floor_ = 0.0f;
 
   std::thread loader_;
   std::thread turn_;
@@ -79,9 +117,13 @@ class VoiceSession {
   mutable std::mutex mutex_;
   State state_ = State::Loading;
   std::string status_;
+  float load_progress_ = 0.0f;
+  std::string load_stage_;
   std::string usage_;
   std::string partial_;
   std::vector<Line> lines_;
+  // Worker reports waiting for a gap in which to be spoken.
+  std::vector<std::string> pending_announce_;
   std::vector<float> chunk_;
 };
 

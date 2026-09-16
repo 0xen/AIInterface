@@ -21,6 +21,10 @@ struct Config {
   int kokoro_sid = 3;          // AII_KOKORO_SID
   unsigned vv_style = 2;       // AII_VOICEVOX_STYLE
   int early_words = 12;        // AII_EARLY_WORDS (0 = full sentences only)
+  // AII_ENDPOINT_SILENCE: how long a pause has to last, in seconds, before
+  // the utterance is treated as finished and sent. Raise it if you are being
+  // cut off while thinking mid-sentence; lower it for snappier turn-taking.
+  float endpoint_silence = 1.0f;
   bool worker_bypass = true;   // AII_WORKER_BYPASS: workers skip permission prompts
                                // (nothing in this app can answer one, so a worker
                                // that asks would hang). Set to 0 to make them ask

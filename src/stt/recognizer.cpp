@@ -7,7 +7,7 @@
 
 namespace aii {
 
-Recognizer::Recognizer(const std::string& model_dir, int num_threads) {
+Recognizer::Recognizer(const std::string& model_dir, int num_threads, float endpoint_silence) {
   encoder_ = model_dir + "/encoder.int8.onnx";
   decoder_ = model_dir + "/decoder.int8.onnx";
   joiner_ = model_dir + "/joiner.int8.onnx";
@@ -26,9 +26,13 @@ Recognizer::Recognizer(const std::string& model_dir, int num_threads) {
   config.model_config.debug = 0;
   config.decoding_method = "greedy_search";
   config.max_active_paths = 4;
-  config.enable_endpoint = 0;  // push-to-talk: the user decides where the utterance ends
-  config.rule1_min_trailing_silence = 2.4f;
-  config.rule2_min_trailing_silence = 1.2f;
+  // On, so callers can ask is_endpoint(). Nothing happens automatically:
+  // sherpa only reports the boundary, the caller decides what to do with it.
+  config.enable_endpoint = 1;
+  config.rule1_min_trailing_silence = 2.4f;  // silence with nothing said yet
+  // The pause that ends an utterance. Corroborated against the real input
+  // level in the caller, because these are blank-decode frames, not silence.
+  config.rule2_min_trailing_silence = endpoint_silence;
   config.rule3_min_utterance_length = 300.0f;
   recognizer_ = SherpaOnnxCreateOnlineRecognizer(&config);
 }
@@ -69,6 +73,11 @@ std::string Recognizer::partial() {
   std::string text = (r && r->text) ? r->text : "";
   SherpaOnnxDestroyOnlineRecognizerResult(r);
   return text;
+}
+
+bool Recognizer::is_endpoint() {
+  if (!stream_) return false;
+  return SherpaOnnxOnlineStreamIsEndpoint(recognizer_, stream_) != 0;
 }
 
 std::string Recognizer::finish() {

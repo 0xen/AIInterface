@@ -41,6 +41,10 @@ std::string quote_arg(const std::string& a) {
   return out;
 }
 
+// `resetsAt` is unix seconds, but be tolerant of a millisecond value: a
+// seconds timestamp will not reach 1e11 for another thousand years.
+long long to_unix_seconds(long long v) { return v > 100000000000LL ? v / 1000 : v; }
+
 std::string fmt_reset(long long epoch) {
   if (epoch <= 0) return "?";
   long long now = (long long)std::time(nullptr);
@@ -160,6 +164,15 @@ void ClaudeCodeClient::handle_line(const std::string& line) {
     if (j.value("subtype", "") == "init") {
       session_id_ = j.value("session_id", "");
       model_ = j.value("model", "");
+      // "claude-opus-5[1m]" -> "claude-opus-5": message_start reports the
+      // canonical id, while modelUsage is keyed by the decorated one.
+      canonical_model_ = model_;
+      if (const auto b = canonical_model_.find('['); b != std::string::npos)
+        canonical_model_.erase(b);
+      // Until a result event reports the real size, assume the documented
+      // default (the "[1m]" suffix is the CLI's own long-context marker).
+      if (ctx_window_ == 0)
+        ctx_window_ = model_.find("[1m]") != std::string::npos ? 1000000 : 200000;
       cv_.notify_all();
     }
   } else if (type == "rate_limit_event") {
@@ -168,11 +181,11 @@ void ClaudeCodeClient::handle_line(const std::string& line) {
       const auto& w = info["unifiedWindows"];
       if (w.contains("five_hour")) {
         util_5h_ = w["five_hour"].value("utilization", -1.0);
-        reset_5h_ = w["five_hour"].value("resetsAt", 0LL);
+        reset_5h_ = to_unix_seconds(w["five_hour"].value("resetsAt", 0LL));
       }
       if (w.contains("seven_day")) {
         util_7d_ = w["seven_day"].value("utilization", -1.0);
-        reset_7d_ = w["seven_day"].value("resetsAt", 0LL);
+        reset_7d_ = to_unix_seconds(w["seven_day"].value("resetsAt", 0LL));
       }
     }
   } else if (type == "stream_event") {
@@ -198,6 +211,15 @@ void ClaudeCodeClient::handle_line(const std::string& line) {
         const auto& u = ev["message"]["usage"];
         current_.input_tokens = u.value("input_tokens", 0);
         current_.cache_read_tokens = u.value("cache_read_input_tokens", 0);
+        // Everything handed to the model this request IS the context in use.
+        // Only the main model counts: the CLI also drives a small background
+        // model whose own message_start events pass through here.
+        const std::string mm = ev["message"].value("model", "");
+        if (canonical_model_.empty() || mm == canonical_model_ || mm == model_) {
+          ctx_tokens_ = u.value("input_tokens", 0) +
+                        u.value("cache_read_input_tokens", 0) +
+                        u.value("cache_creation_input_tokens", 0);
+        }
       }
     } else if (et == "message_delta") {
       if (ev.contains("delta") && ev["delta"].contains("stop_reason") && !ev["delta"]["stop_reason"].is_null())
@@ -220,6 +242,20 @@ void ClaudeCodeClient::handle_line(const std::string& line) {
       last_error_ = current_.error;
     }
     if (j.contains("total_cost_usd")) current_.cost_usd = j.value("total_cost_usd", -1.0);
+    // The CLI states the real context size per model it used; take the main
+    // model's so the guess made at init stops being used.
+    if (j.contains("modelUsage") && j["modelUsage"].is_object()) {
+      for (const auto& entry : j["modelUsage"].items()) {
+        const auto& mu = entry.value();
+        if (!mu.is_object()) continue;
+        if (entry.key() != model_ &&
+            mu.value("canonicalModel", std::string()) != canonical_model_)
+          continue;
+        const long long win = mu.value("contextWindow", 0LL);
+        if (win > 0) ctx_window_ = win;
+        break;
+      }
+    }
     if (current_.stop_reason.empty()) current_.stop_reason = j.value("stop_reason", std::string(""));
     if (j.contains("usage")) {
       const auto& u = j["usage"];
@@ -290,6 +326,19 @@ std::string ClaudeCodeClient::status_line() const {
                 model_.empty() ? "model ?" : model_.c_str(), util_5h_ * 100.0, fmt_reset(reset_5h_).c_str(),
                 util_7d_ * 100.0, fmt_reset(reset_7d_).c_str());
   return buf;
+}
+
+UsageStats ClaudeCodeClient::usage() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  UsageStats u;
+  u.model = model_;
+  u.session = util_5h_;
+  u.week = util_7d_;
+  u.session_reset = reset_5h_;
+  u.week_reset = reset_7d_;
+  if (ctx_tokens_ >= 0 && ctx_window_ > 0)
+    u.ctx = static_cast<double>(ctx_tokens_) / static_cast<double>(ctx_window_);
+  return u;
 }
 
 }  // namespace aii

@@ -35,8 +35,7 @@ add_library(aii_core STATIC
   src/core/sentence_splitter.cpp
   src/core/speech_queue.cpp
   src/core/text_util.cpp
-  src/core/worker_pool.cpp
-  src/ui/gdi_canvas.cpp)
+  src/core/worker_pool.cpp)
 target_include_directories(aii_core PUBLIC
   src
   third_party
@@ -79,6 +78,7 @@ if(AII_BUILD_AVATAR)
   if(NOT EXISTS "${AII_RENDERER_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "Renderer not found at ${AII_RENDERER_DIR}; set AII_RENDERER_DIR or AII_BUILD_AVATAR=OFF")
   endif()
+  include(cmake/FetchImgui.cmake)
   set(REND_BUILD_APPS OFF CACHE BOOL "" FORCE)
   set(REND_PYTHON OFF CACHE BOOL "" FORCE)
   add_subdirectory("${AII_RENDERER_DIR}" "${CMAKE_BINARY_DIR}/renderer")
