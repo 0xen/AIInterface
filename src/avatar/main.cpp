@@ -497,6 +497,15 @@ int main(int /*argc*/, char** /*argv*/) {
     // Resized event, so the swapchain has to be told separately — and only
     // between frames, never after the panel has been built for the old size.
     std::uint32_t pendingH = 0;
+    // The avatar band the panel is being drawn with, and the one the policy
+    // decided this frame. They are one frame apart on purpose: a new band is
+    // only ever applied at the top of a frame, in the same breath as the window
+    // height it needs, and before any of that frame's input is read.
+    std::uint32_t band = 0;
+    std::uint32_t nextBand = 0;
+    // The panel's own height, i.e. what it last asked for less the band it was
+    // drawn with. Adding a band to it is what the window has to become.
+    std::uint32_t panelH = 0;
     bool running = true;
     bool saidOnce = sayText.empty();
     // SPACE is the keyboard half of the Talk gesture, and carries both of its
@@ -530,6 +539,49 @@ int main(int /*argc*/, char** /*argv*/) {
     // not fade the avatar band in from nothing behind the loading screen.
     float visFade = -1.0f;
     while (running) {
+        // ---- the window's geometry, before a single one of this frame's
+        // events is read ----
+        //
+        // The height the panel asked for last frame, and the avatar band that
+        // goes with it. Everything that sizes itself from the window reads
+        // `height`, the loading overlay included, so the swapchain has to
+        // follow the window rather than be cropped by it — the loader centres
+        // itself, and a stale height puts it low enough to land on the panel.
+        //
+        // Both are applied *here*, together, ahead of the event pump, and that
+        // ordering is load-bearing (fixed 16 Sep 2026):
+        //
+        //  - Together, because the band is what places every control in the
+        //    panel. Taking the new band while the window still has the old
+        //    height drew the whole panel 260 px below where it actually was on
+        //    screen, for as long as the resize took to land.
+        //  - Ahead of the pump, because a mouse event carries the client
+        //    coordinates the window had when the OS generated it. Moving the
+        //    window after those events have been read makes them point at the
+        //    wrong place in the layout they are about to be used in.
+        //
+        // Either way round, a release landed off the button the pointer was
+        // still sitting on, and an abandoned release means "dictate" — which is
+        // exactly how the bug showed itself: with the avatar minimized, a click
+        // on Talk opened the band, moved the panel, and then read as a hold. A
+        // 55-68 ms click failed every time; with the avatar already shown, where
+        // nothing moves, the same click was always right.
+        band = nextBand;
+        if (pendingH != 0) {
+            height = pendingH;
+            pendingH = 0;
+            // The OS window is moved here too, immediately before the
+            // swapchain that has to match it. Doing it where the panel asked
+            // (mid-frame) left one present in between, in which DWM showed the
+            // old surface pinned to the top of a window that had already grown
+            // — the panel jumping to the ceiling with bare desktop under it.
+            // Invisible at one resize per chat click, obvious now that "shown
+            // when talking" resizes on every turn.
+            if (transparent && hwnd) placeInCorner(hwnd, static_cast<int>(kWindowW),
+                                                   static_cast<int>(height));
+            renderer->resize(width, height);
+        }
+
         // Which half of the input owns the keyboard this frame. The panel now
         // has a text field, so the hotkeys below have to stand down while it
         // has focus — otherwise typing a space toggles the microphone and a
@@ -584,26 +636,6 @@ int main(int /*argc*/, char** /*argv*/) {
         lastT = t;
         if (seconds >= 0.0 && t >= seconds) running = false;
         if (width == 0 || height == 0) continue;
-
-        // The height the panel asked for last frame. Everything that sizes
-        // itself from the window reads `height`, the loading overlay included,
-        // so the swapchain has to follow the window rather than be cropped by
-        // it — the loader centres itself, and a stale height puts it low
-        // enough to land on the panel.
-        if (pendingH != 0) {
-            height = pendingH;
-            pendingH = 0;
-            // The OS window is moved here too, immediately before the
-            // swapchain that has to match it. Doing it where the panel asked
-            // (mid-frame) left one present in between, in which DWM showed the
-            // old surface pinned to the top of a window that had already grown
-            // — the panel jumping to the ceiling with bare desktop under it.
-            // Invisible at one resize per chat click, obvious now that "shown
-            // when talking" resizes on every turn.
-            if (transparent && hwnd) placeInCorner(hwnd, static_cast<int>(kWindowW),
-                                                   static_cast<int>(height));
-            renderer->resize(width, height);
-        }
 
         // ---- voice loop tick ----
         aii::VoiceSession::Snapshot snap;
@@ -701,9 +733,17 @@ int main(int /*argc*/, char** /*argv*/) {
         // always while the loading screen is up: that overlay covers the whole
         // window and is centred in it, so a mode that hides the avatar gives
         // the 260 px back when the loader leaves rather than shrinking the
-        // window out from under it. The resize itself goes through pendingH
-        // below — never from inside the frame (M1.4).
-        const std::uint32_t band = (loading || visFade > 0.0f) ? kAvatarH : 0;
+        // window out from under it. The resize itself goes through pendingH and
+        // lands at the top of the next frame — never from inside this one (M1.4).
+        //
+        // What the band *will* be. It is not used until the top of the next
+        // frame, where it is applied together with the window height that goes
+        // with it — see `band` above the event pump. The band moves every
+        // control in the panel by 260 px, so laying the panel out against a new
+        // band while the window still has the old height puts every control
+        // that far from where it is on screen; that mismatch is what made a
+        // click on Talk read as hold-to-dictate (see the note at `band`).
+        nextBand = (loading || visFade > 0.0f) ? kAvatarH : 0;
         if (loading) loaderPush = aii::loader_push(t, width, height, loaderAlpha);
         // The panel is released on the first frame of the handoff, not held for
         // it: its one discrete change (the usage row, the state line, the live
@@ -718,6 +758,10 @@ int main(int /*argc*/, char** /*argv*/) {
 
         // ---- the panel ----
         if (ui) {
+            // After the resize above, never before it: the pointer's client
+            // coordinates are meaningless until the window it is measured
+            // against has stopped moving this frame.
+            ui->sync_pointer(hwnd);
             ui->begin_frame(width, height, dt);
             const bool submit = textInput && textInput->take_submit();
             const aii::AvatarUiResult r =
@@ -754,8 +798,11 @@ int main(int /*argc*/, char** /*argv*/) {
             // Clamped to the committed composition height: a window taller
             // than that would claim space DWM never paints, which reads as the
             // bottom of the panel having been cut off.
+            if (r.desired_height > band) panelH = r.desired_height - band;
             if (transparent && hwnd && r.desired_height != 0) {
-                const std::uint32_t want = std::min(r.desired_height, kWindowH);
+                // The panel's own height plus the band the *next* frame will be
+                // drawn with, so the window is already that tall when it is.
+                const std::uint32_t want = std::min(panelH + nextBand, kWindowH);
                 if (want != windowH) {
                     windowH = want;
                     pendingH = windowH;

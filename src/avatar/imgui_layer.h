@@ -59,6 +59,19 @@ class ImGuiLayer {
   // is, or a space typed into the message field also toggles the microphone.
   bool wants_keyboard() const;
 
+  // Re-read the pointer from the OS and hand ImGui its position in this
+  // window's client space. Call once a frame, just before begin_frame().
+  //
+  // Motion events alone are not enough here: this window moves and resizes
+  // itself (the avatar band appearing, the chat opening), and a window that
+  // moves under a pointer that is holding still changes that pointer's client
+  // coordinates without any mouse having moved. Until the next stray motion
+  // event arrives, ImGui then believes the pointer is where it was before the
+  // move — which, on the frame a button is released, loses the release off the
+  // button it is still sitting on. Polling is also what imgui_impl_win32 does
+  // for exactly this reason. `hwnd` is the window; a null one is a no-op.
+  void sync_pointer(void* hwnd);
+
   void begin_frame(std::uint32_t width, std::uint32_t height, float dt);
   // Records the frame's draw data. Call inside the overlay recorder, which
   // runs in an active rendering pass on the swapchain image.

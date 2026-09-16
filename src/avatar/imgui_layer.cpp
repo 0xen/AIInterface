@@ -255,6 +255,28 @@ bool ImGuiLayer::handle_event(const platform::Event& event) {
   }
 }
 
+void ImGuiLayer::sync_pointer(void* hwnd) {
+  if (!hwnd) return;
+  POINT p{};
+  RECT client{};
+  if (!GetCursorPos(&p)) return;
+  auto* wnd = static_cast<HWND>(hwnd);
+  if (!GetClientRect(wnd, &client)) return;
+  if (!ScreenToClient(wnd, &p)) return;
+  const bool inside = p.x >= client.left && p.x < client.right && p.y >= client.top &&
+                      p.y < client.bottom;
+  // Only while the pointer is over the window, or while it is dragging one of
+  // our widgets. Outside both, the event path already said where it went and
+  // inventing a position here would hover widgets the pointer has left.
+  if (!inside && !ImGui::IsAnyItemActive()) return;
+  const float x = static_cast<float>(p.x);
+  const float y = static_cast<float>(p.y);
+  if (x == s_->mouse_x && y == s_->mouse_y) return;
+  s_->mouse_x = x;
+  s_->mouse_y = y;
+  ImGui::GetIO().AddMousePosEvent(x, y);
+}
+
 bool ImGuiLayer::wants_keyboard() const {
   const ImGuiIO& io = ImGui::GetIO();
   return io.WantCaptureKeyboard || io.WantTextInput;

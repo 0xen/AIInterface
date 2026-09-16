@@ -661,6 +661,12 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
   if (ImGui::IsItemDeactivated()) {
     out.talk_released = true;
     out.talk_held = ImGui::GetTime() - state.talk_pressed_at >= kTalkHoldSeconds;
+    // Judged against where the button is *this* frame, which is only a fair
+    // test because main.cpp changes the window's height and the avatar band
+    // together, at the top of a frame, before any of that frame's input is
+    // read. When it did not, the panel could be laid out 260 px from where it
+    // was on screen and this test called a release that never left the button
+    // an abandoned press — the Talk-click bug of 16 Sep 2026.
     out.talk_over_button = ImGui::IsItemHovered();
   }
   if (mic_on) ImGui::PopStyleColor(4);
