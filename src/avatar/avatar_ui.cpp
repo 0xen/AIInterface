@@ -8,6 +8,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <string>
@@ -34,6 +35,168 @@ ImVec4 bad() { return ui_color(0.93f, 0.45f, 0.42f); }
 ImVec4 red() { return ui_color(0.80f, 0.16f, 0.16f); }
 ImVec4 red_hot() { return ui_color(0.91f, 0.25f, 0.24f); }
 ImVec4 red_deep() { return ui_color(0.62f, 0.10f, 0.10f); }
+
+// ------------------------------------------------------- Famicom-style icons
+//
+// The transport row lost its text labels (user, 16 Sep 2026) and gained pixel
+// icons. They are authored the way the avatar's art is: an ASCII grid with a
+// palette, read top-left to bottom-right, '.' transparent. Two inks rather
+// than one, because every icon that says "not this" needs its negation to read
+// *over* the shape it negates: '#' is the icon, 'o' is the mark laid across it.
+//
+// They are string literals here rather than .txt files under assets/, unlike
+// the avatar's clips. The avatar's art is a themeable, hot-reloadable
+// character; these are window chrome, in the same category as the cog and the
+// folder on the toolbar and the arrows beside them, which are already drawn in
+// code. Chrome that could fail to load is chrome that can leave a button blank.
+//
+// Drawn as filled cells at a whole-number scale, and only a whole-number scale.
+// A 13-cell grid at 2x is 26 px and every cell is exactly 2x2; at 2.3x the
+// cells would alternate 2 and 3 px wide and the icon would read as mush, which
+// is the one thing an 8-bit icon may not do. The button is sized from the icon
+// rather than the icon fitted to the button, so the scale is never in question.
+constexpr int kIconCells = 13;
+constexpr float kIconScale = 2.0f;
+constexpr float kIconPx = kIconCells * kIconScale;
+constexpr float kTransportButton = 30.0f;  // kIconPx plus 2 px of air all round
+
+using IconRows = const char* [kIconCells];
+
+// The microphone, five ways. Idle is the bare capsule-and-cradle; everything
+// else is that same shape with something added, so the button never changes
+// what it *is*, only what it is doing — the shape is the noun and the addition
+// is the verb.
+constexpr IconRows kIconMic = {
+    ".....###.....",
+    ".....###.....",
+    ".....###.....",
+    ".....###.....",
+    ".....###.....",
+    "...#.###.#...",
+    "...#.###.#...",
+    "...#.....#...",
+    "....#####....",
+    "......#......",
+    "......#......",
+    "...#######...",
+    ".............",
+};
+// Hearing you: arcs either side.
+constexpr IconRows kIconMicLive = {
+    ".....###.....",
+    ".#...###...#.",
+    "#.#..###..#.#",
+    "#.#..###..#.#",
+    ".#...###...#.",
+    "...#.###.#...",
+    "...#.###.#...",
+    "...#.....#...",
+    "....#####....",
+    "......#......",
+    "......#......",
+    "...#######...",
+    ".............",
+};
+// Holding to dictate: the words are going into the box below, not to Claude.
+constexpr IconRows kIconMicHold = {
+    ".....###.....",
+    ".....###.....",
+    ".....###.....",
+    ".....###.....",
+    ".....###.....",
+    "...#.###.#...",
+    "...#.###.#...",
+    "...#.....#...",
+    "....#####....",
+    "......#......",
+    "...#######...",
+    ".............",
+    "..#..#..#....",
+};
+// Latched on but not listening right now — the stretch where Claude is
+// replying and the session deliberately shuts the microphone so the speakers
+// are not transcribed back in as the user.
+constexpr IconRows kIconMicShut = {
+    ".....###....o",
+    ".....###...o.",
+    ".....###..o..",
+    ".....###.o...",
+    ".....###o....",
+    "...#.##o.#...",
+    "...#.#o#.#...",
+    "...#.o...#...",
+    "....o####....",
+    "...o..#......",
+    "..o...#......",
+    ".o.#######...",
+    "o............",
+};
+
+// The speaker, for the mute button. Same trick: one shape, one mark.
+constexpr IconRows kIconSpeaker = {
+    ".............",
+    "........#....",
+    ".......##....",
+    "......###...#",
+    ".....####...#",
+    ".########.#.#",
+    ".########.#.#",
+    ".########.#.#",
+    ".....####...#",
+    "......###...#",
+    ".......##....",
+    "........#....",
+    ".............",
+};
+constexpr IconRows kIconSpeakerMuted = {
+    ".............",
+    "........#....",
+    ".......##....",
+    "......###....",
+    ".....####o..o",
+    ".########.oo.",
+    ".########.oo.",
+    ".########o..o",
+    ".....####....",
+    "......###....",
+    ".......##....",
+    "........#....",
+    ".............",
+};
+
+// Stop. A square is the one transport glyph that needs no explaining, and at
+// 13 cells there is no room for anything that does.
+constexpr IconRows kIconStop = {
+    ".............",
+    ".............",
+    "..#########..",
+    "..#########..",
+    "..#########..",
+    "..#########..",
+    "..#########..",
+    "..#########..",
+    "..#########..",
+    "..#########..",
+    "..#########..",
+    ".............",
+    ".............",
+};
+
+// One cell per filled character, snapped to whole pixels. `p` is the icon's
+// top-left in screen space and is floored for the same reason the scale is an
+// integer: half a pixel of origin undoes every bit of the alignment above.
+void draw_icon(ImDrawList* dl, const char* const* rows, ImVec2 p, ImU32 ink, ImU32 mark) {
+  const float x0 = std::floor(p.x), y0 = std::floor(p.y);
+  for (int r = 0; r < kIconCells; ++r) {
+    for (int c = 0; rows[r][c]; ++c) {
+      const char ch = rows[r][c];
+      if (ch == '.') continue;
+      const float x = x0 + c * kIconScale, y = y0 + r * kIconScale;
+      dl->AddRectFilled(ImVec2(x, y), ImVec2(x + kIconScale, y + kIconScale),
+                        ch == 'o' ? mark : ink);
+    }
+  }
+}
 
 // Same grading the shell status line uses: green below `amber`, amber up to
 // `red`, red from there. `pct` is 0..100.
@@ -551,6 +714,261 @@ void message_field(AvatarUiState& state, const VoiceSession::Snapshot& snap, boo
     ImGui::TextColored(dim(), "Enter sends  -  Shift+Enter starts a line");
 }
 
+// ------------------------------------------------------------ the transport
+//
+// Three fixed slots. Stop hides itself when there is nothing to stop (user,
+// 16 Sep 2026) and its slot stays reserved when it does, because the row is
+// laid out from an origin and a slot index rather than by flowing one button
+// after another. That is not tidiness: the microphone button is the target of
+// a press-and-hold gesture, and a control that moves under a pointer mid-press
+// turns a release into an abandoned one, which is byte-for-byte the
+// hold-to-dictate path. The Talk-click bug of 16 Sep 2026 was exactly that
+// failure arriving by a different route (commit f713297), and Stop appears and
+// disappears *precisely* when the session starts and stops doing something —
+// i.e. at the moments a gesture is most likely to be in flight. So the slot is
+// empty, never closed up.
+
+struct TransportSkin {
+  ImVec4 bg, hovered, active, ink, mark;
+};
+
+TransportSkin neutral_skin(ImVec4 ink) {
+  return {ImGui::GetStyleColorVec4(ImGuiCol_Button),
+          ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered),
+          ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive), ink, ink};
+}
+
+// Submits one slot as an InvisibleButton at an absolute position and paints it.
+// Nothing is returned: the caller reads ImGui::IsItem* afterwards, which still
+// refers to this button because a draw-list call is not an item. The microphone
+// needs the press and the release separately, so a click-returning wrapper
+// would only have to be unwrapped again.
+bool transport_slot(const char* id, ImVec2 pos, const char* const* rows,
+                    const TransportSkin& skin) {
+  ImGui::SetCursorScreenPos(pos);
+  const bool clicked = ImGui::InvisibleButton(id, ImVec2(kTransportButton, kTransportButton));
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec4 bg = ImGui::IsItemActive()    ? skin.active
+                    : ImGui::IsItemHovered() ? skin.hovered
+                                             : skin.bg;
+  dl->AddRectFilled(pos, ImVec2(pos.x + kTransportButton, pos.y + kTransportButton),
+                    ImGui::GetColorU32(bg), ImGui::GetStyle().FrameRounding);
+  const float inset = (kTransportButton - kIconPx) * 0.5f;
+  draw_icon(dl, rows, ImVec2(pos.x + inset, pos.y + inset), ImGui::GetColorU32(skin.ink),
+            ImGui::GetColorU32(skin.mark));
+  return clicked;
+}
+
+// The five faces of the microphone button. Every one of them is something the
+// session can actually report — there is no "about to listen" or "hearing
+// noise" here, because nothing in VoiceSession knows either.
+enum class MicFace {
+  Unavailable,  // engines still loading, or --no-voice: nothing to press
+  Idle,         // shut, and the next press decides what it means
+  Dictating,    // a Talk press is down; the words are going into the box
+  Listening,    // latched on and hearing the room
+  Latched,      // latched on but deliberately shut while Claude replies
+};
+
+MicFace mic_face(const VoiceSession::Snapshot& snap, bool voice_enabled, bool loading,
+                 bool mic_on, bool mic_hold) {
+  // The same escape hatch `--clip` and `--sprite` give the avatar's art, and
+  // for the same reason: two of these five faces are only reachable by talking
+  // into a microphone, so without this there is no way to *look* at them — and
+  // "verified by looking at a capture" is the standard this panel is held to.
+  // `AII_MIC_FACE=0..4` pins one; `cycle` walks all five, two seconds each.
+  if (const char* pin = std::getenv("AII_MIC_FACE")) {
+    const int n = std::strcmp(pin, "cycle") == 0
+                      ? static_cast<int>(ImGui::GetTime() * 0.5) % 5
+                      : std::atoi(pin);
+    return static_cast<MicFace>(std::clamp(n, 0, 4));
+  }
+  if (loading || !voice_enabled) return MicFace::Unavailable;
+  // A hold is not the latch and never sets it (VoiceSession::talk_pressed),
+  // so this order is not a preference between two true things.
+  if (mic_hold) return MicFace::Dictating;
+  if (!mic_on) return MicFace::Idle;
+  return snap.state == VoiceSession::State::Listening ? MicFace::Listening : MicFace::Latched;
+}
+
+const char* const* mic_icon(MicFace face) {
+  switch (face) {
+    case MicFace::Dictating: return kIconMicHold;
+    case MicFace::Listening: return kIconMicLive;
+    case MicFace::Latched: return kIconMicShut;
+    default: return kIconMic;
+  }
+}
+
+// Colour *and* a change of icon, never colour alone (user, 16 Sep 2026): each
+// row below pairs a plate with a different glyph, so the button still reads on
+// a monitor, in a capture and to a colour-blind eye. The open-microphone red is
+// the one this panel already used; what has gone is the word "Mute" on it,
+// which now belongs to the button next door.
+TransportSkin mic_skin(MicFace face) {
+  switch (face) {
+    case MicFace::Listening:
+      return {red(), red_hot(), red_deep(), ui_color(1.00f, 0.96f, 0.95f), warn()};
+    case MicFace::Latched:
+      // Darker than Listening on purpose: the latch is on but the room is not
+      // being heard, and the slash across the icon is what says which.
+      return {red_deep(), red(), red_deep(), ui_color(0.98f, 0.86f, 0.85f), warn()};
+    case MicFace::Dictating:
+      return {ui_color(0.62f, 0.42f, 0.10f), ui_color(0.74f, 0.51f, 0.14f),
+              ui_color(0.50f, 0.33f, 0.07f), ui_color(1.00f, 0.97f, 0.90f), warn()};
+    case MicFace::Unavailable:
+      return neutral_skin(dim());
+    default:
+      return neutral_skin(fg());
+  }
+}
+
+const char* mic_tooltip(MicFace face) {
+  switch (face) {
+    case MicFace::Unavailable: return "Microphone - not ready yet";
+    // The two gestures, still spelled out: they are the whole of what this
+    // button does and the label that used to hint at it is gone.
+    case MicFace::Idle: return "Click to talk  -  hold to dictate into the box";
+    case MicFace::Dictating: return "Recording - release to put it in the box";
+    case MicFace::Listening: return "Listening - click to stop  (hold to dictate)";
+    default: return "Conversation mode - the mic reopens when Claude finishes.\nClick to stop.";
+  }
+}
+
+// Is there anything for Stop to stop? Everything stop() actually does, asked as
+// a question: a reply to cancel, an utterance in progress, the latch it drops,
+// or a worker it would pause. A button that can do nothing is not drawn.
+bool anything_to_stop(const VoiceSession::Snapshot& snap, bool mic_on, bool mic_hold) {
+  switch (snap.state) {
+    case VoiceSession::State::Listening:
+    case VoiceSession::State::Thinking:
+    case VoiceSession::State::Speaking:
+      return true;
+    default:
+      break;
+  }
+  if (mic_on || mic_hold) return true;
+  for (const auto& w : snap.workers) {
+    if (w.state == WorkerPool::State::Starting || w.state == WorkerPool::State::Working)
+      return true;
+  }
+  return false;
+}
+
+void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool voice_enabled,
+               bool loading, bool mic_on, bool mic_hold, AvatarUiResult& out) {
+  const ImGuiStyle& style = ImGui::GetStyle();
+  const float gap = style.ItemSpacing.x;
+  // One origin, three slot indices. Read off the layout cursor once, before
+  // anything is submitted, so nothing that happens inside the row can move a
+  // later slot: slot 2 being absent cannot shift slot 0 because slot 0's
+  // position was never a function of slot 2.
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  auto slot_pos = [&](int i) {
+    return ImVec2(origin.x + i * (kTransportButton + gap), origin.y);
+  };
+
+  ImGui::BeginDisabled(loading);
+
+  // The fixed-slot claim, published rather than asserted. Behind the same
+  // environment variable the gesture harness already uses, and printed only
+  // when something in it changes, so a run produces one line per distinct
+  // (microphone rect, Stop present) pair — which is exactly the pair that has
+  // to prove independent. Screen coordinates, so it is comparable with the
+  // window rect the harness measures from outside.
+  if (std::getenv("AII_TALK_DEBUG")) {
+    static float last[4] = {-1, -1, -1, -1};
+    static int last_stop = -1;
+    const bool stop_here = !loading && voice_enabled && anything_to_stop(snap, mic_on, mic_hold);
+    const ImVec2 m = slot_pos(0);
+    if (m.x != last[0] || m.y != last[1] || last_stop != static_cast<int>(stop_here)) {
+      last[0] = m.x;
+      last[1] = m.y;
+      last[2] = m.x + kTransportButton;
+      last[3] = m.y + kTransportButton;
+      last_stop = static_cast<int>(stop_here);
+      std::printf("  [row] mic_rect=(%.1f,%.1f)-(%.1f,%.1f) stop=%d\n", last[0], last[1], last[2],
+                  last[3], last_stop);
+      std::fflush(stdout);
+    }
+  }
+
+  // --- slot 0: the microphone (was "Talk"/"Mute") ---
+  //
+  // Two gestures on one button (M1b.3), unchanged. A **click** is the latch:
+  // one click opens the mic, the next shuts it, and in between the utterances
+  // send themselves on a pause. A **press and hold** records only while it is
+  // down and puts the transcript in the message field unsent.
+  //
+  // The press and the release are reported separately rather than taking a
+  // single click, because the session opens the microphone on the press —
+  // before the gesture's meaning is known — so that neither reading of it loses
+  // the words spoken while it was still undecided.
+  const MicFace face = mic_face(snap, voice_enabled, loading, mic_on, mic_hold);
+  transport_slot("##mic", slot_pos(0), mic_icon(face), mic_skin(face));
+  if (ImGui::IsItemActivated()) {
+    state.talk_pressed_at = ImGui::GetTime();
+    out.talk_pressed = true;
+  }
+  if (ImGui::IsItemDeactivated()) {
+    out.talk_released = true;
+    out.talk_held = ImGui::GetTime() - state.talk_pressed_at >= kTalkHoldSeconds;
+    // Judged against where the button is *this* frame, which is only a fair
+    // test because main.cpp changes the window's height and the avatar band
+    // together, at the top of a frame, before any of that frame's input is
+    // read. When it did not, the panel could be laid out 260 px from where it
+    // was on screen and this test called a release that never left the button
+    // an abandoned press — the Talk-click bug of 16 Sep 2026. The fixed slots
+    // above are the same invariant applied within the row.
+    out.talk_over_button = ImGui::IsItemHovered();
+  }
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", mic_tooltip(face));
+
+  // --- slot 1: mute (was "Silence") ---
+  //
+  // A level, not a one-shot. The old Silence emptied the speech queue, which
+  // stopped the sentence that was playing and nothing else — the turn thread
+  // went on feeding the queue and the reply carried on a beat later. This is
+  // remembered instead, across runs, and the session suppresses at the source
+  // while it is on. The reply still arrives as text: muting Claude's voice is
+  // not muting Claude.
+  //
+  // Live while loading, like the avatar-mode disc on the status row and unlike
+  // the two buttons either side of it: it is a stored preference about this
+  // window rather than a control that routes into engines that are not up yet,
+  // and a user who wants the app to come up silent wants to say so during the
+  // wait, not after the first reply has started talking.
+  ImGui::EndDisabled();
+  const TransportSkin mute_skin =
+      state.muted ? TransportSkin{ui_color(0.32f, 0.15f, 0.16f), ui_color(0.42f, 0.20f, 0.21f),
+                                  ui_color(0.25f, 0.11f, 0.12f), ui_color(0.88f, 0.74f, 0.73f),
+                                  bad()}
+                  : neutral_skin(fg());
+  if (transport_slot("##mute", slot_pos(1), state.muted ? kIconSpeakerMuted : kIconSpeaker,
+                     mute_skin))
+    state.muted = !state.muted;
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("%s", state.muted ? "Claude's voice is muted - click to unmute\n"
+                                          "(replies still arrive as text)"
+                                        : "Mute Claude's voice\n(replies still arrive as text)");
+
+  // --- slot 2: stop (was "Pause") ---
+  //
+  // Same behaviour as the old Pause, which was only ever misnamed: nothing here
+  // can resume a paused worker turn. Hidden when it would do nothing, and the
+  // slot it leaves behind is padding, not a gap that closes.
+  if (!loading && voice_enabled && anything_to_stop(snap, mic_on, mic_hold)) {
+    if (transport_slot("##stop", slot_pos(2), kIconStop, neutral_skin(accent()))) out.stop = true;
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Stop - cancel the reply, close the mic, pause every worker");
+  } else {
+    // The slot still exists; it is simply empty. Submitted rather than skipped
+    // so the row's content extent does not depend on whether Stop is there.
+    ImGui::SetCursorScreenPos(slot_pos(2));
+    ImGui::Dummy(ImVec2(kTransportButton, kTransportButton));
+  }
+}
+
 }  // namespace
 
 bool avatar_visible(AvatarVisibility mode, VoiceSession::State state) {
@@ -569,8 +987,8 @@ bool avatar_visible(AvatarVisibility mode, VoiceSession::State state) {
 }
 
 AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot& snap,
-                              bool voice_enabled, bool mic_on, std::uint32_t width,
-                              std::uint32_t top, bool submit) {
+                              bool voice_enabled, bool mic_on, bool mic_hold,
+                              std::uint32_t width, std::uint32_t top, bool submit) {
   AvatarUiResult out;
   const float w = static_cast<float>(width);
   // Everything below reacts to this one flag. With --no-voice there is no
@@ -624,69 +1042,25 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
   // window (the user asked for that order).
   message_field(state, snap, voice_enabled, loading, submit, out);
 
-  // Transport. Three equal buttons across the content width.
-  const float spacing = ImGui::GetStyle().ItemSpacing.x;
-  const float button_w = (ImGui::GetContentRegionAvail().x - 2.0f * spacing) / 3.0f;
-  const ImVec2 size(button_w, 34.0f);
-  // Two gestures on one button (M1b.3). A **click** is the latch it has always
-  // been: one click opens the mic, the next mutes it, and in between the
-  // utterances send themselves on a pause. A **press and hold** records only
-  // while it is down and puts the transcript in the message field unsent.
-  //
-  // The press and the release are reported separately rather than taking
-  // ImGui::Button's single click, because the session opens the microphone on
-  // the press — before the gesture's meaning is known — so that neither
-  // reading of it loses the words spoken while it was still undecided. The
-  // release then carries its duration against kTalkHoldSeconds and whether the
-  // pointer was still on the button, and the session decides from those.
-  //
-  // While the latch is on the button reads "Mute" and goes red in every state
-  // (hover and press included, or ImGui's blue would take over the moment the
-  // pointer touched it) so an open microphone is unmistakable. That includes
-  // the stretch where Claude is replying and the mic is briefly shut.
-  // Nothing routes anywhere until the engines are up, so during load the three
-  // read as unavailable rather than as live controls inviting a click.
-  ImGui::BeginDisabled(loading);
-  if (mic_on) {
-    ImGui::PushStyleColor(ImGuiCol_Button, red());
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, red_hot());
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, red_deep());
-    ImGui::PushStyleColor(ImGuiCol_Text, ui_color(1.00f, 0.96f, 0.95f));
-  }
-  ImGui::Button(mic_on ? "Mute" : "Talk", size);
-  if (ImGui::IsItemActivated()) {
-    state.talk_pressed_at = ImGui::GetTime();
-    out.talk_pressed = true;
-  }
-  if (ImGui::IsItemDeactivated()) {
-    out.talk_released = true;
-    out.talk_held = ImGui::GetTime() - state.talk_pressed_at >= kTalkHoldSeconds;
-    // Judged against where the button is *this* frame, which is only a fair
-    // test because main.cpp changes the window's height and the avatar band
-    // together, at the top of a frame, before any of that frame's input is
-    // read. When it did not, the panel could be laid out 260 px from where it
-    // was on screen and this test called a release that never left the button
-    // an abandoned press — the Talk-click bug of 16 Sep 2026.
-    out.talk_over_button = ImGui::IsItemHovered();
-  }
-  if (mic_on) ImGui::PopStyleColor(4);
-  if (ImGui::IsItemHovered())
-    ImGui::SetTooltip("%s", mic_on ? "Click to mute"
-                                   : "Click to talk  -  hold to dictate into the box");
-  ImGui::SameLine();
-  out.silence = ImGui::Button("Silence", size);
-  ImGui::SameLine();
-  out.pause = ImGui::Button("Pause", size);
-  ImGui::EndDisabled();
+  // The transport row: three small icon buttons in fixed slots. The row's own
+  // top is captured before it is drawn, because what the panel's height must
+  // be cannot come from the last item any more — the last item is Stop's slot,
+  // which on most frames is a Dummy, and on the frames it is not it is a
+  // button. Taking the height from the row's geometry instead makes the panel
+  // exactly as tall whether Stop is there or not, which is the same invariant
+  // as the slots themselves: nothing about this row may move because the
+  // session started or stopped doing something.
+  const float row_top = ImGui::GetCursorScreenPos().y;
+  transport(state, snap, voice_enabled, loading, mic_on, mic_hold, out);
 
-  // Measured from the last widget rather than read off the window. An
-  // auto-resizing window is capped at the viewport — which here is the OS
-  // window this number sets — so asking the window how tall it is makes the
-  // widget unable to grow past its own current height: with the avatar band
-  // gone, `top` is 0 and opening the chat could never make the window taller
-  // than the panel already was. The content bottom is not clamped, so it
-  // always reports what the layout actually wants.
-  const float bottom = ImGui::GetItemRectMax().y + ImGui::GetStyle().WindowPadding.y;
+  // Measured from the row rather than read off the window. An auto-resizing
+  // window is capped at the viewport — which here is the OS window this number
+  // sets — so asking the window how tall it is makes the widget unable to grow
+  // past its own current height: with the avatar band gone, `top` is 0 and
+  // opening the chat could never make the window taller than the panel already
+  // was. The content bottom is not clamped, so it always reports what the
+  // layout actually wants.
+  const float bottom = row_top + kTransportButton + ImGui::GetStyle().WindowPadding.y;
   out.desired_height = static_cast<std::uint32_t>(bottom + 0.5f);
   ImGui::End();
   ImGui::PopStyleColor();

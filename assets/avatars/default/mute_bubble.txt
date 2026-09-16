@@ -1,0 +1,22 @@
+# muted: a speech bubble with the speech crossed out. This is a *status*, not
+# an expression -- Claude's voice is muted and the chat is closed, so the panel
+# is not showing the Mute button's own colour to anyone looking at the corner
+# of their screen. A status that animates is noise, so it is one held frame:
+# it appears when mute goes on and disappears when it goes off, and does
+# nothing in between.
+#
+# Black bubble, white cross, the same two inks the body uses. 7x9: seven wide
+# is the most that fits beside the head without enlarging the envelope (the
+# note in avatar.json explains what that would cost), which is why this one
+# hangs off head_right at offset 2 rather than the 3 the others use.
+
+@frame hold=1
+.#####.
+#o...o#
+#.o.o.#
+#..o..#
+#.o.o.#
+#o...o#
+.#####.
+..#....
+.#.....

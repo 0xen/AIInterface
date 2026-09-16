@@ -62,6 +62,13 @@ struct AvatarUiState {
   // default once a load lands. The panel itself knows nothing about that —
   // main.cpp reads the file into this struct and mirrors changes back out.
   bool chat_open = false;
+  // Claude's voice is muted (voice-only: the reply still arrives as text).
+  // Same contract as `chat_open` — user state, written only by its own button
+  // and the S key, persisted to settings.json and read back before the first
+  // frame. The panel is the owner of record and main.cpp pushes it into the
+  // session every frame, which is the same "mirror the level, not the edge"
+  // pattern the persisted fields already use.
+  bool muted = false;
   // Same contract as `chat_open`, persistence included: user state, written
   // only by its button. Defaults to the behaviour that predates the button.
   AvatarVisibility avatar_mode = AvatarVisibility::Always;
@@ -107,8 +114,11 @@ struct AvatarUiResult {
   bool talk_released = false;
   bool talk_held = false;        // the release came after kTalkHoldSeconds
   bool talk_over_button = false; // ...and the pointer was still on the button
-  bool silence = false;  // Silence pressed
-  bool pause = false;    // Pause pressed
+  // Stop pressed: cancel the reply, drop the latch, pause the workers. The
+  // Silence button that used to sit beside it is gone — mute replaced it, and
+  // mute is a level in `AvatarUiState`, not an event, so it needs nothing
+  // here.
+  bool stop = false;
   // The message field's contents, on the frame Enter sent them; the field has
   // already been cleared. Empty on every other frame, including the ones where
   // a send was refused — the text stays in the field then, never swallowed.
@@ -129,8 +139,13 @@ struct AvatarUiResult {
 // `submit` is one plain-Enter press, from WinTextInput — which withholds that
 // key from ImGui so the multiline message field never turns it into a newline.
 // Shift+Enter never arrives here; ImGui sees it and inserts the newline itself.
+// `mic_on` is the latch; `mic_hold` is a Talk press being held right now. Both
+// are frame-loop facts the session owns rather than snapshot fields, and the
+// microphone button needs both to tell its five faces apart — a hold and a
+// latch look identical from the snapshot, and a SPACE hold never touches the
+// button at all.
 AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot& snap,
-                              bool voice_enabled, bool mic_on, std::uint32_t width,
-                              std::uint32_t top, bool submit);
+                              bool voice_enabled, bool mic_on, bool mic_hold,
+                              std::uint32_t width, std::uint32_t top, bool submit);
 
 }  // namespace aii

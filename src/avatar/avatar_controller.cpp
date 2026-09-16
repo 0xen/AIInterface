@@ -289,8 +289,9 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
   return pose;
 }
 
-void avatar_apply(const AvatarPose& pose, AvatarSource& src) {
-  const char* wanted = avatar_clip_sprite(pose.clip);
+void avatar_apply(const AvatarPose& pose, AvatarSource& src, const char* status_sprite) {
+  // A condition outranks a mood; see the note on the declaration for why.
+  const char* wanted = status_sprite ? status_sprite : avatar_clip_sprite(pose.clip);
   // Both the accessories and the clip are set on the same frame, before the
   // compose() that reads them, so there is no frame in which one is ahead of
   // the other. show_sprite() and play() are both no-ops when nothing changed.

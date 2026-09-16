@@ -173,6 +173,25 @@ class AvatarController {
 // Puts a pose on an AvatarSource: the clip, its accessory and its speed, in
 // one call, on the frame the pose was decided. Everything here lands in the
 // same compose(), so the sprite and the clip change together or not at all.
-void avatar_apply(const AvatarPose& pose, AvatarSource& src);
+//
+// `status_sprite`, when given, replaces whatever accessory the clip would have
+// put up. It is how a *condition* — as opposed to a mood — gets onto the
+// avatar: the muted speech bubble is the first and so far only one (16 Sep
+// 2026, shown when Claude's voice is muted and the chat is closed, which is
+// when the Mute button's own colour is not on screen to say so).
+//
+// **Precedence: the status sprite wins, always.** Two reasons, and they point
+// the same way. The clip accessories restate something the panel is already
+// saying out loud — the state line reads "thinking", the body is playing the
+// think clip, and the bubble is decoration on top of both; the muted bubble is
+// the *only* sign of a condition that is otherwise invisible with the chat
+// shut. And an indicator that yielded would blink out exactly while Claude was
+// thinking or asleep, which is to say it would flicker through precisely the
+// moments it exists to describe, and a flapping indicator is the failure this
+// project keeps having to design out. The body clip is untouched either way:
+// the slime still thinks and still sleeps, it just does it under the one
+// accessory that has something to add.
+void avatar_apply(const AvatarPose& pose, AvatarSource& src,
+                  const char* status_sprite = nullptr);
 
 }  // namespace aii

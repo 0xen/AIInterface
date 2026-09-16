@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 #include "rend/core/log.h"
 
@@ -188,7 +189,7 @@ void VoiceSession::load() {
   });
   log("speaker: " + speaker_->device_name());
   log("mic:     " + mic_->device_name());
-  set_status("ready. click Talk or press SPACE to speak.");
+  set_status("ready. click the mic or press SPACE to speak.");
   rend::log::info("engines up in {:.1f} s",
                   std::chrono::duration<double>(std::chrono::steady_clock::now() - load_began).count());
   loaded_ = true;
@@ -320,7 +321,7 @@ void VoiceSession::begin_listening() {
   {
     std::lock_guard<std::mutex> l(mutex_);
     partial_.clear();
-    status_ = "listening... pause sends; click Mute to stop";
+    status_ = "listening... pause sends; click the mic again to stop";
     set_state_locked(State::Listening);
   }
 }
@@ -386,6 +387,15 @@ void VoiceSession::talk_pressed() {
 }
 
 void VoiceSession::talk_released(bool over_button, bool held) {
+  // The gesture's verdict, on demand. Behind an environment variable because
+  // it is a line per press and is only ever wanted by the harness that drives
+  // the gesture matrix — which has no other way to see which of the two
+  // readings a press got, since both of them end with the microphone shut.
+  if (std::getenv("AII_TALK_DEBUG")) {
+    log(std::string("[talk] verdict=") + (!hold_ ? "latch-release" : (held || !over_button) ? "dictate" : "latch-on") +
+        " over_button=" + (over_button ? "1" : "0") + " held=" + (held ? "1" : "0") +
+        " hold=" + (hold_ ? "1" : "0") + " mic_open=" + (mic_open_ ? "1" : "0"));
+  }
   if (!hold_) {
     // The latch owned this press, or something took the microphone mid-gesture.
     // Over the button it means what it has always meant: mute, and send what
@@ -410,7 +420,7 @@ void VoiceSession::talk_released(bool over_button, bool held) {
   // latches it — which is what makes the click path identical to the one that
   // predates the gesture, including the slow click that spent 300 ms deciding.
   set_mic_open(true);
-  set_status("listening... pause sends; click Mute to stop");
+  set_status("listening... pause sends; click the mic again to stop");
 }
 
 void VoiceSession::set_mic_open(bool open) {
@@ -458,17 +468,26 @@ void VoiceSession::say(const std::string& text) {
   start_turn(trim(text));
 }
 
-void VoiceSession::silence() {
-  if (speech_) speech_->clear();
+void VoiceSession::set_muted(bool muted) {
+  if (muted_.exchange(muted) == muted) return;  // a level, not an edge
+  // Going on cuts what is already playing. The old silence() stopped here and
+  // that was the whole of its shortcoming: the splitter goes on feeding the
+  // queue from the turn thread, so the next sentence of the same reply started
+  // speaking a moment later. Everything downstream of here is suppressed at
+  // the enqueue instead — see run_turn() and flush_announcements() — so the
+  // queue stays empty for as long as this is on, and the transcript, which is
+  // written on a different path entirely, is untouched.
+  if (muted && speech_) speech_->clear();
+  log(muted ? "[mute] on (voice suppressed; text unaffected)" : "[mute] off");
 }
 
-void VoiceSession::pause() {
+void VoiceSession::stop() {
   State s;
   {
     std::lock_guard<std::mutex> l(mutex_);
     s = state_;
   }
-  // Pause is a full stop: drop the mic latch too, or update() would reopen
+  // Stop is a full stop: drop the mic latch too, or update() would reopen
   // the mic on the very next frame. A Talk press still held goes with it —
   // its release must not then finalise an utterance this just cancelled.
   mic_open_ = false;
@@ -479,8 +498,8 @@ void VoiceSession::pause() {
     cancel_ = true;
     speech_->clear();
     set_state(State::Idle);
-    set_status(paused_workers ? "paused (" + std::to_string(paused_workers) + " worker(s)). ready."
-                              : "paused. ready.");
+    set_status(paused_workers ? "stopped (" + std::to_string(paused_workers) + " worker(s) paused). ready."
+                              : "stopped. ready.");
   } else if (s == State::Listening) {
     mic_->stop();
     std::lock_guard<std::mutex> l(mutex_);
@@ -517,7 +536,23 @@ void VoiceSession::start_turn(std::string text) {
 
 void VoiceSession::run_turn(std::string text) {
   speech_->mark_new_reply();
-  SentenceSplitter splitter([this](const std::string& s) { speech_->enqueue(s); }, cfg_.early_words);
+  // The one place a reply becomes sound, and therefore the only place mute can
+  // honestly be applied. Clearing the queue alone (what silence() used to do)
+  // stops the sentence that is playing and nothing else: this callback is on
+  // the turn thread and keeps handing the queue the next sentence, so the
+  // reply carries on speaking a beat later. The text side of this same loop —
+  // `lines_.back().text += delta` above — is untouched, which is what makes
+  // mute voice-only.
+  SentenceSplitter splitter([this](const std::string& s) {
+    if (muted_) {
+      // Traced rather than silent: "the app said nothing" and "the app was
+      // muted" look identical from outside, and this is the line that tells
+      // them apart in a log.
+      rend::log::trace("mute: dropped {} chars of speech", s.size());
+      return;
+    }
+    speech_->enqueue(s);
+  }, cfg_.early_words);
   bool first = true;
   ChatResult r = eng_.llm->turn(text, [&](const std::string& delta) {
     {
@@ -573,6 +608,17 @@ bool VoiceSession::flush_announcements() {
   {
     std::lock_guard<std::mutex> l(mutex_);
     if (pending_announce_.empty()) return false;
+    // Muted: the report is already in the transcript (announce() put it there
+    // the moment it arrived), so there is nothing left to do but drop the
+    // spoken copy. Deliberately *not* held back for an unmute — a worker
+    // report is about a moment, and a queue of them read out later would be
+    // worse than not having heard them. It also must not take the floor:
+    // returning true here would shut the microphone and push the state to
+    // Speaking for a reply that is never going to make a sound.
+    if (muted_) {
+      pending_announce_.clear();
+      return false;
+    }
     say_now.swap(pending_announce_);
     partial_.clear();
     set_state_locked(State::Speaking);

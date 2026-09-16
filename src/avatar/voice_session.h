@@ -74,7 +74,7 @@ class VoiceSession {
 
   void update();                       // once per frame, main thread
   // The microphone latch. Click on to listen, click again to mute. The
-  // session owns the latch rather than the UI, because pause() drops it too
+  // session owns the latch rather than the UI, because stop() drops it too
   // and a UI-owned copy would just set it again on the next frame.
   // While it is on, a pause long enough to look like the end of an
   // utterance sends that utterance on its own, and the mic reopens once the
@@ -97,8 +97,25 @@ class VoiceSession {
   void talk_pressed();
   void talk_released(bool over_button, bool held);
   bool mic_open() const { return mic_open_; }
-  void silence();                      // stop the audio, keep the text coming
-  void pause();                        // cancel the reply and pause every worker
+  // A Talk press is down and this session is recording for it (M1b.3). Frame
+  // loop only, like mic_open(). It is what the microphone button draws its
+  // "dictating" face from, and the panel has no other way to tell a hold from
+  // a latch — a SPACE hold never touches the button at all.
+  bool mic_hold() const { return hold_; }
+  // The persistent mute of Claude's *voice* (16 Sep 2026). Not the old
+  // one-shot silence(), which only emptied the queue and was overtaken by the
+  // next sentence of the same reply a moment later: this suppresses at the
+  // source as well, so nothing synthesised after it is ever queued. The reply
+  // still arrives as text — mute is voice-only, and the transcript is
+  // untouched. Cuts mid-sentence when it goes on, because a mute that waits
+  // for the current sentence is not a mute.
+  void set_muted(bool muted);
+  bool muted() const { return muted_; }
+  // Stop: cancel the reply in flight, drop the mic latch and any held Talk
+  // gesture, and pause every running worker. It was called pause() until
+  // 16 Sep 2026; nothing here can resume a paused worker turn, so the name was
+  // the only pause-like thing about it. The behaviour is unchanged.
+  void stop();
   void say(const std::string& text);   // send typed/scripted text as the user turn
   bool quitting_ok() const;            // true once no worker is mid-turn
 
@@ -149,10 +166,14 @@ class VoiceSession {
 
   // Frame-loop state: touched only from update()/set_mic_open().
   bool mic_open_ = false;
+  // Claude's voice is muted (voice-only; the text still arrives). Atomic
+  // because the turn thread reads it for every sentence the splitter emits,
+  // while the frame loop is what sets it.
+  std::atomic<bool> muted_{false};
   // A Talk press is down and this session opened the microphone for it. It is
   // deliberately not the same thing as mic_open_: a hold must not auto-send on
   // a pause and must not reopen after a reply, which is exactly what the latch
-  // means. Anything that takes the microphone away (the latch, Pause) clears
+  // means. Anything that takes the microphone away (the latch, Stop) clears
   // it, so a release that arrives afterwards is a no-op rather than a second
   // close.
   bool hold_ = false;

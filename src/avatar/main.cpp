@@ -483,6 +483,7 @@ int main(int /*argc*/, char** /*argv*/) {
     // the window (M1d.1 needs it to place the window at all); a load failure
     // was already reported there, and every key here answers with its default.
     uiState.chat_open = settings.get_bool("panel", "chat_open", uiState.chat_open);
+    uiState.muted = settings.get_bool("panel", "muted", uiState.muted);
     uiState.avatar_mode = static_cast<aii::AvatarVisibility>(
         settings.get_enum("panel", "avatar_mode", aii::kAvatarVisibilityNames,
                           aii::kAvatarVisibilityCount, static_cast<int>(uiState.avatar_mode)));
@@ -615,8 +616,15 @@ int main(int /*argc*/, char** /*argv*/) {
                         if (session) session->talk_pressed();
                     }
                 }
-                else if (session && event.key == platform::Key::S) session->silence();
-                else if (session && event.key == platform::Key::E) session->pause();
+                // S is mute, E is stop — the same two keys, following the two
+                // buttons they have always shadowed as those buttons changed
+                // meaning (16 Sep 2026). S toggles the panel's own stored flag
+                // rather than calling into the session, because the panel is
+                // the owner of record for it and the mirror below is what
+                // carries it into the session and into settings.json; calling
+                // the session here would leave the button and the file behind.
+                else if (event.key == platform::Key::S) uiState.muted = !uiState.muted;
+                else if (session && event.key == platform::Key::E) session->stop();
                 break;
             case platform::Event::Type::KeyUp:
                 if (event.key == platform::Key::Space) releaseSpace(true);
@@ -673,7 +681,14 @@ int main(int /*argc*/, char** /*argv*/) {
                 controller.note_definition(avatarSource.definition());
         }
         if (controllerOwnsAvatar) {
-            aii::avatar_apply(controller.update(snap, dt), avatarSource);
+            // Muted with the chat shut is the one case where the panel cannot
+            // say so by itself — the Mute button is on screen, but the widget
+            // in the corner is a 360 px strip a user is not looking at, and
+            // the point of the bubble is that the avatar carries the news. It
+            // outranks the clip's own accessory (see avatar_apply).
+            const char* statusSprite =
+                (uiState.muted && !uiState.chat_open) ? "muted" : nullptr;
+            aii::avatar_apply(controller.update(snap, dt), avatarSource, statusSprite);
             if (controller.clip() != lastClipLogged) {
                 lastClipLogged = controller.clip();
                 log::info("avatar clip: {} ({}) after {:.2f}s", lastClipLogged,
@@ -766,12 +781,18 @@ int main(int /*argc*/, char** /*argv*/) {
             const bool submit = textInput && textInput->take_submit();
             const aii::AvatarUiResult r =
                 aii::draw_avatar_ui(uiState, snap, session != nullptr,
-                                    session && session->mic_open(), kWindowW, band, submit);
+                                    session && session->mic_open(),
+                                    session && session->mic_hold(), kWindowW, band, submit);
             if (session) {
                 if (r.talk_pressed) session->talk_pressed();
                 if (r.talk_released) session->talk_released(r.talk_over_button, r.talk_held);
-                if (r.silence) session->silence();
-                if (r.pause) session->pause();
+                if (r.stop) session->stop();
+                // Mute is a level, not an event: the button and the S key both
+                // write the panel's flag and this pushes it down, so there is
+                // one place that decides what "muted" is. set_muted() is a
+                // no-op unless it changed, and the cut-what-is-playing part of
+                // it happens on the edge inside the session.
+                session->set_muted(uiState.muted);
                 // Only reaches here once the panel has satisfied itself the
                 // session can take it; say() refuses the rest anyway.
                 if (!r.send_text.empty()) session->say(r.send_text);
@@ -782,6 +803,7 @@ int main(int /*argc*/, char** /*argv*/) {
             // of every control that touches a persisted field remembering to
             // say so. The write itself is debounced inside Settings.
             settings.set_bool("panel", "chat_open", uiState.chat_open);
+            settings.set_bool("panel", "muted", uiState.muted);
             settings.set_enum("panel", "avatar_mode", aii::kAvatarVisibilityNames,
                               aii::kAvatarVisibilityCount,
                               static_cast<int>(uiState.avatar_mode));

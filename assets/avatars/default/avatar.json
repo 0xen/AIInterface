@@ -70,6 +70,17 @@
       ]
     },
     {
+      "name": "muted",
+      "_about": "Not a clip accessory like the four below it: this one is switched on by the panel when Claude's voice is muted and the chat is closed, and it outranks whatever the current clip would otherwise have put up. Seven wide at offset 2 instead of six at offset 3 -- same right edge, so the envelope is unchanged at 22x16 and the body keeps its full 256 px; the extra cell is what lets the cross inside the bubble read at all.",
+      "grid": { "width": 7, "height": 9 },
+      "anchor": "head_right",
+      "offset": [2, -4],
+      "default_clip": "hold",
+      "clips": [
+        { "name": "hold", "fps": 4, "loop": true, "file": "mute_bubble.txt" }
+      ]
+    },
+    {
       "name": "steam",
       "grid": { "width": 5, "height": 8 },
       "anchor": "head_right",
