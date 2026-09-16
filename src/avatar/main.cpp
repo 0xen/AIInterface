@@ -26,10 +26,13 @@
 //                 Same reason: M2.4 decides when a thought bubble belongs on
 //                 screen, so until then this is the only way to see one.
 //
-//   SPACE / Talk    toggle the mic: click to listen, click again to mute
-//                   (unmuting mid-reply barges in). While the mic is on, a
-//                   pause in speech sends that utterance and the mic reopens
-//                   after the reply, so one click carries a conversation
+//   SPACE / Talk    click (or tap) toggles the mic: conversation mode. While
+//                   the mic is on, a pause in speech sends that utterance and
+//                   the mic reopens after the reply, so one click carries a
+//                   whole conversation. Press and hold instead to dictate: it
+//                   records only while held and the transcript lands in the
+//                   message field unsent, for editing. Either gesture barges
+//                   in on a reply in flight.
 //   S / Silence     stop the audio, keep the text
 //   E / Pause       cancel the reply in flight
 //   Esc / Q         quit
@@ -410,7 +413,25 @@ int main(int /*argc*/, char** /*argv*/) {
     std::uint32_t pendingH = 0;
     bool running = true;
     bool saidOnce = sayText.empty();
-    bool spaceDown = false;  // SPACE is the keyboard half of the mic latch
+    // SPACE is the keyboard half of the Talk gesture, and carries both of its
+    // meanings (M1b.3): tap it for the latch, hold it to dictate. SDL repeats
+    // KeyDown while a key is held, so only the first one is the press — the
+    // same edge guard that already stopped a leaned-on SPACE flapping the
+    // latch is what makes auto-repeat harmless here.
+    bool spaceDown = false;
+    std::chrono::steady_clock::time_point spaceDownAt{};
+    // Releases a SPACE gesture, wherever the release is noticed. `over` is
+    // false only where the key-up itself went missing — the panel taking the
+    // keyboard mid-hold — which is the same abandoned press as dragging off
+    // the button, and ends the utterance in the field rather than sending it.
+    auto releaseSpace = [&](bool over) {
+        if (!spaceDown) return;
+        spaceDown = false;
+        if (!session) return;
+        const float heldFor = std::chrono::duration<float>(
+            std::chrono::steady_clock::now() - spaceDownAt).count();
+        session->talk_released(over, heldFor >= aii::kTalkHoldSeconds);
+    };
     // M1.5 handoff: 0 while the engines are still loading, then driven to 1
     // over kHandoffSeconds. The last stage name and the bar are frozen at the
     // moment loading ended, so the caption does not blank out mid-fade — the
@@ -436,10 +457,11 @@ int main(int /*argc*/, char** /*argv*/) {
             if (uiHasKeyboard && (event.type == platform::Event::Type::KeyDown ||
                                   event.type == platform::Event::Type::KeyUp)) {
                 // Held keys still have to be released, or a SPACE leaned on as
-                // the field took focus would latch `spaceDown` forever.
+                // the field took focus would latch `spaceDown` forever — and
+                // now would leave the microphone open with it.
                 if (event.type == platform::Event::Type::KeyUp &&
                     event.key == platform::Key::Space)
-                    spaceDown = false;
+                    releaseSpace(false);
                 continue;
             }
             switch (event.type) {
@@ -448,17 +470,18 @@ int main(int /*argc*/, char** /*argv*/) {
                 break;
             case platform::Event::Type::KeyDown:
                 if (event.key == platform::Key::Escape || event.key == platform::Key::Q) running = false;
-                // SDL repeats KeyDown while a key is held; only the first
-                // one is an edge, so a leaned-on SPACE does not flap the latch.
                 else if (event.key == platform::Key::Space) {
-                    if (!spaceDown && session) session->toggle_mic();
-                    spaceDown = true;
+                    if (!spaceDown) {
+                        spaceDown = true;
+                        spaceDownAt = std::chrono::steady_clock::now();
+                        if (session) session->talk_pressed();
+                    }
                 }
                 else if (session && event.key == platform::Key::S) session->silence();
                 else if (session && event.key == platform::Key::E) session->pause();
                 break;
             case platform::Event::Type::KeyUp:
-                if (event.key == platform::Key::Space) spaceDown = false;
+                if (event.key == platform::Key::Space) releaseSpace(true);
                 break;
             case platform::Event::Type::Resized:
                 width = event.size.width;
@@ -581,7 +604,8 @@ int main(int /*argc*/, char** /*argv*/) {
                 aii::draw_avatar_ui(uiState, snap, session != nullptr,
                                     session && session->mic_open(), kWindowW, band, submit);
             if (session) {
-                if (r.talk_clicked) session->toggle_mic();
+                if (r.talk_pressed) session->talk_pressed();
+                if (r.talk_released) session->talk_released(r.talk_over_button, r.talk_held);
                 if (r.silence) session->silence();
                 if (r.pause) session->pause();
                 // Only reaches here once the panel has satisfied itself the

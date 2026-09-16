@@ -320,6 +320,31 @@ bool dictate_into_field(AvatarUiState& s, const VoiceSession::Snapshot& snap) {
     return true;
   }
 
+  // A hold-to-dictate release (M1b.3). The session finalised the utterance
+  // without sending it and published the finished decode, which is not always
+  // what the last partial said, so the field is written from it one last time.
+  // An empty one rebuilds the field as the prefix alone: a hold that captured
+  // nothing leaves what the user had typed exactly as it was, with no trailing
+  // space, because the separator is only ever added in front of real words.
+  if (s.dictated_seq != snap.dictated_seq) {
+    s.dictated_seq = snap.dictated_seq;
+    const bool ours = s.dictation == AvatarUiState::Dictation::Writing;
+    s.dictation = AvatarUiState::Dictation::Idle;
+    if (ours) {  // Yielded means the user was editing; their text wins outright
+      std::string next = s.dictation_prefix;
+      if (!snap.partial.empty()) {
+        if (!next.empty() && next.back() != ' ' && next.back() != '\n') next += ' ';
+        next += snap.partial;
+      }
+      if (next != s.message) {
+        std::snprintf(s.message, sizeof(s.message), "%s", next.c_str());
+        s.dictation_last = s.message;
+        return true;
+      }
+    }
+    return false;
+  }
+
   if (!was_listening) return false;
   // The utterance was sent the moment the session went to Thinking; that is
   // the only exit that clears, and it clears back to what the user had typed.
@@ -481,8 +506,19 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
   const float spacing = ImGui::GetStyle().ItemSpacing.x;
   const float button_w = (ImGui::GetContentRegionAvail().x - 2.0f * spacing) / 3.0f;
   const ImVec2 size(button_w, 34.0f);
-  // A latch, not a hold: one click opens the mic, the next mutes it. While
-  // the latch is on the button reads "Mute" and goes red in every state
+  // Two gestures on one button (M1b.3). A **click** is the latch it has always
+  // been: one click opens the mic, the next mutes it, and in between the
+  // utterances send themselves on a pause. A **press and hold** records only
+  // while it is down and puts the transcript in the message field unsent.
+  //
+  // The press and the release are reported separately rather than taking
+  // ImGui::Button's single click, because the session opens the microphone on
+  // the press — before the gesture's meaning is known — so that neither
+  // reading of it loses the words spoken while it was still undecided. The
+  // release then carries its duration against kTalkHoldSeconds and whether the
+  // pointer was still on the button, and the session decides from those.
+  //
+  // While the latch is on the button reads "Mute" and goes red in every state
   // (hover and press included, or ImGui's blue would take over the moment the
   // pointer touched it) so an open microphone is unmistakable. That includes
   // the stretch where Claude is replying and the mic is briefly shut.
@@ -495,8 +531,20 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, red_deep());
     ImGui::PushStyleColor(ImGuiCol_Text, ui_color(1.00f, 0.96f, 0.95f));
   }
-  out.talk_clicked = ImGui::Button(mic_on ? "Mute" : "Talk", size);
+  ImGui::Button(mic_on ? "Mute" : "Talk", size);
+  if (ImGui::IsItemActivated()) {
+    state.talk_pressed_at = ImGui::GetTime();
+    out.talk_pressed = true;
+  }
+  if (ImGui::IsItemDeactivated()) {
+    out.talk_released = true;
+    out.talk_held = ImGui::GetTime() - state.talk_pressed_at >= kTalkHoldSeconds;
+    out.talk_over_button = ImGui::IsItemHovered();
+  }
   if (mic_on) ImGui::PopStyleColor(4);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("%s", mic_on ? "Click to mute"
+                                   : "Click to talk  -  hold to dictate into the box");
   ImGui::SameLine();
   out.silence = ImGui::Button("Silence", size);
   ImGui::SameLine();

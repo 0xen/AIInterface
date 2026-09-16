@@ -35,6 +35,14 @@ class VoiceSession {
     std::string usage;    // subscription window readout, empty until known
     UsageStats usage_stats;  // the same numbers unformatted (negative = unknown)
     std::string partial;  // live transcript while listening
+    // Bumped once each time an utterance is finalised *without* being sent —
+    // a hold-to-dictate release. `partial` then holds the finished decode
+    // rather than the last half-word, and the panel writes it into the message
+    // field one last time. A counter rather than a flag because the panel reads
+    // snapshots at frame rate and must apply that write exactly once; every
+    // other way of leaving Listening leaves this alone, so the Pause and
+    // Silence behaviour M1b.4 settled is untouched.
+    unsigned dictated_seq = 0;
     // Engine bring-up, for the loading screen. The progress is weighted by
     // measured load times, so it tracks the wait rather than the stage count,
     // and it never goes backwards: it stops where it is if a stage fails.
@@ -57,6 +65,20 @@ class VoiceSession {
   // speakers are never transcribed back in as the user. Turning it off sends
   // whatever was captured but not yet sent.
   void toggle_mic();
+  // The two halves of the Talk gesture (M1b.3). The microphone opens on the
+  // press, before it is known whether this is a click or a hold, so that a
+  // hold loses none of its first words and a click that took 300 ms is not
+  // punished for it; the release is what gives the press its meaning.
+  //
+  // `over_button` is false when the pointer left the button before it came up
+  // — the usual escape hatch out of a press you did not mean. `held` is the
+  // caller's verdict on the duration, made against kTalkHoldSeconds in
+  // avatar_ui.h, because both the button and SPACE have to agree on it.
+  // A release with `held` set finalises the utterance into the message field
+  // without sending it; a short one latches the microphone on, which is the
+  // conversation mode a click has always meant.
+  void talk_pressed();
+  void talk_released(bool over_button, bool held);
   bool mic_open() const { return mic_open_; }
   void silence();                      // stop the audio, keep the text coming
   void pause();                        // cancel the reply and pause every worker
@@ -75,9 +97,15 @@ class VoiceSession {
   float begin_load_stage(size_t index);
   void set_mic_open(bool open);
   void begin_listening();
+  // Closes the mic and decodes what is left, returning the final text. Both
+  // ends of an utterance go through here so the decode is written once.
+  std::string finish_utterance();
   // Closes the mic, decodes what is left and starts the turn. Leaves the
   // state Idle instead when nothing intelligible was said.
   void end_listening_and_send();
+  // The same close and decode, but the text becomes a dictation for the
+  // message field instead of a turn (M1b.3).
+  void end_listening_unsent();
   void start_turn(std::string text);
   void run_turn(std::string text);
   void run_commands(const std::string& reply_text);
@@ -99,6 +127,13 @@ class VoiceSession {
 
   // Frame-loop state: touched only from update()/set_mic_open().
   bool mic_open_ = false;
+  // A Talk press is down and this session opened the microphone for it. It is
+  // deliberately not the same thing as mic_open_: a hold must not auto-send on
+  // a pause and must not reopen after a reply, which is exactly what the latch
+  // means. Anything that takes the microphone away (the latch, Pause) clears
+  // it, so a release that arrives afterwards is a no-op rather than a second
+  // close.
+  bool hold_ = false;
   // The noise gate behind end-of-utterance detection: when the microphone
   // last carried something louder than the room, and the room level it is
   // being judged against.
@@ -121,6 +156,7 @@ class VoiceSession {
   std::string load_stage_;
   std::string usage_;
   std::string partial_;
+  unsigned dictated_seq_ = 0;
   std::vector<Line> lines_;
   // Worker reports waiting for a gap in which to be spoken.
   std::vector<std::string> pending_announce_;

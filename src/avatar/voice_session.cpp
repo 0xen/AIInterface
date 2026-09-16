@@ -235,10 +235,13 @@ void VoiceSession::update() {
       if (mic_open_ && !trim(p).empty() && quiet_for >= cfg_.endpoint_silence &&
           eng_.stt->is_endpoint()) {
         end_listening_and_send();
-      } else if (trim(p).empty() && quiet_for >= kAnnounceGapSec) {
+      } else if (!hold_ && trim(p).empty() && quiet_for >= kAnnounceGapSec) {
         // A worker reported while the mic was open. Wait for a gap rather
         // than cutting in: nothing has been said this utterance and the room
-        // is quiet, so taking the floor now interrupts no one.
+        // is quiet, so taking the floor now interrupts no one. Never during a
+        // hold: the user has a button down, and taking the microphone out from
+        // under them would end the dictation they are in the middle of. The
+        // report waits the second or two the gesture lasts.
         flush_announcements();
       }
     }
@@ -281,12 +284,16 @@ void VoiceSession::begin_listening() {
   }
 }
 
-void VoiceSession::end_listening_and_send() {
+std::string VoiceSession::finish_utterance() {
   mic_->stop();
   chunk_.clear();
   mic_->drain(chunk_);
   if (!chunk_.empty()) eng_.stt->feed(chunk_.data(), (int)chunk_.size(), kMicRate);
-  std::string text = trim(eng_.stt->finish());
+  return trim(eng_.stt->finish());
+}
+
+void VoiceSession::end_listening_and_send() {
+  std::string text = finish_utterance();
   {
     std::lock_guard<std::mutex> l(mutex_);
     partial_.clear();
@@ -299,7 +306,71 @@ void VoiceSession::end_listening_and_send() {
   start_turn(text);
 }
 
+void VoiceSession::end_listening_unsent() {
+  // The same finalise the sending path uses — the decoder has to be flushed
+  // either way, and a hold that ended on a half-decoded partial would leave
+  // the user editing words the recogniser had already changed its mind about.
+  // The text is published as `partial_` with the sequence bumped: the panel
+  // writes it into the message field, and nothing here starts a turn.
+  const std::string text = finish_utterance();
+  std::lock_guard<std::mutex> l(mutex_);
+  partial_ = text;
+  ++dictated_seq_;
+  state_ = State::Idle;
+  status_ = text.empty() ? "heard nothing. ready."
+                         : "in the message box. edit it, then press Enter.";
+}
+
 void VoiceSession::toggle_mic() { set_mic_open(!mic_open_); }
+
+void VoiceSession::talk_pressed() {
+  if (mic_open_) return;  // the latch is already on; the release mutes it
+  State s;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    s = state_;
+  }
+  if (s == State::Loading || s == State::Failed) return;
+  // Barge-in on the press, not on the release: the same rule as unmuting
+  // mid-answer, and waiting for the release would mean talking over the reply
+  // for as long as the gesture lasted before it was cut off.
+  if (s == State::Thinking || s == State::Speaking) {
+    cancel_ = true;
+    speech_->clear();
+  }
+  if (s != State::Listening) begin_listening();
+  hold_ = true;
+  // begin_listening()'s line describes the latch, which this is not yet.
+  set_status("listening...");
+}
+
+void VoiceSession::talk_released(bool over_button, bool held) {
+  if (!hold_) {
+    // The latch owned this press, or something took the microphone mid-gesture.
+    // Over the button it means what it has always meant: mute, and send what
+    // was captured. Released off it, the press is abandoned.
+    if (over_button && mic_open_) toggle_mic();
+    return;
+  }
+  hold_ = false;
+  State s;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    s = state_;
+  }
+  if (s != State::Listening) return;
+  if (held || !over_button) {
+    // A hold, or a press dragged off the button and abandoned. Either way the
+    // words belong in the field rather than in a turn.
+    end_listening_unsent();
+    return;
+  }
+  // Short and on target: a click. The microphone is already open, so this only
+  // latches it — which is what makes the click path identical to the one that
+  // predates the gesture, including the slow click that spent 300 ms deciding.
+  set_mic_open(true);
+  set_status("listening... pause sends; click Mute to stop");
+}
 
 void VoiceSession::set_mic_open(bool open) {
   if (open == mic_open_) return;  // a level, not an edge: nothing to do
@@ -316,6 +387,9 @@ void VoiceSession::set_mic_open(bool open) {
   }
 
   if (open) {
+    // The latch outranks a gesture in flight: with it on the utterance sends
+    // itself on a pause, so there is nothing left for a release to finalise.
+    hold_ = false;
     // Switched on. Barge-in if a reply is in flight: unmuting mid-answer is
     // how the user interrupts it.
     if (s == State::Thinking || s == State::Speaking) {
@@ -354,8 +428,10 @@ void VoiceSession::pause() {
     s = state_;
   }
   // Pause is a full stop: drop the mic latch too, or update() would reopen
-  // the mic on the very next frame.
+  // the mic on the very next frame. A Talk press still held goes with it —
+  // its release must not then finalise an utterance this just cancelled.
   mic_open_ = false;
+  hold_ = false;
   const size_t paused_workers = workers_ ? workers_->running() : 0;
   if (workers_) workers_->pause_all();
   if (s == State::Thinking || s == State::Speaking) {
@@ -503,6 +579,7 @@ VoiceSession::Snapshot VoiceSession::snapshot() const {
   s.usage = usage_;
   s.usage_stats = stats;
   s.partial = partial_;
+  s.dictated_seq = dictated_seq_;
   s.load_progress = load_progress_;
   s.load_stage = load_stage_;
   s.lines = lines_;

@@ -19,6 +19,22 @@ namespace aii {
 // dark through the thinking pause, which the user chose knowing it does.
 enum class AvatarVisibility { Always, WhenTalking, Hidden };
 
+// How long the Talk button (or SPACE) has to be down before the release means
+// "dictate into the field" rather than "latch the microphone on" (M1b.3).
+//
+// Biased hard toward reading a press as a click, because the two failure
+// directions are not symmetric. A hold misread as a click sends an utterance
+// the user meant to edit: they see it go, and the words are in the transcript.
+// A click misread as a hold leaves the text sitting in the field unsent, with
+// the microphone shut and nothing having happened — indistinguishable from the
+// app having ignored them. So the threshold sits well above any click: a
+// deliberate one measures 60-120 ms and a sluggish one around 250 ms, while a
+// real hold-to-dictate is a second or more before the user has said anything
+// at all. 400 ms leaves a wide margin on the side that matters and costs the
+// hold gesture nothing, since the microphone opens on the press either way and
+// no speech is lost while the meaning is still undecided.
+constexpr float kTalkHoldSeconds = 0.40f;
+
 // Whether the avatar belongs on screen for this mode in this state. The rule
 // lives next to the button that sets the mode rather than being restated in
 // the frame loop, which only turns the answer into a fade.
@@ -61,10 +77,21 @@ struct AvatarUiState {
   // user edited it, which is how `Yielded` is detected.
   std::string dictation_last;
   VoiceSession::State prev_state = VoiceSession::State::Loading;
+  // The last finalised-but-unsent utterance this panel has written into the
+  // field, against `Snapshot::dictated_seq`. Equal means there is nothing new.
+  unsigned dictated_seq = 0;
+  // When the Talk button went down, on ImGui's clock. Only meaningful between
+  // the press and the release that reads it.
+  double talk_pressed_at = 0.0;
 };
 
 struct AvatarUiResult {
-  bool talk_clicked = false;  // Talk clicked: toggle the mic latch
+  // The Talk gesture, as press and release rather than as a click (M1b.3).
+  // The press opens the microphone; the release says what the press meant.
+  bool talk_pressed = false;
+  bool talk_released = false;
+  bool talk_held = false;        // the release came after kTalkHoldSeconds
+  bool talk_over_button = false; // ...and the pointer was still on the button
   bool silence = false;  // Silence pressed
   bool pause = false;    // Pause pressed
   // The message field's contents, on the frame Enter sent them; the field has
