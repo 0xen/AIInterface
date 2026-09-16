@@ -9,13 +9,92 @@ Plan: `PROJECT_OUTLINE.md`. Research: `docs/`. Engine experiments and evidence: 
 
 ## Build
 
-Requires Visual Studio 2022, CMake 3.24+, and the model/engine folders produced by the spikes
-(`models/`, `spikes/stt/bin/`, `spikes/tts_cpu/voicevox/`).
+Requires Visual Studio 2022, CMake 3.24+, the Claude Code CLI signed in to your subscription,
+and the prebuilt engines and models described in the next section (about 1.3 GB, none of it in git).
 
 ```
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release --target voiceloop
 ```
+
+## Getting the engines and models
+
+Models, prebuilt SDKs, DLLs and executables are gitignored. `CMakeLists.txt` and `src/main.cpp`
+expect them at the exact paths below (the spike folders are reused on purpose until the project
+gets a proper dependency layout). Run these from the repository root in PowerShell.
+Everything is a public download; nothing needs an account or token.
+
+### 1. sherpa-onnx prebuilt (recognition + Kokoro runtime), 20 MB
+
+```
+mkdir spikes\stt\bin
+curl.exe -L --retry 5 -o $env:TEMP\sherpa.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-win-x64-shared-MD-Release.tar.bz2
+tar xjf $env:TEMP\sherpa.tar.bz2 -C spikes\stt\bin
+```
+
+Expected: `spikes\stt\bin\sherpa-onnx-v1.13.8-win-x64-shared-MD-Release\{include,lib}` with
+`sherpa-onnx-c-api.lib`, `sherpa-onnx-c-api.dll`, `onnxruntime.dll`. A newer release will
+work if you update `SHERPA_DIR` in `CMakeLists.txt`.
+
+### 2. Recognition model: Nemotron-3.5 streaming, 475 MB
+
+```
+mkdir models
+curl.exe -L --retry 5 -o models\nemotron.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2
+tar xjf models\nemotron.tar.bz2 -C models
+```
+
+Expected: `models\sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11\{encoder,decoder,joiner}.int8.onnx` and `tokens.txt`.
+
+### 3. English voice: Kokoro-82M multi-lang v1.0, 350 MB
+
+```
+curl.exe -L --retry 5 -o models\kokoro.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2
+tar xjf models\kokoro.tar.bz2 -C models
+```
+
+Expected: `models\kokoro-multi-lang-v1_0\{model.onnx,voices.bin,tokens.txt,espeak-ng-data,lexicon-*.txt}`.
+Use v1.0, not v1.1: v1.1 lacks the af_heart and af_bella voices the app defaults to.
+
+### 4. Japanese voice: VOICEVOX Core 0.17.0, about 250 MB
+
+The bare release zip holds only the C API. Its downloader also fetches the matching ONNX Runtime,
+the Open JTalk dictionary and the voice model, and shows the licence terms (answer `y`):
+
+```
+mkdir spikes\tts_cpu\voicevox
+curl.exe -L -o spikes\tts_cpu\voicevox\download-windows-x64.exe https://github.com/VOICEVOX/voicevox_core/releases/download/0.17.0/download-windows-x64.exe
+cd spikes\tts_cpu\voicevox
+echo y | .\download-windows-x64.exe -o .\voicevox_core --models-pattern 0.vvm --exclude additional-libraries
+cd ..\..\..
+mkdir models\voicevox
+move spikes\tts_cpu\voicevox\voicevox_core\dict models\voicevox\dict
+move spikes\tts_cpu\voicevox\voicevox_core\models models\voicevox\models
+```
+
+Expected after the move:
+
+- `spikes\tts_cpu\voicevox\voicevox_core\c_api\{include\voicevox_core.h, lib\voicevox_core.lib, lib\voicevox_core.dll}`
+- `spikes\tts_cpu\voicevox\voicevox_core\onnxruntime\lib\voicevox_onnxruntime.dll`
+- `models\voicevox\dict\open_jtalk_dic_utf_8-1.11\`
+- `models\voicevox\models\vvms\0.vvm` (四国めたん, ずんだもん, 春日部つむぎ, 雨晴はう)
+
+`--exclude additional-libraries` skips the DirectML and CUDA builds; the app runs VOICEVOX on
+CPU. The downloader's pager may print a panic when stdout is not a terminal; the download still
+completes. More voices: drop further `.vvm` files from
+https://github.com/VOICEVOX/voicevox_vvm/releases into `models\voicevox\models\vvms\`
+(the app currently loads only `0.vvm`).
+
+### 5. Claude Code CLI
+
+Install Claude Code and sign in once so `%USERPROFILE%\.local\bin\claude.exe` exists
+(override the path with `AII_CLAUDE_EXE`). No API key is used.
+
+### Not needed for the app
+
+`models\zonos2\` (13 GB) and the `zonos2.cpp` source trees under `spikes\tts_src\` belong to
+the abandoned ZONOS2 experiment; see `spikes\README.md`. `kokoro-multi-lang-v1_1` and the
+SenseVoice model were only used as cross-checks during the spikes.
 
 ## Run
 
