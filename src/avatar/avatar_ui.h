@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "avatar_def.h"
 #include "voice_session.h"
 
 namespace aii {
@@ -68,6 +69,16 @@ struct AvatarOptions {
   // in a log nobody is reading.
   std::string art_status;
   bool art_status_ok = true;
+
+  // M1c.5. What the picked body colour currently derives to, so the surface
+  // can show the derived inks and say honestly how far it had to go. The
+  // panel does not derive anything itself: the rule is one function in
+  // avatar_def, and the picker's swatches and the avatar on screen are the
+  // same numbers rather than two implementations that agree today.
+  AvatarDerivedPalette derived;
+  // True when the derived theme is the one in force, i.e. when the picker is
+  // worth showing at all.
+  bool custom_theme = false;
 };
 
 struct AvatarUiState {
@@ -118,6 +129,18 @@ struct AvatarUiState {
   // instead of sitting there claiming to be in force.
   std::string avatar_name;
   std::string theme;
+  // M1c.5. The picked body colour, as the three floats ImGui's colour widgets
+  // work in, 0..1 sRGB. Owned here for the same reason `theme` is: the panel
+  // writes it, main.cpp makes it true and writes back what actually took, and
+  // it is persisted under the same `avatar` section.
+  //
+  // `custom_colour_changed` is the edge, set on any frame the picker moved.
+  // main.cpp uses it to push the colour down and to decide when to persist;
+  // the level alone would not distinguish "the user is dragging" from "the
+  // value main.cpp just wrote back", which on a control dragged sixty times a
+  // second is the difference between one write and sixty.
+  float custom_colour[3] = {0.0f, 0.0f, 0.0f};
+  bool custom_colour_changed = false;
   // What is in the message field (M1b.2). A fixed buffer rather than a
   // std::string because imgui_stdlib is not in this build, and a corner
   // window's typed message has no business being longer than this anyway.

@@ -52,6 +52,20 @@ constexpr std::uint32_t avatar_rgba(std::uint8_t r, std::uint8_t g, std::uint8_t
          (static_cast<std::uint32_t>(b) << 16) | (static_cast<std::uint32_t>(a) << 24);
 }
 
+// The inverse, channel by channel. Needed since M1c.5, where a colour is no
+// longer only written: the picker reads one back to seed itself, and the
+// derivation takes one apart to find its hue.
+constexpr std::uint8_t avatar_r(std::uint32_t c) { return static_cast<std::uint8_t>(c & 0xFFu); }
+constexpr std::uint8_t avatar_g(std::uint32_t c) {
+  return static_cast<std::uint8_t>((c >> 8) & 0xFFu);
+}
+constexpr std::uint8_t avatar_b(std::uint32_t c) {
+  return static_cast<std::uint8_t>((c >> 16) & 0xFFu);
+}
+constexpr std::uint8_t avatar_a(std::uint32_t c) {
+  return static_cast<std::uint8_t>((c >> 24) & 0xFFu);
+}
+
 // The composed frame: what the avatar looks like right now, in cells. Rows
 // are packed at the live `width`, not at the maximum, so the shader's index
 // is the obvious one and the CPU copies only what the grid actually uses.

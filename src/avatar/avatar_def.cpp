@@ -97,10 +97,8 @@ void trim_trailing(std::string& s) {
 // Palette lookup as a flat 128-entry table: characters are ASCII by
 // construction (the loader rejects anything else), and a table keeps the
 // per-cell cost of a reload to an array index.
-struct Palette {
-  std::array<std::uint32_t, 128> rgba{};
-  std::array<bool, 128> known{};
-};
+// It outlives the parse now (M1c.5) — see AvatarDefinition::palette.
+using Palette = AvatarPalette;
 
 // Reads a `{ "#": "#000000", ... }` object into `pal`, leaving keys it does
 // not mention alone. Shared by the base palette and by every theme's override
@@ -258,6 +256,11 @@ bool parse_clip_file(const fs::path& path, const Palette& pal, std::uint32_t wid
         out.push_back(AvatarFrame{});
         out.back().base.assign(std::size_t{width} * height, 0u);
         out.back().overlay.assign(std::size_t{width} * height, 0u);
+        // The ink characters behind those two, kept so a palette change is a
+        // re-resolve rather than a re-parse (M1c.5). 0 is transparent, which
+        // is what an untouched cell already means.
+        out.back().base_ink.assign(std::size_t{width} * height, 0u);
+        out.back().overlay_ink.assign(std::size_t{width} * height, 0u);
         out.back().hold = hold;
         target = Target::Base;
         row = 0;
@@ -290,6 +293,7 @@ bool parse_clip_file(const fs::path& path, const Palette& pal, std::uint32_t wid
     }
     auto& frame = out.back();
     auto& cells = target == Target::Base ? frame.base : frame.overlay;
+    auto& inks = target == Target::Base ? frame.base_ink : frame.overlay_ink;
     for (std::uint32_t x = 0; x < width; ++x) {
       const char c = line[x];
       if (c == kTransparent) continue;
@@ -298,6 +302,7 @@ bool parse_clip_file(const fs::path& path, const Palette& pal, std::uint32_t wid
         return fail(line_no, std::string("character '") + c + "' is not in the palette");
       }
       cells[std::size_t{row} * width + x] = pal.rgba[idx];
+      inks[std::size_t{row} * width + x] = idx;
     }
     if (++row == height) target = Target::None;
   }
@@ -445,6 +450,37 @@ bool load_avatar_definition(const fs::path& dir, const std::string& theme,
   Palette pal{};
   if (std::string why; !apply_palette(palette, "palette", pal, why)) return fail(why);
 
+  // M1c.5: which of those inks the derived-colour theme drives. Optional, and
+  // the defaults are this avatar's own letters, so nothing existing has to
+  // change — including the copy already seeded under %APPDATA%, which a
+  // rebuild deliberately never overwrites. Named in the file rather than
+  // hard-coded so a second avatar drawn with different letters is a data
+  // change; validated against the palette, because an ink the art does not
+  // have would make the picker drive nothing at all and say nothing about it.
+  if (const json& inks = member(root, "custom_inks"); !inks.is_null()) {
+    if (!inks.is_object()) return fail("avatar.json: \"custom_inks\" must be an object");
+    auto one = [&](const char* key, char& slot) {
+      const json& v = member(inks, key);
+      if (!v.is_string()) return true;
+      const std::string s = v.get<std::string>();
+      if (s.size() != 1) return false;
+      slot = s[0];
+      return true;
+    };
+    if (!one("body", def.body_ink)) return fail("avatar.json: custom_inks.body must be one character");
+    if (!one("feature", def.feature_ink))
+      return fail("avatar.json: custom_inks.feature must be one character");
+    if (const json& t = member(inks, "translucent"); t.is_string())
+      def.translucent_inks = t.get<std::string>();
+    for (const char c : std::string{def.body_ink, def.feature_ink} + def.translucent_inks) {
+      const auto i = static_cast<unsigned char>(c);
+      if (i >= pal.known.size() || !pal.known[i]) {
+        return fail(std::string("avatar.json: custom_inks names '") + c +
+                    "', which is not in the palette");
+      }
+    }
+  }
+
   // ---- M1c.4: named themes -------------------------------------------------
   //
   // `themes` is an array, not an object, because the order is the picker's
@@ -460,6 +496,8 @@ bool load_avatar_definition(const fs::path& dir, const std::string& theme,
   // with "character 'x' is not in the palette" under that theme alone, which
   // is about the worst shape of bug this format could have. Merging makes a
   // new ink appear in every theme at its base colour until someone tints it.
+  def.base_palette = pal;
+
   const json& themes = member(root, "themes");
   std::vector<const json*> theme_palettes;
   if (!themes.is_null()) {
@@ -492,6 +530,11 @@ bool load_avatar_definition(const fs::path& dir, const std::string& theme,
       }
       def.themes.push_back(theme_name);
       theme_palettes.push_back(tp.is_object() ? &tp : nullptr);
+      // The body colour this theme would give, captured off the same probe
+      // the validation just built. It is what seeds the colour picker when the
+      // user selects a preset (M1c.5), so starting from `ember` and nudging it
+      // is one click rather than matching a hex by eye.
+      def.theme_body.push_back(probe.rgba[static_cast<unsigned char>(def.body_ink)]);
     }
   } else {
     // No themes block at all: the bare palette is the one theme there is. It
@@ -500,6 +543,7 @@ bool load_avatar_definition(const fs::path& dir, const std::string& theme,
     // this feature.
     def.themes.push_back("default");
     theme_palettes.push_back(nullptr);
+    def.theme_body.push_back(pal.rgba[static_cast<unsigned char>(def.body_ink)]);
   }
 
   const json& dflt_theme = member(root, "default_theme");
@@ -518,6 +562,10 @@ bool load_avatar_definition(const fs::path& dir, const std::string& theme,
       return fail(why);
     }
   }
+  // Kept rather than dropped at the end of the parse: this is the palette a
+  // derived colour is merged over, and keeping it is what makes a recolour a
+  // pass over memory instead of a second trip through the filesystem.
+  def.palette = pal;
 
   if (const json& anchors = member(root, "anchors"); !anchors.is_null()) {
     if (!anchors.is_object()) return fail("avatar.json: \"anchors\" must be an object");
@@ -657,6 +705,173 @@ AvatarStage avatar_stage_layout(const AvatarDefinition& def, std::uint32_t band_
   return stage;
 }
 
+// ---- M1c.5: the derivation -------------------------------------------------
+
+namespace {
+
+struct Hsl {
+  float h = 0.0f;  // degrees, 0..360
+  float s = 0.0f;
+  float l = 0.0f;
+};
+
+Hsl rgb_to_hsl(float r, float g, float b) {
+  const float mx = std::max(r, std::max(g, b));
+  const float mn = std::min(r, std::min(g, b));
+  Hsl out;
+  out.l = (mx + mn) * 0.5f;
+  const float d = mx - mn;
+  if (d <= 1e-6f) return out;  // achromatic: hue and saturation stay 0
+  out.s = out.l > 0.5f ? d / (2.0f - mx - mn) : d / (mx + mn);
+  if (mx == r) out.h = 60.0f * std::fmod((g - b) / d + 6.0f, 6.0f);
+  else if (mx == g) out.h = 60.0f * ((b - r) / d + 2.0f);
+  else out.h = 60.0f * ((r - g) / d + 4.0f);
+  return out;
+}
+
+float hue_channel(float p, float q, float t) {
+  if (t < 0.0f) t += 1.0f;
+  if (t > 1.0f) t -= 1.0f;
+  if (t < 1.0f / 6.0f) return p + (q - p) * 6.0f * t;
+  if (t < 0.5f) return q;
+  if (t < 2.0f / 3.0f) return p + (q - p) * (2.0f / 3.0f - t) * 6.0f;
+  return p;
+}
+
+void hsl_to_rgb(const Hsl& c, float& r, float& g, float& b) {
+  if (c.s <= 1e-6f) {
+    r = g = b = c.l;
+    return;
+  }
+  const float q = c.l < 0.5f ? c.l * (1.0f + c.s) : c.l + c.s - c.l * c.s;
+  const float p = 2.0f * c.l - q;
+  const float h = c.h / 360.0f;
+  r = hue_channel(p, q, h + 1.0f / 3.0f);
+  g = hue_channel(p, q, h);
+  b = hue_channel(p, q, h - 1.0f / 3.0f);
+}
+
+// WCAG relative luminance. Used rather than HSL lightness because lightness
+// says a saturated yellow and a saturated blue at L=0.5 are equally light,
+// and on screen they are nothing of the sort — which is exactly the case
+// where a complement pair fails.
+float srgb_linear(float c) {
+  return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
+float luminance(float r, float g, float b) {
+  return 0.2126f * srgb_linear(r) + 0.7152f * srgb_linear(g) + 0.0722f * srgb_linear(b);
+}
+
+float contrast_ratio(float l1, float l2) {
+  const float hi = std::max(l1, l2) + 0.05f;
+  const float lo = std::min(l1, l2) + 0.05f;
+  return hi / lo;
+}
+
+// Below this the body is a grey and "the opposite hue" means nothing; the
+// features get this much saturation anyway so they are still a colour.
+constexpr float kAchromatic = 0.06f;
+constexpr float kMinFeatureSaturation = 0.25f;
+
+}  // namespace
+
+AvatarDerivedPalette avatar_derive_palette(std::uint32_t body_rgba) {
+  AvatarDerivedPalette out;
+  const float br = static_cast<float>(avatar_r(body_rgba)) / 255.0f;
+  const float bg = static_cast<float>(avatar_g(body_rgba)) / 255.0f;
+  const float bb = static_cast<float>(avatar_b(body_rgba)) / 255.0f;
+  // Opaque by construction: translucency is `jelly`'s idea, not a hue's, and
+  // a picker that could make the body fade would be a second control wearing
+  // the first one's clothes.
+  out.body = avatar_rgba(avatar_r(body_rgba), avatar_g(body_rgba), avatar_b(body_rgba), 255);
+
+  const Hsl body = rgb_to_hsl(br, bg, bb);
+  const float body_lum = luminance(br, bg, bb);
+  out.hue = body.h;
+  out.body_l = body.l;
+  out.achromatic = body.s < kAchromatic;
+  // The two accessories drawn in body ink alone — zzz, question and steam have
+  // no second ink to rescue them — read exactly as well as the body does and
+  // no better, so the extremes are worth naming to the user rather than
+  // leaving them to discover a thought that never appears.
+  out.body_faint_dark = body_lum < 0.03f;
+  out.body_faint_light = body_lum > 0.75f;
+
+  // The hue is the user's decision and is never moved: exactly opposite.
+  out.feature_hue = std::fmod(body.h + 180.0f, 360.0f);
+
+  Hsl feature;
+  feature.h = out.feature_hue;
+  feature.s = std::max(body.s, kMinFeatureSaturation);
+
+  // The minimum adjustment, as a search rather than a formula: walk the
+  // lightness ramp upward from the body's own and stop at the first step that
+  // clears kAvatarMinContrast. Every step costs colour — an HSL lightness
+  // above the hue's natural level is literally white being mixed in — so the
+  // first value that works is the most saturated complement this body allows.
+  //
+  // 256 steps because that is the resolution the 8-bit output has anyway;
+  // a bisection would be fewer iterations and is not worth the asymmetry
+  // (contrast is not quite monotonic in L for every hue near the top of the
+  // ramp, and a linear scan is honest about that where a bisection is not).
+  float fr = 0.0f, fg = 0.0f, fb = 0.0f;
+  float best_ratio = 0.0f;
+  Hsl best = feature;
+  bool reached = false;
+  for (int i = 0; i <= 256; ++i) {
+    feature.l = body.l + (1.0f - body.l) * (static_cast<float>(i) / 256.0f);
+    hsl_to_rgb(feature, fr, fg, fb);
+    const float ratio = contrast_ratio(luminance(fr, fg, fb), body_lum);
+    if (ratio > best_ratio) {
+      best_ratio = ratio;
+      best = feature;
+    }
+    if (ratio >= kAvatarMinContrast) {
+      best = feature;
+      best_ratio = ratio;
+      reached = true;
+      break;
+    }
+  }
+  out.contrast_short = !reached;
+  out.contrast = best_ratio;
+  out.feature_l = best.l;
+  hsl_to_rgb(best, fr, fg, fb);
+  out.gloss_inverted = luminance(fr, fg, fb) < body_lum;
+
+  auto q = [](float v) {
+    return static_cast<std::uint8_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
+  };
+  out.feature = avatar_rgba(q(fr), q(fg), q(fb), 255);
+  // The glint is the features' colour at the base palette's own translucency,
+  // so `*` follows `o` by construction and there is no third thing to tune.
+  out.translucent = avatar_rgba(q(fr), q(fg), q(fb), 0xCC);
+  return out;
+}
+
+void avatar_recolour(AvatarDefinition& def, const AvatarPalette& pal) {
+  def.palette = pal;
+  auto redo = [&pal](std::vector<AvatarClip>& clips) {
+    for (AvatarClip& clip : clips) {
+      for (AvatarFrame& frame : clip.frames) {
+        const std::size_t n = frame.base.size();
+        for (std::size_t i = 0; i < n && i < frame.base_ink.size(); ++i) {
+          const std::uint8_t ink = frame.base_ink[i];
+          if (ink) frame.base[i] = pal.rgba[ink];
+        }
+        const std::size_t m = frame.overlay.size();
+        for (std::size_t i = 0; i < m && i < frame.overlay_ink.size(); ++i) {
+          const std::uint8_t ink = frame.overlay_ink[i];
+          if (ink) frame.overlay[i] = pal.rgba[ink];
+        }
+      }
+    }
+  };
+  redo(def.clips);
+  for (AvatarSprite& sprite : def.sprites) redo(sprite.clips);
+}
+
 fs::path avatar_user_root() {
   // Per-user roaming data, which is where a definition the user edits belongs
   // — it has to survive a rebuild, and it is theirs, not the install's.
@@ -723,13 +938,83 @@ void AvatarSource::open(fs::path dir, std::string clip, std::vector<std::string>
   reload(true);
 }
 
+const char* AvatarSource::custom_theme() { return "custom"; }
+
+std::uint32_t AvatarSource::theme_body_colour(const std::string& theme_name) const {
+  for (std::size_t i = 0; i < def_.themes.size() && i < def_.theme_body.size(); ++i) {
+    if (def_.themes[i] == theme_name) return def_.theme_body[i];
+  }
+  return 0;
+}
+
+void AvatarSource::apply_custom() {
+  // The derived theme is the definition's *default* palette with three inks
+  // replaced, not a palette of its own: every ink the art has that the picker
+  // does not drive keeps the colour avatar.json gives it, so adding a fourth
+  // ink to the art shows up under the derived theme too, at its own colour.
+  // Same reasoning as a named theme merging over the base.
+  derived_ = avatar_derive_palette(custom_body_);
+  AvatarPalette pal = def_.base_palette;
+  auto put = [&pal](char ink, std::uint32_t rgba) {
+    const auto i = static_cast<unsigned char>(ink);
+    if (i < pal.known.size() && pal.known[i]) pal.rgba[i] = rgba;
+  };
+  put(def_.body_ink, derived_.body);
+  put(def_.feature_ink, derived_.feature);
+  for (const char c : def_.translucent_inks) {
+    // Each translucent ink keeps the alpha the art gave it and takes the
+    // features' colour, so a definition with two glints at two opacities does
+    // not have both flattened to one.
+    const auto i = static_cast<unsigned char>(c);
+    if (i >= pal.known.size() || !pal.known[i]) continue;
+    pal.rgba[i] = avatar_rgba(avatar_r(derived_.feature), avatar_g(derived_.feature),
+                              avatar_b(derived_.feature), avatar_a(def_.base_palette.rgba[i]));
+  }
+  avatar_recolour(def_, pal);
+  theme_ = custom_theme();
+}
+
+bool AvatarSource::set_custom_colour(std::uint32_t body_rgba) {
+  // Opaque, and compared opaque: the picker has no alpha channel, and an
+  // incoming 0 alpha from a settings file parsed as #rrggbb must not read as
+  // a different colour from the same one picked in the UI.
+  const std::uint32_t rgb =
+      avatar_rgba(avatar_r(body_rgba), avatar_g(body_rgba), avatar_b(body_rgba), 255);
+  if (custom_set_ && rgb == custom_body_) return false;
+  custom_body_ = rgb;
+  custom_set_ = true;
+  // This is the drag path, and it is deliberately everything that happens on
+  // it: a pass over the frames' ink bytes. No file is opened, no clip index or
+  // frame timer is touched, and the slide is left where it is — so the avatar
+  // animates *through* a drag rather than restarting on every frame of one.
+  if (loaded_ && theme_ == custom_theme()) apply_custom();
+  return true;
+}
+
 bool AvatarSource::set_theme(const std::string& theme_name) {
   if (theme_name == wanted_theme_) return true;
   // Before the first load there is nothing to validate against, so the name is
   // simply remembered and the load that follows decides. That is what lets
   // main.cpp push the stored theme in *before* open(), so the avatar's first
   // frame is already in the user's colours rather than flashing the default.
-  if (loaded_ && !def_.has_theme(theme_name)) return false;
+  if (loaded_ && theme_name != custom_theme() && !def_.has_theme(theme_name)) return false;
+  // Switching *to* the derived theme is not a reload either: the frames on
+  // screen were resolved with whatever palette the last load used, and the
+  // ink bytes are still beside them, so the derived palette goes straight over
+  // the top. Switching *away* from it is, because the named theme's colours
+  // have to come back out of the file.
+  if (loaded_ && theme_name == custom_theme()) {
+    wanted_theme_ = theme_name;
+    if (!custom_set_) {
+      // Reaching the derived theme with no colour yet starts it from the one
+      // that was on screen a moment ago, so the first thing the picker shows
+      // is the avatar the user was already looking at.
+      custom_body_ = theme_body_colour(def_.theme);
+      custom_set_ = true;
+    }
+    apply_custom();
+    return true;
+  }
   wanted_theme_ = theme_name;
   // A reload, because the palette is resolved into the frames (see the note on
   // AvatarDefinition::themes). It is the same path a hot-reload takes and has
@@ -824,9 +1109,33 @@ void AvatarSource::reload(bool initial) {
     // A theme that is no longer declared is reported at the volume of a
     // problem, exactly as a missing clip is: the avatar is on screen in the
     // wrong colours, which is quiet enough to go unnoticed otherwise.
-    if (!wanted_theme_.empty() && wanted_theme_ != def_.theme)
+    // M1c.5: the derived theme is re-applied at the tail of every load, which
+    // is what makes a hot edit of avatar.json and the colour picker unable to
+    // fight. They write different files — the art is avatar.json, the pick is
+    // settings.json — and a save of the art reloads it and then puts the pick
+    // back on top, so a hand-tuned ink the picker does not drive survives the
+    // picker and a picked colour survives the hand edit.
+    theme_ = def_.theme;
+    if (wanted_theme_ == custom_theme()) {
+      // A stored "custom" with no stored colour beside it — a hand-edited
+      // settings file, or one written before the colour was ever picked —
+      // starts from the theme that would otherwise have loaded rather than
+      // from black. Falling back to the named theme instead would silently
+      // discard a setting the user did make.
+      if (!custom_set_) {
+        custom_body_ = theme_body_colour(def_.theme);
+        custom_set_ = true;
+      }
+      apply_custom();
+    }
+    // The picker's list: what the art declares, plus the derived one, which is
+    // only offerable once there is a definition loaded to derive against.
+    theme_names_ = def_.themes;
+    theme_names_.push_back(custom_theme());
+
+    if (!wanted_theme_.empty() && wanted_theme_ != theme_)
       missing += " (no theme \"" + wanted_theme_ + "\")";
-    status_ = (initial ? "avatar " : "avatar reloaded ") + def_.name + " [" + def_.theme + "]: " +
+    status_ = (initial ? "avatar " : "avatar reloaded ") + def_.name + " [" + theme_ + "]: " +
               std::to_string(def_.clips.size()) + " clips, playing \"" +
               def_.clips[clip_index_].name + "\", " + std::to_string(def_.sprites.size()) +
               " sprites (" + std::to_string(shown) + " shown)" + missing;

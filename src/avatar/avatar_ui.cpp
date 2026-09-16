@@ -484,6 +484,160 @@ bool name_picker(const char* id, const std::vector<std::string>& names, std::str
   return changed;
 }
 
+// ---- M1c.5: the colour picker and what it derives --------------------------
+//
+// One control the user drives — the body — and three swatches they do not.
+// The derivation itself is not here: it is avatar_derive_palette(), the same
+// function that colours the avatar, so the swatches cannot drift from the
+// character on screen the way a second implementation would.
+//
+// The picker is `ColorPicker3`, drawn **inline**, not `ColorEdit3`, which
+// opens its picker in a popup. An ImGui popup is a floating window, and
+// nothing in this app may be drawn outside the one composition surface the
+// window owns — a popup here is silently cut off at the window's edge. Inline
+// costs vertical space inside a child that scrolls, which is the surface's
+// whole design; a popup would have cost correctness.
+//
+// `NoOptions` is not cosmetic either: without it a right-click on the hue bar
+// opens a context menu, which is a popup by another name.
+
+ImVec4 rgba_to_vec(std::uint32_t c) {
+  return ImVec4(static_cast<float>(avatar_r(c)) / 255.0f, static_cast<float>(avatar_g(c)) / 255.0f,
+                static_cast<float>(avatar_b(c)) / 255.0f,
+                static_cast<float>(avatar_a(c)) / 255.0f);
+}
+
+void custom_colour_section(AvatarUiState& state, const AvatarOptions& options) {
+  const AvatarDerivedPalette& d = options.derived;
+
+  // A plain label rather than settings_heading(): the surface is 260 px tall
+  // and scrolls, and every separator spent here is a row of the picker pushed
+  // under the fold. What has to be above the fold is the control itself and
+  // the numbers that say what it did — the prose can be scrolled to.
+  ImGui::Spacing();
+  ImGui::TextColored(dim(), "Body colour");
+
+  // Sized rather than stretched: ColorPicker3 draws a square of whatever width
+  // it is given, and -FLT_MIN in a 360 px panel would make a 330 px square
+  // with no room beside it for anything that explains the result.
+  ImGui::SetNextItemWidth(150.0f);
+  const bool changed = ImGui::ColorPicker3(
+      "##custom_body", state.custom_colour,
+      ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoOptions |
+          ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoLabel |
+          ImGuiColorEditFlags_DisplayHex | ImGuiColorEditFlags_PickerHueBar);
+  // The edge, not the level: main.cpp pushes the colour down and persists it
+  // off this, and a drag that reported "changed" on every frame it was merely
+  // held still would turn one settings write into sixty.
+  state.custom_colour_changed = changed;
+
+  // The honest readout, beside the control rather than under it. The hue is
+  // never moved off the true complement, so what these numbers report is how
+  // far the *lightness* had to travel to keep the features apart from the
+  // body — and, where it could not travel far enough, that it could not,
+  // rather than a hue quietly swapped for one that was easier to read.
+  ImGui::SameLine();
+  ImGui::BeginGroup();
+  // Both swatches on one row, and no swatch for the glint. Every row spent
+  // here is a row of readout pushed under the fold of a 260 px surface, and
+  // the glint is the features' own colour at the art's own alpha — derived
+  // from the square beside it by construction, so a third square would say
+  // nothing the second one does not.
+  const float sw = ImGui::GetTextLineHeight();
+  ImGui::ColorButton("##sw_body", rgba_to_vec(d.body),
+                     ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                     ImVec2(sw, sw));
+  ImGui::SameLine(0.0f, 4.0f);
+  ImGui::ColorButton("##sw_feat", rgba_to_vec(d.feature),
+                     ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                     ImVec2(sw, sw));
+  ImGui::SameLine(0.0f, 6.0f);
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextColored(dim(), "body/ink");
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("The body you picked, and the ink derived from it:\nthe eyes, the mouth and "
+                      "the gloss on the dome.\nThe one translucent ink (the glint in think.txt)\n"
+                      "takes the second colour at its own alpha.");
+  ImGui::PushStyleColor(ImGuiCol_Text,
+                        d.contrast_short ? warn() : (d.contrast >= 4.5f ? good() : dim()));
+  ImGui::Text("%.1f:1 contrast", static_cast<double>(d.contrast));
+  ImGui::PopStyleColor();
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Features against body, the WCAG ratio.\nThe rule stops lifting at %.1f:1.",
+                      static_cast<double>(kAvatarMinContrast));
+  ImGui::TextColored(dim(), "hue %.0f to %.0f", static_cast<double>(d.hue),
+                     static_cast<double>(d.feature_hue));
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("The features take the exact opposite hue on the\nwheel. This never moves: "
+                      "only the lightness below\nis adjusted, and only as far as it must be.");
+  ImGui::TextColored(dim(), "light %.0f%% to %.0f%%", static_cast<double>(d.body_l * 100.0f),
+                     static_cast<double>(d.feature_l * 100.0f));
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("The one adjustment. The features are lifted to the\nfirst lightness that "
+                      "keeps them apart from the body -\nthe first, because every step up is a "
+                      "step toward\nwhite and away from the complement's colour.");
+
+  // The short forms live here, in the column, so a pick that went wrong says
+  // so without the user having to scroll for it; the sentence that explains
+  // why is a hover away and again in full below.
+  if (d.contrast_short) {
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("%.1f:1 is all", static_cast<double>(d.contrast));
+    ImGui::PopStyleColor();
+  }
+  if (d.achromatic) {
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("grey: hue nominal");
+    ImGui::PopStyleColor();
+  }
+  if (d.gloss_inverted) {
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("gloss inverted");
+    ImGui::PopStyleColor();
+  }
+  if (d.body_faint_dark || d.body_faint_light) {
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("zzz / ? / steam faint");
+    ImGui::PopStyleColor();
+  }
+  ImGui::EndGroup();
+
+  if (d.contrast_short) {
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("Nothing on this hue's opposite reaches %.1f:1 against this body - %.1f:1 "
+                       "is the most there is, so the eyes and the gloss will be faint at 16 px. "
+                       "The hue is still the true complement; it has not been swapped for one "
+                       "that reads more easily.",
+                       static_cast<double>(kAvatarMinContrast), static_cast<double>(d.contrast));
+    ImGui::PopStyleColor();
+  }
+  if (d.gloss_inverted) {
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("This complement carries less light than the body, so the highlight on the "
+                       "top-left of the dome reads as a scuff rather than a gloss. Lifting it "
+                       "until it did not would mean taking it to near-white and losing the "
+                       "complement's colour, so it has been left as the wheel says.");
+    ImGui::PopStyleColor();
+  }
+  if (d.achromatic) {
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("A grey body has no hue to be opposite, so this complement is nominal: the "
+                       "features carry the minimum tint rather than a second grey.");
+    ImGui::PopStyleColor();
+  }
+  if (d.body_faint_dark || d.body_faint_light) {
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("zzz, the question mark and the steam puff are drawn in body ink alone - "
+                       "they have no second ink to rescue them. At this %s body they are exactly "
+                       "as easy to see on the desktop as the body is, and no easier.",
+                       d.body_faint_dark ? "dark" : "pale");
+    ImGui::PopStyleColor();
+  }
+  ImGui::TextColored(dim(), "Picking a named theme above seeds this from it. The colour is stored "
+                            "in settings.json and never in avatar.json, so hand-editing the art "
+                            "and this control cannot overwrite each other.");
+}
+
 void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ui_color(0.055f, 0.063f, 0.082f));
   ImGui::BeginChild("##settings", ImVec2(0.0f, kChatHeight), ImGuiChildFlags_None, 0);
@@ -522,7 +676,9 @@ void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   settings_row("Theme");
   name_picker("##theme_pick", options.themes, state.theme);
   if (ImGui::IsItemHovered())
-    ImGui::SetTooltip("A named palette in this avatar's avatar.json.\nEvery sprite shares it, so the thought bubble\nfollows the body.");
+    ImGui::SetTooltip("A named palette in this avatar's avatar.json,\nor \"custom\" to pick the body colour yourself.\nEvery sprite shares it, so the thought bubble\nfollows the body.");
+
+  if (options.custom_theme) custom_colour_section(state, options);
 
   if (!options.art_status.empty()) {
     ImGui::Spacing();
@@ -1148,6 +1304,11 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
                               const AvatarOptions& options, bool voice_enabled, bool mic_on,
                               bool mic_hold, std::uint32_t width, std::uint32_t top, bool submit) {
   AvatarUiResult out;
+  // Cleared here rather than where it is set, because the control that sets it
+  // is not drawn on most frames: a surface that closed on the frame after a
+  // drag would otherwise leave the edge stuck true for as long as it stayed
+  // shut. Same reason the other one-shot results live on `out`.
+  state.custom_colour_changed = false;
   const float w = static_cast<float>(width);
   // Everything below reacts to this one flag. With --no-voice there is no
   // session and the snapshot stays Loading, which is exactly the state the

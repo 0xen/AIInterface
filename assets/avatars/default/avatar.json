@@ -10,6 +10,9 @@
     "*": "#ffffffcc"
   },
 
+  "_custom_inks": "M1c.5. Which inks the derived-colour theme drives when the user picks a body colour in Settings. 'body' is what the picker sets; 'feature' is derived as the true complement of it, lifted in lightness only as far as it must be to stay distinguishable, and never made darker than the body because it is the gloss on the dome as well as the eyes; 'translucent' names the inks that take the feature's colour at their own alpha. These are the defaults, written out so the rule is visible in the art rather than only in the code -- an avatar drawn with different letters states its own here and the picker follows. The derived palette is merged over the base 'palette' block above, exactly as a named theme is, so it depends only on the colour picked and not on which theme was loaded when the picker was opened. It is stored in settings.json, never here: the picker and a hand edit of this file therefore cannot overwrite each other.",
+  "custom_inks": { "body": "#", "feature": "o", "translucent": "*" },
+
   "_themes": "M1c.4. Named palette variants, in picker order; each one states only the inks it changes. Chosen in Settings (the cog), stored per avatar in settings.json, and settable by name from code -- AvatarSource::set_theme. Changing one costs a reload of this directory, which is the same path a hot edit takes, so tuning a colour here shows up as soon as the file is saved.\n\nThe brief these were drawn to: the mono slime reads as a hole in a dark desktop, and the black thought bubble beside it is close to invisible. The lever is the body ink, and the answer is a *mid-tone*: a body far enough above the desktop's black to be a shape, and far enough below 'o' that white eyes still read on it. Mid-tones are also the only values that survive the widget being dragged onto a bright wallpaper, since black and white each vanish on one of them.",
   "default_theme": "mono",
   "themes": [

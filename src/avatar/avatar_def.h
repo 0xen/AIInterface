@@ -39,6 +39,7 @@
 // repo's assets/avatars/<name>\ on first run, and only when the destination
 // is absent: a rebuild must never reach in and overwrite art the user has
 // been tuning.
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -48,12 +49,34 @@
 
 namespace aii {
 
+// The palette as the loader resolved it, as a flat table indexed by the ink's
+// own ASCII character. Kept on the loaded definition rather than thrown away
+// at the end of the parse (M1c.5): a palette that is still around is what
+// lets a colour change be a re-resolve instead of a reload.
+struct AvatarPalette {
+  std::array<std::uint32_t, 128> rgba{};
+  std::array<bool, 128> known{};
+};
+
 // One frame, palette already resolved to RGBA. Both layers are packed at the
 // definition's own width, which is the layout AvatarGrid uses, so composing a
 // frame is a copy rather than a per-cell translation.
+//
+// `base_ink`/`overlay_ink` are the same two layers as the *ink characters*
+// they were drawn with, 0 meaning transparent. They are the M1c.5 colour
+// picker's whole trick: the RGBA above stays exactly what the frame loop
+// reads, and a new palette is applied by walking these and rewriting the RGBA
+// in place — no file is touched, nothing is re-parsed, and above all the clip
+// cursor is not disturbed, so the avatar goes on animating through a drag
+// instead of restarting on every frame of it. The cost is one byte per cell
+// per layer: 71 frames of 16x16 and smaller across this definition, which is
+// about 28 KB of extra memory and 28k byte-reads-and-word-writes to apply a
+// whole new palette — small enough that a drag does it every frame.
 struct AvatarFrame {
   std::vector<std::uint32_t> base;
   std::vector<std::uint32_t> overlay;
+  std::vector<std::uint8_t> base_ink;
+  std::vector<std::uint8_t> overlay_ink;
   // How many clip ticks this frame occupies (`@frame hold=N`). The clip's fps
   // stays the unit of time; hold is how many of those units one drawing is
   // worth, so a rhythm is edited by changing a number rather than by
@@ -128,6 +151,27 @@ struct AvatarDefinition {
   std::vector<std::string> themes;
   std::string theme;  // the one that was applied to the frames above
 
+  // M1c.5. The palette that was applied, kept so a colour can be changed
+  // without a reload, and the body colour each declared theme would have
+  // given — which is what lets picking `ember` seed the colour picker with
+  // ember's own body instead of resetting it. One entry per `themes` entry.
+  AvatarPalette palette;
+  // The bare `palette` block, before any theme was merged over it. The derived
+  // theme merges over *this*, exactly as a named theme does, so what it gives
+  // depends only on the picked colour and never on which theme happened to be
+  // loaded when the user reached for the picker.
+  AvatarPalette base_palette;
+  std::vector<std::uint32_t> theme_body;
+
+  // Which inks the derived-colour theme drives, from avatar.json's optional
+  // `custom_inks`. Defaults are this avatar's, and they are defaults rather
+  // than constants so a second definition drawn with different letters is a
+  // data change and not a code change. `translucent` may name several inks or
+  // none; each keeps its own alpha and takes the feature's hue.
+  char body_ink = '#';
+  char feature_ink = 'o';
+  std::string translucent_inks = "*";
+
   bool has_theme(const std::string& theme_name) const;
 
   const AvatarClip* find_clip(const std::string& clip_name) const;
@@ -190,6 +234,83 @@ AvatarStage avatar_stage_layout(const AvatarDefinition& def, std::uint32_t band_
 bool load_avatar_definition(const std::filesystem::path& dir, const std::string& theme,
                             AvatarDefinition& out, std::string* error);
 
+// ---- M1c.5: a picked body colour and the palette derived from it ----------
+//
+// The user picks one colour — the body — and the app derives the rest. Their
+// decision, taken with the consequence stated: the feature ink is the **true
+// colour-theory complement**, the opposite hue on the wheel, and the hue is
+// never moved off it. Some picks therefore land on a pair that is hard to
+// read at 16x16; that was chosen deliberately over a legibility-first rule
+// that would have quietly returned a different hue than the wheel says.
+//
+// "Adjusted only as far as it must be" is the other half of it, and it lands
+// entirely on *lightness*:
+//
+//   `#` is the picked colour verbatim, forced opaque. Translucency is a
+//        property of the named `jelly` preset, not something a hue implies.
+//   `o`  takes hue = body hue + 180 exactly, saturation = the body's (with a
+//        floor, see `achromatic`), and the **smallest lightness at or above
+//        the body's** that reaches a contrast ratio of kAvatarMinContrast
+//        against it. Smallest, because every step up the lightness ramp is a
+//        step toward white and away from the complement's colour: stopping at
+//        the first value that works is what makes the adjustment minimal.
+//        `o` is never darker than `#` — all sixteen clip files use it for the
+//        gloss on the dome as well as the eyes, and a dark `o` turns that
+//        highlight into a scuff mark.
+//   `*`  is `o`'s colour at `o`'s alpha in the base palette, so the one glint
+//        in think.txt stays consistent with the features by construction.
+//
+// Where that is not enough the honest answer is to say so rather than to
+// override the hue, so everything the UI needs to say it is reported back:
+// the ratio actually reached, whether white itself was not enough, and
+// whether the body had a hue worth complementing at all.
+constexpr float kAvatarMinContrast = 3.0f;
+
+struct AvatarDerivedPalette {
+  std::uint32_t body = 0;
+  std::uint32_t feature = 0;
+  std::uint32_t translucent = 0;
+
+  float hue = 0.0f;          // the body's hue, degrees
+  float feature_hue = 0.0f;  // always (hue + 180) mod 360 — never adjusted
+  float body_l = 0.0f;       // HSL lightness of each, 0..1
+  float feature_l = 0.0f;
+  float contrast = 1.0f;  // WCAG ratio actually reached, feature against body
+
+  // The body is so pale that even a white `o` does not reach
+  // kAvatarMinContrast. The features still carry the complement's hue as far
+  // as they can, but the pair is faint and the UI says so.
+  bool contrast_short = false;
+  // The complement came out *perceptually darker* than the body even though
+  // its HSL lightness is not below the body's — which happens for a luminous
+  // mid-tone hue, a green especially, whose opposite is a magenta that carries
+  // far less luminance at the same lightness. Every clip uses `o` for the
+  // gloss on the top-left of the dome as well as for the eyes, so a darker
+  // `o` turns that highlight into a scuff mark.
+  //
+  // It is reported and not corrected. Correcting it means lifting the feature
+  // to near-white, which throws away the complement's colour entirely — the
+  // one thing the user asked not to have done quietly.
+  bool gloss_inverted = false;
+  // The body has essentially no hue (a grey, a black, a white), so "the
+  // opposite hue" does not mean anything. The features are given the minimum
+  // tint so they are still a colour rather than a second grey, and the UI
+  // says the complement is nominal.
+  bool achromatic = false;
+  // The body is dark enough (or pale enough) that the three body-ink-only
+  // accessories — zzz, question, steam — have nothing to rescue them. They
+  // read exactly as well as the body does against the desktop, and no better.
+  bool body_faint_dark = false;
+  bool body_faint_light = false;
+};
+
+AvatarDerivedPalette avatar_derive_palette(std::uint32_t body_rgba);
+
+// Rewrites every frame's RGBA from its ink characters and `pal`, in place.
+// Nothing is re-read and no cursor is touched: about 28k cells for the default
+// avatar, which is why a colour picker can be dragged.
+void avatar_recolour(AvatarDefinition& def, const AvatarPalette& pal);
+
 // %APPDATA%\AIInterface\avatars — where the user's editable copies live.
 std::filesystem::path avatar_user_root();
 
@@ -236,8 +357,32 @@ class AvatarSource {
   // already on is a no-op, so a frame loop may mirror a stored value into this
   // every frame the same way it mirrors `muted`.
   bool set_theme(const std::string& theme_name);
-  const std::string& theme() const { return def_.theme; }
-  const std::vector<std::string>& themes() const { return def_.themes; }
+  const std::string& theme() const { return theme_; }
+  // The art's own themes with the derived one appended, which is the picker's
+  // list. Appended rather than declared in avatar.json because it has no
+  // colours of its own to declare: it *is* whatever the user picked, and a
+  // definition that listed it would be claiming to own a value stored in
+  // settings.json.
+  const std::vector<std::string>& themes() const { return theme_names_; }
+
+  // M1c.5. The name of the derived theme, the one the colour picker drives.
+  static const char* custom_theme();
+
+  // The picked body colour. Setting it while the derived theme is on is the
+  // live-drag path: the palette is re-resolved into the frames and nothing
+  // else happens — no file is read, no clip restarts, the slide is untouched.
+  // Setting it while a named theme is on only stores it, so that switching to
+  // the derived theme later brings the colour back.
+  //
+  // Returns true if the colour changed anything (false when it was already
+  // this colour), so the caller can decide to persist on the edge.
+  bool set_custom_colour(std::uint32_t body_rgba);
+  std::uint32_t custom_colour() const { return custom_body_; }
+  // What the current picked colour derives to, for the UI to show and explain.
+  const AvatarDerivedPalette& derived() const { return derived_; }
+  // The body colour a named theme would give, so selecting a preset can seed
+  // the picker. 0 if the name is not a declared theme.
+  std::uint32_t theme_body_colour(const std::string& theme_name) const;
 
   // Polls the directory on a fixed cadence and advances the current clip by
   // wall-clock time. `dt` is the frame's own delta, in seconds.
@@ -309,6 +454,25 @@ class AvatarSource {
   // avatar on a palette the user did not choose, and a save that adds it back
   // must pick it up again.
   std::string wanted_theme_;
+  // What is actually on the frames right now. Usually def_.theme; it is the
+  // derived theme's name instead when the picked colour has been applied over
+  // the top of the definition's default palette.
+  std::string theme_;
+  std::vector<std::string> theme_names_;
+  // The picked colour and what it derives to. Kept across reloads for the
+  // same reason the theme name is: a hot edit of avatar.json must not lose the
+  // colour the user chose in the picker, and the two never fight because they
+  // live in different files — the art in avatar.json, the pick in
+  // settings.json — and the derived palette is applied *after* every load.
+  std::uint32_t custom_body_ = 0;
+  bool custom_set_ = false;
+  AvatarDerivedPalette derived_;
+
+  // Applies derived_ over def_.palette and rewrites the frames. The one place
+  // the derived theme becomes visible; called from set_custom_colour, from
+  // set_theme and from the tail of every reload.
+  void apply_custom();
+
   std::size_t clip_index_ = 0;
   std::size_t frame_index_ = 0;
   float frame_time_ = 0.0f;

@@ -19,6 +19,11 @@
 //     --say       send this text as the first user turn once the engines are up
 //     --no-voice  window only, no engines (layout work)
 //     --avatar    which definition under %APPDATA%\AIInterface\avatars to load
+//     --theme     one of the definition's named palettes, or "custom"
+//     --colour    #rrggbb: pick the derived theme and the body colour it is
+//                 derived from, for this run only. Like --theme it is not
+//                 written back, so looking at a palette never changes the one
+//                 the user comes back to.
 //     --clip      pin one clip, instead of letting AvatarController choose.
 //                 Either of --clip and --sprite switches the controller off
 //                 entirely: they exist to look at one piece of art, and a
@@ -54,6 +59,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -152,6 +158,58 @@ std::string utf8FromWide(const wchar_t* w) {
     return s;
 }
 
+// M1c.5. The picked body colour crosses three boundaries in three shapes: hex
+// on the command line and in settings.json (because that is what a person
+// reads and what an art tool puts on the clipboard), packed RGBA inside the
+// avatar (because that is what a cell is), and three floats in the panel
+// (because that is what ImGui's colour widgets work in). These are the only
+// two conversions, so there is one place that can be wrong about any of it.
+//
+// A colour that does not parse yields 0 and the caller leaves the setting
+// alone, which is the same contract every other value in settings.json has:
+// a bad hand edit costs that key, never the file.
+bool colourFromHex(const std::string& text, std::uint32_t& out) {
+    std::string s = text;
+    if (!s.empty() && s.front() == '#') s.erase(s.begin());
+    if (s.size() != 6) return false;
+    std::uint32_t v[6]{};
+    for (std::size_t i = 0; i < 6; ++i) {
+        const char c = s[i];
+        if (c >= '0' && c <= '9') v[i] = static_cast<std::uint32_t>(c - '0');
+        else if (c >= 'a' && c <= 'f') v[i] = static_cast<std::uint32_t>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v[i] = static_cast<std::uint32_t>(c - 'A' + 10);
+        else return false;
+    }
+    out = aii::avatar_rgba(static_cast<std::uint8_t>(v[0] * 16 + v[1]),
+                           static_cast<std::uint8_t>(v[2] * 16 + v[3]),
+                           static_cast<std::uint8_t>(v[4] * 16 + v[5]), 255);
+    return true;
+}
+
+std::string colourToHex(std::uint32_t c) {
+    static const char* kDigits = "0123456789abcdef";
+    const std::uint8_t ch[3] = {aii::avatar_r(c), aii::avatar_g(c), aii::avatar_b(c)};
+    std::string s = "#";
+    for (const std::uint8_t b : ch) {
+        s += kDigits[b >> 4];
+        s += kDigits[b & 0xF];
+    }
+    return s;
+}
+
+std::uint32_t colourFromFloats(const float* f) {
+    auto q = [](float v) {
+        return static_cast<std::uint8_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
+    };
+    return aii::avatar_rgba(q(f[0]), q(f[1]), q(f[2]), 255);
+}
+
+void colourToFloats(std::uint32_t c, float* f) {
+    f[0] = static_cast<float>(aii::avatar_r(c)) / 255.0f;
+    f[1] = static_cast<float>(aii::avatar_g(c)) / 255.0f;
+    f[2] = static_cast<float>(aii::avatar_b(c)) / 255.0f;
+}
+
 } // namespace
 
 int main(int /*argc*/, char** /*argv*/) {
@@ -168,6 +226,11 @@ int main(int /*argc*/, char** /*argv*/) {
     // looking at a palette (the candidate captures were taken with it), and a
     // look should not change what the user comes back to.
     std::string themeName;
+    // M1c.5. `--colour #rrggbb` picks the derived theme and the body colour it
+    // is derived from, without touching what the user has stored — the same
+    // contract --theme has, and for the same reason: this is how an awkward
+    // pick gets captured for review without resetting the colour they chose.
+    std::string colourArg;
     bool avatarFromArgs = false;
     bool themeFromArgs = false;
     std::string clipName;
@@ -190,6 +253,11 @@ int main(int /*argc*/, char** /*argv*/) {
             }
             else if (a == L"--theme" && i + 1 < wargc) {
                 themeName = utf8FromWide(wargv[++i]);
+                themeFromArgs = true;
+            }
+            else if ((a == L"--colour" || a == L"--color") && i + 1 < wargc) {
+                colourArg = utf8FromWide(wargv[++i]);
+                themeName = "custom";
                 themeFromArgs = true;
             }
             else if (a == L"--clip" && i + 1 < wargc) clipName = utf8FromWide(wargv[++i]);
@@ -399,6 +467,16 @@ int main(int /*argc*/, char** /*argv*/) {
         // is a visible flash and a resize.
         if (!avatarFromArgs) avatarName = settings.get_string("avatar", "name", avatarName);
         if (!themeFromArgs) themeName = settings.get_string("avatar", "theme", themeName);
+        // M1c.5. The picked colour, read here for the same reason the theme is:
+        // pushed in before open(), it is resolved by the load itself, so the
+        // first frame is already the user's colour instead of the default one
+        // flashing past. An unparseable value simply leaves the colour unset
+        // and the derived theme starts from the theme it would have had.
+        if (std::uint32_t picked = 0;
+            colourFromHex(colourArg.empty() ? settings.get_string("avatar", "colour", "") : colourArg,
+                          picked)) {
+            avatarSource.set_custom_colour(picked);
+        }
         const std::filesystem::path dir = avatarDirOverride.empty()
                                               ? aii::seed_avatar_definition(avatarName)
                                               : std::filesystem::path(avatarDirOverride);
@@ -521,6 +599,15 @@ int main(int /*argc*/, char** /*argv*/) {
     // source rather than from the settings file for exactly that reason.
     uiState.avatar_name = avatarName;
     uiState.theme = avatarSource.theme();
+    // M1c.5. The picker's own value, and the last value this side pushed into
+    // it. The pair is what keeps a drag one-way: while the user is moving the
+    // control the panel is the authority and the source follows, and on every
+    // other frame the source is the authority and the panel follows. Mirroring
+    // unconditionally would write the 8-bit round-trip of the colour back into
+    // the picker sixty times a second, which is how a colour picker loses its
+    // hue the moment the user drags the saturation to zero.
+    std::uint32_t uiColour = avatarSource.custom_colour();
+    colourToFloats(uiColour, uiState.custom_colour);
     // The avatar picker's list. Re-read whenever the surface is opened rather
     // than every frame — it is a directory scan, and the answer only changes
     // when the user puts a folder somewhere, which they cannot do while
@@ -730,7 +817,29 @@ int main(int /*argc*/, char** /*argv*/) {
             // the call that makes one (and refreshes a stale one).
             avatarSource.open(aii::seed_avatar_definition(avatarName), clipName, spriteNames);
         }
-        if (uiState.theme != avatarSource.theme()) avatarSource.set_theme(uiState.theme);
+        if (uiState.theme != avatarSource.theme()) {
+            const std::string wanted = uiState.theme;
+            if (avatarSource.set_theme(wanted) && wanted != aii::AvatarSource::custom_theme()) {
+                // M1c.5: picking a named preset seeds the colour picker with
+                // that preset's own body, so "start from ember and nudge it"
+                // is a click and a drag rather than matching a hex by eye. The
+                // named themes are not touched by this — it is the derived
+                // theme's starting point that moves.
+                if (const std::uint32_t body = avatarSource.theme_body_colour(wanted); body != 0)
+                    avatarSource.set_custom_colour(body);
+            }
+        }
+        // The drag. Everything it costs is inside set_custom_colour: a pass
+        // over the frames' ink bytes, no file touched and no clip restarted.
+        if (uiState.custom_colour_changed) {
+            avatarSource.set_custom_colour(colourFromFloats(uiState.custom_colour));
+            uiColour = avatarSource.custom_colour();
+        } else if (avatarSource.custom_colour() != uiColour) {
+            // Something other than the picker moved it — a preset seeding it
+            // above, or the value the settings file came back with.
+            uiColour = avatarSource.custom_colour();
+            colourToFloats(uiColour, uiState.custom_colour);
+        }
         // Written back from what is actually loaded, every frame. A theme the
         // art no longer declares was refused above and the picker corrects
         // itself here rather than showing a setting that is not in force; and
@@ -739,7 +848,16 @@ int main(int /*argc*/, char** /*argv*/) {
         uiState.avatar_name = avatarName;
         uiState.theme = avatarSource.theme();
         if (avatarDirOverride.empty()) settings.set_string("avatar", "name", avatarName);
-        if (!themeFromArgs) settings.set_string("avatar", "theme", avatarSource.theme());
+        if (!themeFromArgs) {
+            settings.set_string("avatar", "theme", avatarSource.theme());
+            // Only while the derived theme is actually in force, which keeps
+            // the rule the rest of this file already keeps: the file holds what
+            // loaded, so it cannot accumulate a value nothing is using. The key
+            // therefore never appears until the user has had the derived theme
+            // on, and once it exists it stays as the seed they come back to.
+            if (avatarSource.theme() == aii::AvatarSource::custom_theme())
+                settings.set_string("avatar", "colour", colourToHex(avatarSource.custom_colour()));
+        }
 
         avatarSource.update(dt);
         if (avatarSource.take_status_change()) {
@@ -855,6 +973,8 @@ int main(int /*argc*/, char** /*argv*/) {
             avatarOptions.themes = avatarSource.themes();
             avatarOptions.art_status = avatarSource.status();
             avatarOptions.art_status_ok = avatarSource.status_ok();
+            avatarOptions.derived = avatarSource.derived();
+            avatarOptions.custom_theme = avatarSource.theme() == aii::AvatarSource::custom_theme();
             const aii::AvatarUiResult r =
                 aii::draw_avatar_ui(uiState, snap, avatarOptions, session != nullptr,
                                     session && session->mic_open(),
