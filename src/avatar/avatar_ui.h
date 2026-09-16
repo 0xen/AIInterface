@@ -18,6 +18,15 @@ namespace aii {
 // (user, 16 Sep 2026). `WhenTalking` is listening or speaking only — it goes
 // dark through the thinking pause, which the user chose knowing it does.
 enum class AvatarVisibility { Always, WhenTalking, Hidden };
+constexpr int kAvatarVisibilityCount = 3;
+// How the three modes are spelled in the settings file (M1b.5), in enum
+// order. A name rather than the integer, because that file is meant to be
+// read and edited by hand like an avatar definition and `2` says nothing.
+// These are an on-disk format: changing one silently resets the setting for
+// everyone who already has a file, so they stay as they are — the tooltip
+// prose in avatar_ui.cpp is the string that is free to change.
+inline constexpr const char* kAvatarVisibilityNames[kAvatarVisibilityCount] = {
+    "always", "when_talking", "hidden"};
 
 // How long the Talk button (or SPACE) has to be down before the release means
 // "dictate into the field" rather than "latch the microphone on" (M1b.3).
@@ -46,9 +55,15 @@ struct AvatarUiState {
   // starts as small as it can be; nothing opens the chat implicitly, not a
   // new transcript line and not the end of loading. Once opened it stays
   // open until the same arrow closes it.
+  //
+  // M1b.5: and across runs. The default here is still the default, but it is
+  // overwritten from the settings file before the first frame is drawn, so
+  // the widget comes back the way it was left rather than flipping out of the
+  // default once a load lands. The panel itself knows nothing about that —
+  // main.cpp reads the file into this struct and mirrors changes back out.
   bool chat_open = false;
-  // Same contract as `chat_open`: user state, written only by its button and
-  // kept for the session. Defaults to the behaviour that predates the button.
+  // Same contract as `chat_open`, persistence included: user state, written
+  // only by its button. Defaults to the behaviour that predates the button.
   AvatarVisibility avatar_mode = AvatarVisibility::Always;
   // What is in the message field (M1b.2). A fixed buffer rather than a
   // std::string because imgui_stdlib is not in this build, and a corner

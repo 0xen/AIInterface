@@ -1,0 +1,110 @@
+#pragma once
+// The app's settings file (M1b.5): the bits of user state that have to come
+// back the way they were left.
+//
+// It is a JSON file in %APPDATA%\AIInterface\, beside the `avatars/`
+// directory the definitions already live in — the same root, for the same
+// reason: it is the user's data, it has to survive a rebuild, and it is meant
+// to be readable and hand-editable exactly as `avatar.json` is. It is
+// deliberately *not* ImGui's `imgui.ini`: `io.IniFilename` is null on purpose
+// (imgui_layer.cpp, "a corner widget has no layout worth persisting") and
+// these fields live in `AvatarUiState`, not in any ImGui window.
+//
+//   {
+//     "version": 1,
+//     "panel": { "chat_open": false, "avatar_mode": "always" }
+//   }
+//
+// Two fields today, but this is the app's settings file rather than a cache
+// for those two: voices, endpoint timing, the chosen avatar and its theme and
+// the window position are all named in the milestones as coming here. So the
+// shape is a store, not a struct. Three consequences, all deliberate:
+//
+//  - Adding a field later is one more get/set call with its own default and
+//    no migration, because a key that is absent simply means "the default" —
+//    which is the same code path as the whole file being absent on first run.
+//  - The parsed document is *kept*, and a save rewrites only the keys it owns.
+//    A key written by a future version therefore survives being read and saved
+//    by an older one, instead of being deleted by it. That costs one member.
+//  - Values are grouped under a named section, so a later "voice" or "window"
+//    group cannot collide with this one.
+//
+// `version` is written for a human reading the file and for a future format
+// break that actually needs one; nothing reads it today, because per-key
+// defaults make the ordinary case of new keys a non-event.
+#include <filesystem>
+#include <string>
+
+#include "json.hpp"
+
+namespace aii {
+
+// %APPDATA%\AIInterface\settings.json, or AII_SETTINGS_FILE if that is set —
+// the same escape hatch AII_AVATAR_DIR gives the avatar loader, and for the
+// same reason: the failure paths have to be testable without writing over the
+// settings the user is actually running with.
+std::filesystem::path settings_file_path();
+
+// Reads the file once, hands out typed values, and writes changes back.
+//
+// Nothing here throws and nothing fails hard. The contract is the avatar
+// loader's: a missing file is the ordinary first-run case and silently means
+// defaults, while a file that is there but unusable falls back to defaults
+// with one line saying why, through the same status()/take_status_change()
+// pair AvatarSource uses so main.cpp logs it the same way.
+class Settings {
+ public:
+  // Never fails. After this the store is usable whatever was on disk.
+  void load(std::filesystem::path path);
+
+  // A key that is missing, of the wrong type, or out of range yields `def` —
+  // per key, never per file. A partly-sane file keeps the fields that are
+  // sane, because the alternative is one bad hand edit silently resetting
+  // everything else the user had set.
+  bool get_bool(const char* section, const char* key, bool def) const;
+  // An enum stored by name. `names` is the spelling of each value in
+  // declaration order; the names are the on-disk format and must stay stable,
+  // since they are what a user editing the file by hand reads and writes.
+  // An integer is accepted too, so a file written by hand as `2` still works,
+  // but only in range: `7` is not a mode and falls back to `def`.
+  int get_enum(const char* section, const char* key, const char* const* names, int count,
+               int def) const;
+
+  // Both are no-ops when the value already matches what is stored, so the
+  // frame loop can call them unconditionally every frame and "on change" is
+  // decided here rather than duplicated into every button that writes one.
+  void set_bool(const char* section, const char* key, bool value);
+  void set_enum(const char* section, const char* key, const char* const* names, int count,
+                int value);
+
+  // Advances the debounce. A settings file is not worth a write per frame,
+  // and the avatar mode button in particular is cycled through three states
+  // in as many clicks on the way to the one the user wants.
+  void tick(float dt);
+  // Writes now if there is anything to write. Called on the way out, so a
+  // change made inside the debounce window is not lost by quitting quickly.
+  void flush();
+
+  // One line, empty when there is nothing to say (no file, or a clean load).
+  const std::string& status() const { return status_; }
+  bool status_ok() const { return status_ok_; }
+  // True once per new status, so the frame loop can log a change without
+  // repeating it — same shape as AvatarSource::take_status_change().
+  bool take_status_change();
+
+ private:
+  void note(std::string line, bool ok);
+  void save();
+
+  std::filesystem::path path_;
+  // The whole document, not just our keys: this is what preserves fields a
+  // future version wrote and this one knows nothing about.
+  nlohmann::json root_ = nlohmann::json::object();
+  bool dirty_ = false;
+  float since_change_ = 0.0f;
+  std::string status_;
+  bool status_ok_ = false;
+  bool status_new_ = false;
+};
+
+}  // namespace aii

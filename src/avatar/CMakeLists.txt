@@ -17,6 +17,8 @@ add_executable(avatar
   imgui_layer.h
   loader_anim.cpp
   loader_anim.h
+  settings.cpp
+  settings.h
   voice_session.cpp
   voice_session.h
   win_text_input.cpp

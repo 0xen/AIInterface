@@ -67,6 +67,7 @@
 #include "core/config.h"
 #include "imgui_layer.h"
 #include "loader_anim.h"
+#include "settings.h"
 #include "voice_session.h"
 #include "win_text_input.h"
 
@@ -419,6 +420,19 @@ int main(int /*argc*/, char** /*argv*/) {
 
     aii::AvatarUiState uiState;
 
+    // M1b.5: the panel's user state comes back the way it was left. Read here,
+    // before the loop and so before the first frame is built, because a load
+    // any later would draw the window in its default state and correct it
+    // afterwards — a visible flip on every start, and on a window whose height
+    // follows the panel, a resize with it.
+    aii::Settings settings;
+    settings.load(aii::settings_file_path());
+    uiState.chat_open = settings.get_bool("panel", "chat_open", uiState.chat_open);
+    uiState.avatar_mode = static_cast<aii::AvatarVisibility>(
+        settings.get_enum("panel", "avatar_mode", aii::kAvatarVisibilityNames,
+                          aii::kAvatarVisibilityCount, static_cast<int>(uiState.avatar_mode)));
+    if (settings.take_status_change()) log::warn("{}", settings.status());
+
     log::info("avatar live: {}x{} {} {}", extent.width, extent.height,
               transparent ? "transparent" : "opaque", gpu::apiName(api));
 
@@ -548,6 +562,11 @@ int main(int /*argc*/, char** /*argv*/) {
             }
         }
 
+        // The settings debounce runs on the same frame clock. A failed write
+        // is reported once, the same way a failed avatar reload is.
+        settings.tick(dt);
+        if (settings.take_status_change()) log::warn("{}", settings.status());
+
         // Clip playback and the hot-reload poll, then the policy, then the
         // composition — in that order, and after the session tick and the
         // resize above, because all three feed it: the reload is what the
@@ -596,6 +615,18 @@ int main(int /*argc*/, char** /*argv*/) {
         // real presence, and the two still coexist across the middle third.
         const float loaderAlpha = 1.0f - smoothstep(0.00f, 0.62f, handoff);
         loading = loaderAlpha > 0.0f;
+        // From here down the snapshot says Loading for as long as the loader is
+        // still on screen, which is what avatar_ui.h already documents the panel
+        // being given: the panel's loading layout is keyed off snap.state, but
+        // the session leaves Loading a whole crossfade before the loader does.
+        // Left unheld, the chat is released kHandoffSeconds before the avatar
+        // band is given back, and a stored "chat open, avatar hidden" (M1b.5)
+        // starts by growing to the full chat-plus-band height and then shrinking
+        // again — two resizes under the loading screen where there should be
+        // one, on the frame the loader leaves. Nothing above this line is
+        // affected: the controller, the loader's own progress and the first
+        // --say all read the snapshot before it.
+        if (loading) snap.state = aii::VoiceSession::State::Loading;
 
         // M1.6: the same alpha the handoff drives, now also carrying the
         // visibility mode. Multiplying rather than choosing is what makes the
@@ -642,6 +673,15 @@ int main(int /*argc*/, char** /*argv*/) {
                 // session can take it; say() refuses the rest anyway.
                 if (!r.send_text.empty()) session->say(r.send_text);
             }
+            // Mirrored out of the panel state every frame rather than from the
+            // buttons that write it: the setters are no-ops when the value
+            // already matches, so "on change" is decided in one place instead
+            // of every control that touches a persisted field remembering to
+            // say so. The write itself is debounced inside Settings.
+            settings.set_bool("panel", "chat_open", uiState.chat_open);
+            settings.set_enum("panel", "avatar_mode", aii::kAvatarVisibilityNames,
+                              aii::kAvatarVisibilityCount,
+                              static_cast<int>(uiState.avatar_mode));
             // The scrim and the caption belong to the loader, not the panel:
             // the loading screen has to look the same whether or not there is
             // anything underneath it. The foreground draw list puts them over
@@ -681,6 +721,11 @@ int main(int /*argc*/, char** /*argv*/) {
             break;
         }
     }
+    // Anything still inside the debounce window goes now: a mode clicked and
+    // then Esc pressed half a second later is still a change the user made.
+    settings.flush();
+    if (settings.take_status_change()) log::warn("{}", settings.status());
+
     const auto stats = renderer->takeStats();
     log::info("avatar exit: {} frames", stats.frames);
     renderer->waitIdle();
