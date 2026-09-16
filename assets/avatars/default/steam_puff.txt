@@ -1,0 +1,50 @@
+# steam: puffs off the side of the head, rising slowly and bursting fast.
+# 8 fps, holds 2-2-2-1: the last frame is the burst, and it is half the length
+# of the others so the eye reads it as a pop rather than as another step.
+#
+# The puffs are rings, not solid blocks: a filled rectangle at this size reads
+# as a brick, and a one-cell hole is all it takes to read as vapour instead.
+
+# first puff, just off the head
+@frame hold=2
+.....
+.....
+.....
+.....
+.....
+.###.
+.#.#.
+.###.
+
+# it climbs; a second one starts
+@frame hold=2
+.....
+.....
+.....
+.###.
+.#.#.
+.###.
+.....
+..##.
+
+# spreading as it goes
+@frame hold=2
+.....
+####.
+#..#.
+####.
+.....
+.###.
+.#.#.
+.###.
+
+# the top one bursts
+@frame hold=1
+#.#.#
+.....
+.....
+.....
+.###.
+.#.#.
+.###.
+.....

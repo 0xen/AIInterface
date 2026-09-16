@@ -1,0 +1,42 @@
+# idle: the resting breathe. Two drawings, one cell of squash between
+# them, at 4 fps -- but the rhythm is 5 ticks up and 3 down, so the slime
+# hangs at the top of the breath and settles quickly, which is what a body
+# full of liquid does. Even timing here reads as a machine.
+
+# resting height, relaxed smile
+@frame hold=5
+................
+.....######.....
+...##oo######...
+..##o#########..
+..############..
+..############..
+..##oo####oo##..
+.###oo####oo###.
+.###oo####oo###.
+.##############.
+######o##o######
+#######oo#######
+################
+################
+################
+.##############.
+
+# one cell shorter and flat on the floor
+@frame hold=3
+................
+................
+....########....
+..###oo#######..
+..##o#########..
+..############..
+..############..
+.###oo####oo###.
+.###oo####oo###.
+####oo####oo####
+################
+######o##o######
+#######oo#######
+################
+################
+################

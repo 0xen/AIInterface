@@ -1,8 +1,8 @@
 // avatar: the corner window of AIInterface. A small borderless, transparent,
 // always-on-top window on the rend engine (D3D12 backend: on this AMD GPU
 // only D3D12's composition swapchain gives per-pixel alpha; Vulkan's WSI
-// composites opaque). The top shows the placeholder avatar (a spinning cube);
-// below it an ImGui panel carries the usage status bar, the collapsible chat
+// composites opaque). The top shows the 2D pixel avatar (M2.1: a cell grid
+// drawn by AvatarRenderer); below it an ImGui panel carries the usage status bar, the collapsible chat
 // and the Talk / Silence / Pause buttons. The voice loop itself lives in
 // VoiceSession (engines from aii_core).
 //
@@ -11,12 +11,20 @@
 // transparent rectangle that still swallows clicks meant for the desktop.
 //
 //   avatar [--opaque] [--seconds S] [--vulkan] [--say "text"] [--no-voice]
+//          [--avatar NAME] [--clip NAME]
 //     --opaque    decorated opaque window (fallback / debugging)
 //     --seconds   quit automatically after S seconds (scripted runs)
 //     --vulkan    use the Vulkan backend (no transparency, and no UI: the
 //                 ImGui layer is D3D12 only)
 //     --say       send this text as the first user turn once the engines are up
 //     --no-voice  window only, no engines (layout work)
+//     --avatar    which definition under %APPDATA%\AIInterface\avatars to load
+//     --clip      which clip to play, instead of the definition's default.
+//                 Nothing maps state to clips yet (M2.4); until it does this
+//                 is how a clip gets exercised at all.
+//     --sprite    force an accessory on, repeatable, "all" for every one.
+//                 Same reason: M2.4 decides when a thought bubble belongs on
+//                 screen, so until then this is the only way to see one.
 //
 //   SPACE / Talk    toggle the mic: click to listen, click again to mute
 //                   (unmuting mid-reply barges in). While the mic is on, a
@@ -26,9 +34,7 @@
 //   E / Pause       cancel the reply in flight
 //   Esc / Q         quit
 #include "rend/core/log.h"
-#include "rend/core/math.h"
 #include "rend/core/paths.h"
-#include "rend/gpu/buffer.h"
 #include "rend/gpu/command_context.h"
 #include "rend/gpu/descriptor_table.h"
 #include "rend/gpu/device.h"
@@ -45,19 +51,20 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "avatar_def.h"
+#include "avatar_renderer.h"
 #include "avatar_ui.h"
 #include "core/config.h"
 #include "imgui_layer.h"
 #include "loader_anim.h"
 #include "voice_session.h"
+#include "win_text_input.h"
 
 using namespace rend;
 
@@ -65,12 +72,24 @@ namespace {
 
 // ---- layout (pixels) ----
 constexpr std::uint32_t kWindowW = 360;
-constexpr std::uint32_t kWindowH = 640;   // starting height; the panel sets the rest
-constexpr std::uint32_t kCubeH = 260;     // avatar area at the top
+// Starting height, and also the **ceiling** the panel may never exceed.
+// Transparency here comes from a DirectComposition visual whose content is the
+// swapchain, and the engine commits that visual once, at creation. Growing the
+// swapchain afterwards works — it logs the new size — but DWM keeps compositing
+// the visual at the size it was committed at, so everything below the original
+// height is simply never painted: the window shows the desktop there and the
+// bottom row of controls is cut in half. Shrinking is unaffected, which is why
+// this never showed until the message field pushed the chat-open layout past
+// the old 640. Fixing it properly means re-committing in the engine; until
+// then the window is created at its largest and only ever shrinks from here,
+// with enough headroom for the tallest layout (avatar band + open chat + a
+// four-line message field) and some to spare.
+constexpr std::uint32_t kWindowH = 780;
+constexpr std::uint32_t kAvatarH = 260;   // avatar band at the top
 constexpr float kFontPx = 15.0f;
 constexpr int kCornerMargin = 16;
 // M1.5: the loading screen hands over to the avatar across this many seconds,
-// the loader fading out as the cube fades in. Long enough to read as the
+// the loader fading out as the avatar fades in. Long enough to read as the
 // widget settling, short enough that it is not a dissolve you wait through.
 constexpr float kHandoffSeconds = 0.42f;
 // M1.6: how long the avatar takes to fade in or out when the visibility mode
@@ -80,53 +99,12 @@ constexpr float kHandoffSeconds = 0.42f;
 // listening → thinking → speaking sequence reads as a fade and not a blink.
 constexpr float kVisibilitySeconds = 0.16f;
 
-// Mirrors CubeFrame in shaders/cube.hlsl.
-struct CubeFrame {
-    math::Mat4 mvp;
-    math::Mat4 model;
-    float cameraPos[4];
-    float tint[4];
-};
-static_assert(sizeof(CubeFrame) == 160);
-
-struct Push {
-    std::uint32_t slot;
-    std::uint32_t pad;
-};
-
-constexpr std::uint32_t kSlots = gpu::FrameRenderer::kFramesInFlight;
-constexpr float kPi = 3.14159265358979f;
-
 // Hermite ramp from 0 at `a` to 1 at `b`. Both ends of the handoff need to
 // start and stop without an edge, and the two fades run over different
 // sub-ranges of it, so a bare t*t*(3-2t) is not enough.
 float smoothstep(float a, float b, float x) {
     const float s = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
     return s * s * (3.0f - 2.0f * s);
-}
-
-math::Mat4 rotationY(float a) {
-    math::Mat4 m{};
-    const float c = std::cos(a), s = std::sin(a);
-    m[0] = c;
-    m[2] = -s;
-    m[5] = 1.0f;
-    m[8] = s;
-    m[10] = c;
-    m[15] = 1.0f;
-    return m;
-}
-
-math::Mat4 rotationX(float a) {
-    math::Mat4 m{};
-    const float c = std::cos(a), s = std::sin(a);
-    m[0] = 1.0f;
-    m[5] = c;
-    m[6] = s;
-    m[9] = -s;
-    m[10] = c;
-    m[15] = 1.0f;
-    return m;
 }
 
 // Places the window in the bottom-right of the primary monitor's work area.
@@ -165,6 +143,9 @@ int main(int /*argc*/, char** /*argv*/) {
     bool voiceEnabled = true;
     double seconds = -1.0;
     std::string sayText;
+    std::string avatarName = "default";
+    std::string clipName;
+    std::vector<std::string> spriteNames;
     {
         // Wide command line so Japanese survives (argv is ANSI-mangled).
         int wargc = 0;
@@ -176,6 +157,10 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (a == L"--no-voice") voiceEnabled = false;
             else if (a == L"--seconds" && i + 1 < wargc) seconds = _wtof(wargv[++i]);
             else if (a == L"--say" && i + 1 < wargc) sayText = utf8FromWide(wargv[++i]);
+            else if (a == L"--avatar" && i + 1 < wargc) avatarName = utf8FromWide(wargv[++i]);
+            else if (a == L"--clip" && i + 1 < wargc) clipName = utf8FromWide(wargv[++i]);
+            else if (a == L"--sprite" && i + 1 < wargc)
+                spriteNames.push_back(utf8FromWide(wargv[++i]));
         }
         if (wargv) LocalFree(wargv);
     }
@@ -284,7 +269,20 @@ int main(int /*argc*/, char** /*argv*/) {
     auto ui = aii::ImGuiLayer::create(*device, swapchain->imageFormat(), kFontPx, &uiError);
     if (!ui) log::warn("no UI this run: {}", uiError);
 
-    // ---- GPU resources: the cubes' per-slot frame records (binding 40) ----
+    // B1: the engine's event set has no character event, so typing arrives
+    // through an HWND subclass instead. It owns every key ImGui sees; the
+    // engine's own pump keeps delivering the app's hotkeys below, and every
+    // message is passed on so nothing downstream loses anything.
+    std::unique_ptr<aii::WinTextInput> textInput;
+    if (ui && hwnd) {
+        textInput = aii::WinTextInput::install(hwnd);
+        if (!textInput) log::warn("no keyboard this run: the window could not be subclassed");
+    }
+
+    // ---- GPU resources ----
+    // One table for both passes here: the avatar's grid buffer lives at user
+    // storage binding 0, and the loader shares the table only because the
+    // D3D12 backend keeps the root signature in it.
     auto tableResult = gpu::DescriptorTable::create(
         *device, gpu::DescriptorTableDesc{.maxTextures = 1, .userStorageBuffers = 1});
     if (!tableResult) {
@@ -292,20 +290,6 @@ int main(int /*argc*/, char** /*argv*/) {
         return 1;
     }
     auto table = std::move(tableResult).value();
-
-    // One record per frame slot; the shader indexes it by the push constant.
-    constexpr std::size_t kRecords = kSlots;
-    auto cubeBufferResult = gpu::Buffer::create(
-        *device, {.size = std::uint64_t{kRecords} * sizeof(CubeFrame),
-                  .usage = gpu::kUsageStorage,
-                  .location = gpu::MemoryLocation::HostVisible});
-    if (!cubeBufferResult) {
-        log::error("cube buffer: {}", cubeBufferResult.error().message);
-        return 1;
-    }
-    auto cubeBuffer = std::move(cubeBufferResult).value();
-    std::memset(cubeBuffer->mapped(), 0, kRecords * sizeof(CubeFrame));
-    table->writeStorageBuffer(table->userStorageBinding(0), *cubeBuffer);
 
     const auto shaderDir = executableDirectory() / "data" / "shaders";
     auto loadShader = [&](const char* file) -> std::unique_ptr<gpu::Shader> {
@@ -316,22 +300,27 @@ int main(int /*argc*/, char** /*argv*/) {
         }
         return std::move(r).value();
     };
-    auto cubeVs = loadShader("cube.vert.spv");
-    auto cubePs = loadShader("cube.frag.spv");
-    if (!cubeVs || !cubePs) return 1;
 
-    gpu::GraphicsPipelineDesc cubeDesc{};
-    cubeDesc.vertexShader = cubeVs.get();
-    cubeDesc.fragmentShader = cubePs.get();
-    cubeDesc.colorFormat = swapchain->imageFormat();
-    cubeDesc.pushConstantBytes = sizeof(Push);
-    cubeDesc.descriptorTable = table.get();
-    auto cubePipelineResult = gpu::Pipeline::createGraphics(*device, cubeDesc);
-    if (!cubePipelineResult) {
-        log::error("cube pipeline: {}", cubePipelineResult.error().message);
+    std::string avatarError;
+    auto avatarRenderer = aii::AvatarRenderer::create(*device, swapchain->imageFormat(), *table, 0,
+                                                      shaderDir, &avatarError);
+    if (!avatarRenderer) {
+        log::error("avatar renderer: {}", avatarError);
         return 1;
     }
-    auto cubePipeline = std::move(cubePipelineResult).value();
+    // The art is data (M2.2): a definition directory under %APPDATA%, seeded
+    // from assets/avatars on first run and watched for edits while we run.
+    // AII_AVATAR_DIR points the loader straight at a directory instead, which
+    // is how the failure paths get tested without touching the user's copy.
+    aii::AvatarSource avatarSource;
+    {
+        const std::string override = aii::env_or("AII_AVATAR_DIR", "");
+        const std::filesystem::path dir = override.empty()
+                                              ? aii::seed_avatar_definition(avatarName)
+                                              : std::filesystem::path(override);
+        avatarSource.open(dir, clipName, spriteNames);
+    }
+    aii::AvatarGrid grid;
 
     // The loader's full-screen triangle. It shares the descriptor table only
     // because the D3D12 backend's root signature lives there; the shader
@@ -374,23 +363,17 @@ int main(int /*argc*/, char** /*argv*/) {
     renderer->setFramePasses({
         gpu::FramePass{
             .point = gpu::PassPoint::InScene,
-            .name = "avatar-cube",
+            .name = "avatar-grid",
             .record =
                 [&](gpu::CommandContext& cmd, const gpu::PassContext& ctx) {
                     // Withheld outright until the handoff starts: while the
-                    // loading screen owns the window, a second unrelated cube
-                    // sitting behind the scrim is just noise. From the first
-                    // frame of the fade it draws at a rising alpha instead
-                    // (CubeFrame::tint.w). The frame renderer re-records this
-                    // pass every frame, so skipping the record is enough.
+                    // loading screen owns the window, the avatar sitting
+                    // behind the scrim is just noise. From the first frame of
+                    // the fade it draws at a rising alpha instead (the fade
+                    // in this slot's header). The frame renderer re-records
+                    // this pass every frame, so skipping the record is enough.
                     if (avatarAlpha <= 0.0f) return;
-                    cmd.setViewport(0.0f, 0.0f, static_cast<float>(ctx.width), static_cast<float>(kCubeH));
-                    cmd.setScissor(0, 0, ctx.width, kCubeH);
-                    cmd.bindPipeline(*cubePipeline);
-                    cmd.bindDescriptorTable(*cubePipeline, *table);
-                    const Push push{.slot = ctx.slot, .pad = 0};
-                    cmd.pushConstants(*cubePipeline, &push, sizeof(push));
-                    cmd.draw(36);
+                    avatarRenderer->record(cmd, ctx.slot, ctx.width, kAvatarH);
                 },
         },
     });
@@ -440,12 +423,25 @@ int main(int /*argc*/, char** /*argv*/) {
     // not fade the avatar band in from nothing behind the loading screen.
     float visFade = -1.0f;
     while (running) {
+        // Which half of the input owns the keyboard this frame. The panel now
+        // has a text field, so the hotkeys below have to stand down while it
+        // has focus — otherwise typing a space toggles the microphone and a
+        // typed "q" quits the app. Read from the last completed frame, which
+        // is what ImGui's own backends do.
+        const bool uiHasKeyboard = ui && ui->wants_keyboard();
         for (const auto& event : backend->pumpEvents()) {
-            // The UI sees every event first. Nothing below competes for the
-            // mouse any more — the buttons are ImGui widgets — so the
-            // "consumed" answer only starts mattering once the panel grows a
-            // text field that wants the keyboard.
+            // The mouse only. Keys reach ImGui through the subclass alone, so
+            // forwarding them here as well would deliver each one twice.
             if (ui) ui->handle_event(event);
+            if (uiHasKeyboard && (event.type == platform::Event::Type::KeyDown ||
+                                  event.type == platform::Event::Type::KeyUp)) {
+                // Held keys still have to be released, or a SPACE leaned on as
+                // the field took focus would latch `spaceDown` forever.
+                if (event.type == platform::Event::Type::KeyUp &&
+                    event.key == platform::Key::Space)
+                    spaceDown = false;
+                continue;
+            }
             switch (event.type) {
             case platform::Event::Type::CloseRequested:
                 running = false;
@@ -479,6 +475,18 @@ int main(int /*argc*/, char** /*argv*/) {
         lastT = t;
         if (seconds >= 0.0 && t >= seconds) running = false;
         if (width == 0 || height == 0) continue;
+
+        // Clip playback and the hot-reload poll. It runs before the early-out
+        // paths below so that a definition fixed while the window is hidden
+        // is picked up all the same.
+        avatarSource.update(dt);
+        if (avatarSource.take_status_change()) {
+            if (avatarSource.status_ok()) log::info("{}", avatarSource.status());
+            else log::warn("{}", avatarSource.status());
+        }
+        // The same band the grid is drawn into below: the stage is sized to
+        // it, so a mismatch would lay the art out for a window we do not have.
+        avatarSource.compose(grid, width, kAvatarH);
 
         // The height the panel asked for last frame. Everything that sizes
         // itself from the window reads `height`, the loading overlay included,
@@ -529,10 +537,10 @@ int main(int /*argc*/, char** /*argv*/) {
             handoff = std::min(1.0f, handoff + dt / kHandoffSeconds);
         }
         // Staggered rather than strictly complementary. An even crossfade puts
-        // both sets of cubes at half strength through the middle, which reads
-        // as two overlaid animations rather than one handing over; the loader
-        // is most of the way out before the avatar has any real presence, and
-        // the two still coexist across the middle third.
+        // the loader's cubes and the avatar both at half strength through the
+        // middle, which reads as two overlaid images rather than one handing
+        // over; the loader is most of the way out before the avatar has any
+        // real presence, and the two still coexist across the middle third.
         const float loaderAlpha = 1.0f - smoothstep(0.00f, 0.62f, handoff);
         loading = loaderAlpha > 0.0f;
 
@@ -540,7 +548,7 @@ int main(int /*argc*/, char** /*argv*/) {
         // visibility mode. Multiplying rather than choosing is what makes the
         // end of loading right in every mode: in a mode that does not want the
         // avatar yet, `vis` is already 0, so the handoff fades the loader out
-        // to nothing instead of crossfading into a cube that then vanishes.
+        // to nothing instead of crossfading into an avatar that then vanishes.
         const bool avatarWanted = aii::avatar_visible(uiState.avatar_mode, snap.state);
         if (visFade < 0.0f) visFade = avatarWanted ? 1.0f : 0.0f;
         visFade = std::clamp(visFade + (avatarWanted ? dt : -dt) / kVisibilitySeconds, 0.0f, 1.0f);
@@ -552,7 +560,7 @@ int main(int /*argc*/, char** /*argv*/) {
         // the 260 px back when the loader leaves rather than shrinking the
         // window out from under it. The resize itself goes through pendingH
         // below — never from inside the frame (M1.4).
-        const std::uint32_t band = (loading || visFade > 0.0f) ? kCubeH : 0;
+        const std::uint32_t band = (loading || visFade > 0.0f) ? kAvatarH : 0;
         if (loading) loaderPush = aii::loader_push(t, width, height, loaderAlpha);
         // The panel is released on the first frame of the handoff, not held for
         // it: its one discrete change (the usage row, the state line, the live
@@ -568,13 +576,17 @@ int main(int /*argc*/, char** /*argv*/) {
         // ---- the panel ----
         if (ui) {
             ui->begin_frame(width, height, dt);
+            const bool submit = textInput && textInput->take_submit();
             const aii::AvatarUiResult r =
                 aii::draw_avatar_ui(uiState, snap, session != nullptr,
-                                    session && session->mic_open(), kWindowW, band);
+                                    session && session->mic_open(), kWindowW, band, submit);
             if (session) {
                 if (r.talk_clicked) session->toggle_mic();
                 if (r.silence) session->silence();
                 if (r.pause) session->pause();
+                // Only reaches here once the panel has satisfied itself the
+                // session can take it; say() refuses the rest anyway.
+                if (!r.send_text.empty()) session->say(r.send_text);
             }
             // The scrim and the caption belong to the loader, not the panel:
             // the loading screen has to look the same whether or not there is
@@ -586,9 +598,15 @@ int main(int /*argc*/, char** /*argv*/) {
             // Follow the panel's own height. Only the borderless window gets
             // resized: the decorated fallback has a frame to account for and
             // exists for debugging, where a fixed size is easier to reason about.
-            if (transparent && hwnd && r.desired_height != 0 && r.desired_height != windowH) {
-                windowH = r.desired_height;
-                pendingH = windowH;
+            // Clamped to the committed composition height: a window taller
+            // than that would claim space DWM never paints, which reads as the
+            // bottom of the panel having been cut off.
+            if (transparent && hwnd && r.desired_height != 0) {
+                const std::uint32_t want = std::min(r.desired_height, kWindowH);
+                if (want != windowH) {
+                    windowH = want;
+                    pendingH = windowH;
+                }
             }
         }
 
@@ -598,29 +616,11 @@ int main(int /*argc*/, char** /*argv*/) {
         }
         const std::uint32_t slot = renderer->frameSlot();
 
-        // Cube: this slot's frame record, written after the slot has been
-        // waited on so the GPU is no longer reading it.
-        const float aspect = static_cast<float>(width) / static_cast<float>(kCubeH);
-        const math::Vec3 eye{0.0f, 0.0f, 3.2f};
-        const math::Mat4 model = math::mul(rotationY(static_cast<float>(t) * 0.9f),
-                                           rotationX(static_cast<float>(t) * 0.55f));
-        const math::Mat4 view = math::lookAt(eye, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
-        const math::Mat4 proj = math::perspective(40.0f * kPi / 180.0f, aspect, 0.1f, 10.0f);
-        CubeFrame frame{};
-        frame.mvp = math::mul(math::mul(proj, view), model);
-        frame.model = model;
-        frame.cameraPos[0] = eye.x;
-        frame.cameraPos[1] = eye.y;
-        frame.cameraPos[2] = eye.z;
-        frame.tint[0] = frame.tint[1] = frame.tint[2] = 1.0f;
-        frame.tint[3] = avatarAlpha;  // the handoff fade; the shader premultiplies
-        if (snap.state == aii::VoiceSession::State::Listening) {
-            frame.tint[0] = 1.0f; frame.tint[1] = 0.55f; frame.tint[2] = 0.5f;  // reddish while listening
-        } else if (snap.state == aii::VoiceSession::State::Thinking) {
-            const float pulse = 0.75f + 0.25f * std::sin(static_cast<float>(t) * 6.0f);
-            frame.tint[0] = frame.tint[1] = frame.tint[2] = pulse;
-        }
-        static_cast<CubeFrame*>(cubeBuffer->mapped())[slot] = frame;
+        // The avatar's grid and the fade that gates it, into this slot's
+        // region — after the slot has been waited on, so the GPU is no longer
+        // reading it. The band is what the scale and the centring are worked
+        // out against, so it is passed rather than assumed.
+        avatarRenderer->write_slot(slot, grid, width, kAvatarH, avatarAlpha);
 
         if (auto r = renderer->drawFrame(nullptr); !r) {
             log::error("draw: {}", r.error().message);
@@ -632,6 +632,9 @@ int main(int /*argc*/, char** /*argv*/) {
     renderer->waitIdle();
     // The overlay recorder captures `ui`, so drop it from the renderer first.
     renderer->setOverlayRecorder(nullptr);
+    // Off the window before the ImGui context it feeds, and before the window
+    // itself goes: a subclass left installed would outlive both.
+    textInput.reset();
     ui.reset();
     session.reset();
     return 0;

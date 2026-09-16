@@ -7,8 +7,10 @@
 // create() fails under --vulkan and the window then runs without any UI.
 //
 // There is no ImGui platform backend either. The engine's SDL3 backend owns
-// the window and drains its events, so input is fed in from the portable
-// rend::platform::Event values through handle_event().
+// the window and drains its events, so the mouse is fed in from the portable
+// rend::platform::Event values through handle_event(). The keyboard cannot be:
+// that event set carries sixteen keys and no character at all, so it comes
+// instead from an HWND subclass (win_text_input.h), which owns it alone.
 //
 // The swapchain view is sRGB, which means the hardware encodes whatever the
 // shader writes. ImGui has no colour management, so every colour handed to it
@@ -48,7 +50,14 @@ class ImGuiLayer {
 
   // Feed one platform event. Returns true when ImGui consumed it, i.e. the
   // pointer is over a widget and the app should not also act on the click.
+  // The mouse only: keyboard events are dropped here because WinTextInput's
+  // HWND subclass is ImGui's only keyboard path (see win_text_input.h).
   bool handle_event(const rend::platform::Event& event);
+
+  // Whether ImGui is using the keyboard this frame — a text field has focus,
+  // or some widget is active. The app's own hotkeys must stand down when it
+  // is, or a space typed into the message field also toggles the microphone.
+  bool wants_keyboard() const;
 
   void begin_frame(std::uint32_t width, std::uint32_t height, float dt);
   // Records the frame's draw data. Call inside the overlay recorder, which

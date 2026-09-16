@@ -38,29 +38,6 @@ DXGI_FORMAT dxgi_format(gpu::Format f) {
   }
 }
 
-ImGuiKey to_imgui_key(platform::Key k) {
-  switch (k) {
-    case platform::Key::Escape: return ImGuiKey_Escape;
-    case platform::Key::Space: return ImGuiKey_Space;
-    case platform::Key::Enter: return ImGuiKey_Enter;
-    case platform::Key::Up: return ImGuiKey_UpArrow;
-    case platform::Key::Down: return ImGuiKey_DownArrow;
-    case platform::Key::Left: return ImGuiKey_LeftArrow;
-    case platform::Key::Right: return ImGuiKey_RightArrow;
-    case platform::Key::LeftShift: return ImGuiKey_LeftShift;
-    case platform::Key::LeftCtrl: return ImGuiKey_LeftCtrl;
-    case platform::Key::W: return ImGuiKey_W;
-    case platform::Key::A: return ImGuiKey_A;
-    case platform::Key::S: return ImGuiKey_S;
-    case platform::Key::D: return ImGuiKey_D;
-    case platform::Key::Q: return ImGuiKey_Q;
-    case platform::Key::E: return ImGuiKey_E;
-    case platform::Key::G: return ImGuiKey_G;
-    case platform::Key::F11: return ImGuiKey_F11;
-    default: return ImGuiKey_None;
-  }
-}
-
 int to_imgui_button(platform::MouseButton b) {
   switch (b) {
     case platform::MouseButton::Left: return 0;
@@ -269,16 +246,18 @@ bool ImGuiLayer::handle_event(const platform::Event& event) {
     case platform::Event::Type::MouseWheel:
       io.AddMouseWheelEvent(0.0f, event.wheelDelta);
       return io.WantCaptureMouse;
-    case platform::Event::Type::KeyDown:
-    case platform::Event::Type::KeyUp: {
-      const ImGuiKey key = to_imgui_key(event.key);
-      if (key == ImGuiKey_None) return false;
-      io.AddKeyEvent(key, event.type == platform::Event::Type::KeyDown);
-      return io.WantCaptureKeyboard;
-    }
+    // Keys are deliberately absent: WinTextInput's HWND subclass is the single
+    // path into ImGui for them (B1). Forwarding the sixteen the engine knows
+    // about as well would deliver each of those twice — a doubled Backspace
+    // eats two characters — and the other ninety-odd would still be missing.
     default:
       return false;
   }
+}
+
+bool ImGuiLayer::wants_keyboard() const {
+  const ImGuiIO& io = ImGui::GetIO();
+  return io.WantCaptureKeyboard || io.WantTextInput;
 }
 
 void ImGuiLayer::begin_frame(std::uint32_t width, std::uint32_t height, float dt) {

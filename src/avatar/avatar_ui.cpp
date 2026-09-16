@@ -3,7 +3,10 @@
 #include "imgui.h"
 #include "imgui_layer.h"
 
+#include <algorithm>
+#include <cfloat>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <string>
 
@@ -203,18 +206,208 @@ void chat(const VoiceSession::Snapshot& snap) {
     ImGui::PopStyleColor();
     ImGui::Spacing();
   }
-  // The live transcript while the microphone is open.
-  if (!snap.partial.empty()) {
-    ImGui::PushStyleColor(ImGuiCol_Text, accent());
-    ImGui::TextWrapped("You: %s", snap.partial.c_str());
-    ImGui::PopStyleColor();
-  }
+  // The live partial used to be echoed here as well. It is not any more: it
+  // now streams into the message field (M1b.4), which is visible whether or
+  // not this region is open, and two places showing the same words while they
+  // are still being recognised is one too many (user, 16 Sep 2026).
 
   // Follow the newest line, but only while the user has not scrolled up.
   if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) ImGui::SetScrollHereY(1.0f);
 
   ImGui::EndChild();
   ImGui::PopStyleColor();
+}
+
+// How long the reason an Enter did nothing stays under the field.
+constexpr float kRefusalSeconds = 2.5f;
+constexpr int kMessageLinesMax = 4;
+
+bool blank(const char* s) {
+  for (; *s; ++s)
+    if (static_cast<unsigned char>(*s) > ' ') return false;
+  return true;
+}
+
+// Why this text cannot be sent right now, or null if it can. Sending routes
+// into VoiceSession::say(), which refuses outright while the engines are down
+// or the microphone is open, and treats a send during a turn as a barge-in —
+// so the field does not offer that: a turn in flight is a wait, not a queue.
+const char* refusal_reason(const VoiceSession::Snapshot& snap, bool voice_enabled,
+                           const char* text) {
+  if (blank(text)) return "nothing to send";
+  if (!voice_enabled) return "no voice this run (--no-voice)";
+  switch (snap.state) {
+    case VoiceSession::State::Loading: return "still starting up";
+    case VoiceSession::State::Failed: return "the session failed to start";
+    case VoiceSession::State::Listening: return "the microphone is open";
+    case VoiceSession::State::Thinking:
+    case VoiceSession::State::Speaking: return "Claude is still replying";
+    default: return nullptr;
+  }
+}
+
+// The message field, above the transport row (M1b.2).
+//
+// Multiline, sized to one line and grown by the newlines in it, because a
+// single-line InputText cannot hold a '\n' at all and Shift+Enter has to make
+// one. Plain Enter never reaches ImGui — WinTextInput withholds it and reports
+// it as `submit` — so the widget's own Enter handling only ever sees the
+// shifted one, which is exactly the newline case.
+//
+// Toned to the window rather than to ImGui's frame blue: the user asked for
+// "roughly the same colour as the background of the window", so this is the
+// window's own colour a shade darker, with a faint border to say it is a
+// field. It should read as a recess in the panel, not as a lit control.
+// Writing the field from outside — the clear after a send, and every frame of
+// a dictation — has to go through the widget, not the buffer behind it: while
+// an InputText is active its own copy of the text takes priority and the user
+// buffer is simply overwritten from it again next frame. DeleteChars /
+// InsertChars are the supported way in, and only reachable from a callback.
+//
+// `text` must not point into the widget's own buffer: DeleteChars empties that
+// before InsertChars reads anything.
+struct FieldEdit {
+  const char* text = nullptr;  // non-null: replace the field's contents with this
+};
+
+int replace_contents(ImGuiInputTextCallbackData* data) {
+  auto* edit = static_cast<FieldEdit*>(data->UserData);
+  if (edit->text) {
+    data->DeleteChars(0, data->BufTextLen);
+    if (*edit->text) data->InsertChars(0, edit->text);
+    edit->text = nullptr;
+  }
+  return 0;
+}
+
+// The live partial transcript, streamed into the message field (M1b.4).
+// True when the field's text changed and the widget has to be told.
+//
+// The four edge cases, decided deliberately:
+//  - Text already typed when the microphone opens is kept and dictated speech
+//    is appended after it. Refusing to write into a dirty field would hide
+//    what is being heard, which is the one thing this is for.
+//  - A recognition that produced nothing leaves nothing behind: the text is
+//    rebuilt from the prefix each frame, so an empty partial *is* the prefix.
+//  - The user editing mid-utterance wins outright. Speech notices the text is
+//    no longer what it last wrote and stops until the microphone next opens.
+//  - Leaving Listening without a turn starting (Pause, Silence, nothing
+//    intelligible) leaves the partial in the field to be edited and sent by
+//    hand. Only an utterance that was actually sent clears it.
+bool dictate_into_field(AvatarUiState& s, const VoiceSession::Snapshot& snap) {
+  const bool was_listening = s.prev_state == VoiceSession::State::Listening;
+  s.prev_state = snap.state;
+
+  if (snap.state == VoiceSession::State::Listening) {
+    if (s.dictation == AvatarUiState::Dictation::Idle) {
+      s.dictation_prefix = s.message;
+      s.dictation_last = s.message;
+      s.dictation = AvatarUiState::Dictation::Writing;
+    }
+    if (s.dictation != AvatarUiState::Dictation::Writing) return false;
+    if (s.dictation_last != s.message) {  // the user took it over
+      s.dictation = AvatarUiState::Dictation::Yielded;
+      return false;
+    }
+    std::string next = s.dictation_prefix;
+    if (!snap.partial.empty()) {
+      if (!next.empty() && next.back() != ' ' && next.back() != '\n') next += ' ';
+      next += snap.partial;
+    }
+    if (next == s.message) return false;
+    std::snprintf(s.message, sizeof(s.message), "%s", next.c_str());
+    s.dictation_last = s.message;
+    return true;
+  }
+
+  if (!was_listening) return false;
+  // The utterance was sent the moment the session went to Thinking; that is
+  // the only exit that clears, and it clears back to what the user had typed.
+  const bool sent = snap.state == VoiceSession::State::Thinking;
+  const bool clears = sent && s.dictation == AvatarUiState::Dictation::Writing;
+  s.dictation = AvatarUiState::Dictation::Idle;
+  if (!clears) return false;
+  std::snprintf(s.message, sizeof(s.message), "%s", s.dictation_prefix.c_str());
+  s.dictation_last = s.message;
+  return true;
+}
+
+void message_field(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool voice_enabled,
+                   bool loading, bool submit, AvatarUiResult& out) {
+  // Resolved before the widget is built so the send, the clear and the field
+  // shrinking back to one line all land on the same frame. `pending` is the
+  // separate storage the callback needs, since it wipes state.message first.
+  std::string pending;
+  FieldEdit edit;
+  if (dictate_into_field(state, snap)) {
+    pending = state.message;
+    edit.text = pending.c_str();
+  }
+  if (submit && !loading) {
+    if (const char* why = refusal_reason(snap, voice_enabled, state.message)) {
+      // Refused, never queued and never dropped: the text is left in the field
+      // exactly as typed and the reason appears below it.
+      state.refusal = why;
+      state.refusal_left = kRefusalSeconds;
+    } else {
+      out.send_text = state.message;
+      state.message[0] = '\0';
+      pending.clear();
+      edit.text = pending.c_str();
+      // A typed send ends any dictation that was feeding the field, so the
+      // prefix does not come back on the next microphone close.
+      state.dictation = AvatarUiState::Dictation::Idle;
+      state.dictation_prefix.clear();
+      state.dictation_last.clear();
+      state.refusal_left = 0.0f;
+    }
+  }
+
+  // Sized from the *wrapped* height, not from the newlines in the text. A
+  // dictation arrives as one long unpunctuated line and the field wraps it
+  // (NoHorizontalScroll), so counting '\n' would leave a one-line field with
+  // the speech scrolled out of sight — and nobody has to press a key to get
+  // there. Capped at four lines so a long utterance cannot push the transport
+  // row down the window.
+  const ImGuiStyle& style = ImGui::GetStyle();
+  const float line_h = ImGui::GetTextLineHeight();
+  const float wrap_w = ImGui::GetContentRegionAvail().x - 2.0f * style.FramePadding.x;
+  const float text_h =
+      ImGui::CalcTextSize(state.message, nullptr, false, wrap_w).y;
+  const int lines = std::clamp(static_cast<int>(text_h / line_h + 0.5f), 1, kMessageLinesMax);
+  const float h = lines * line_h + 2.0f * style.FramePadding.y;
+
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, ui_color(0.071f, 0.078f, 0.098f));
+  ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ui_color(0.086f, 0.094f, 0.118f));
+  ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ui_color(0.098f, 0.106f, 0.133f));
+  ImGui::PushStyleColor(ImGuiCol_Border, ui_color(0.16f, 0.17f, 0.21f));
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+  ImGui::BeginDisabled(loading);
+  ImGui::InputTextMultiline("##message", state.message, sizeof(state.message),
+                            ImVec2(-FLT_MIN, h),
+                            ImGuiInputTextFlags_NoHorizontalScroll |
+                                ImGuiInputTextFlags_CallbackAlways,
+                            replace_contents, &edit);
+  ImGui::EndDisabled();
+  // InputTextWithHint is single-line only, so the placeholder is drawn by hand
+  // over the empty field. Not while it is focused: a caret sitting on top of
+  // greyed-out words reads as text that will not delete.
+  if (state.message[0] == '\0' && !ImGui::IsItemActive()) {
+    const ImVec2 p = ImGui::GetItemRectMin();
+    ImGui::GetWindowDrawList()->AddText(
+        ImVec2(p.x + style.FramePadding.x + 1.0f, p.y + style.FramePadding.y),
+        ImGui::GetColorU32(dim()), "Message");
+  }
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor(4);
+
+  // Always one row tall, whatever it says. A row that came and went would
+  // change the panel's height, and the panel's height is the window's.
+  state.refusal_left = std::max(0.0f, state.refusal_left - ImGui::GetIO().DeltaTime);
+  if (state.refusal_left > 0.0f)
+    ImGui::TextColored(warn(), "%s", state.refusal.c_str());
+  else
+    ImGui::TextColored(dim(), "Enter sends  -  Shift+Enter starts a line");
 }
 
 }  // namespace
@@ -236,7 +429,7 @@ bool avatar_visible(AvatarVisibility mode, VoiceSession::State state) {
 
 AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot& snap,
                               bool voice_enabled, bool mic_on, std::uint32_t width,
-                              std::uint32_t top) {
+                              std::uint32_t top, bool submit) {
   AvatarUiResult out;
   const float w = static_cast<float>(width);
   // Everything below reacts to this one flag. With --no-voice there is no
@@ -280,6 +473,10 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
   // in the corner until the engines are up.
   if (state.chat_open && !loading) chat(snap);
 
+  // M1b.2: the message field, then the transport row at the very bottom of the
+  // window (the user asked for that order).
+  message_field(state, snap, voice_enabled, loading, submit, out);
+
   // Transport. Three equal buttons across the content width.
   const float spacing = ImGui::GetStyle().ItemSpacing.x;
   const float button_w = (ImGui::GetContentRegionAvail().x - 2.0f * spacing) / 3.0f;
@@ -321,3 +518,4 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
 }
 
 }  // namespace aii
+

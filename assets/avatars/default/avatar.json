@@ -1,0 +1,83 @@
+{
+  "name": "default",
+  "_about": "The default avatar: a 16x16 black-and-white slime. The body is black with white features, and nothing here uses a colour -- if you retint the palette the whole character follows, because the sprites share it.",
+  "grid": { "width": 16, "height": 16 },
+
+  "_palette": "Palette keys are the single characters used in the .txt frames; '.' is always transparent and may not appear here. Colours are #rrggbb or #rrggbbaa. '*' is the only translucent ink: over body cells it composites to the one grey in the avatar, and think.txt uses it for a glint.",
+  "palette": {
+    "#": "#000000",
+    "o": "#ffffff",
+    "*": "#ffffffcc"
+  },
+
+  "_anchors": "Cells on the character that accessories hang off, so the art and the placements agree by name instead of by number. head_top is deliberately unused: the band is 260 px, which at scale 16 is exactly the 16 cells the body already fills, so anything placed above row 0 enlarges the envelope and the whole avatar is scaled down to fit it -- one cell above the head costs 16 px off the body. There is horizontal slack, so accessories go beside the head instead and cost nothing.",
+  "anchors": {
+    "head_top": [8, 1],
+    "head_left": [2, 4],
+    "head_right": [13, 4],
+    "mouth": [8, 10],
+    "side_left": [1, 9],
+    "side_right": [14, 9]
+  },
+
+  "default_clip": "idle",
+
+  "_clips": "fps is the tick rate; a frame can occupy several ticks with `@frame hold=N` in the .txt, which is where each clip's rhythm lives. Read the comment at the top of each file -- it says what the rhythm is for.",
+  "clips": [
+    { "name": "idle",       "fps": 4,  "loop": true,  "file": "idle.txt" },
+    { "name": "blink",      "fps": 15, "loop": true,  "file": "blink.txt" },
+    { "name": "listen",     "fps": 6,  "loop": true,  "file": "listen.txt" },
+    { "name": "think",      "fps": 3,  "loop": true,  "file": "think.txt" },
+    { "name": "talk",       "fps": 10, "loop": true,  "file": "talk.txt" },
+    { "name": "happy",      "fps": 12, "loop": true,  "file": "happy.txt" },
+    { "name": "frustrated", "fps": 14, "loop": true,  "file": "frustrated.txt" },
+    { "name": "sleepy",     "fps": 2,  "loop": true,  "file": "sleepy.txt" },
+    { "name": "confused",   "fps": 4,  "loop": true,  "file": "confused.txt" },
+    { "name": "teaching",   "fps": 8,  "loop": true,  "file": "teaching.txt" },
+    { "name": "wake",       "fps": 8,  "loop": false, "file": "wake.txt" }
+  ],
+
+  "_sprites": "Accessories, drawn outside the body. offset is in cells from the anchor cell to the sprite's own top-left and may be negative. The union of the body and every placement here fixes the scale, so a placement is a cost whether the sprite is showing or not. Every one of these sits to the right of the head at y >= 0: the envelope comes out 22x16, the band takes 22 cells across at scale 16 with pixels to spare, and the body stays the full 256 px. Which clip turns which sprite on is M2.4's business, not the format's.",
+  "sprites": [
+    {
+      "name": "thought_bubble",
+      "grid": { "width": 6, "height": 6 },
+      "anchor": "head_right",
+      "offset": [3, -4],
+      "default_clip": "dots",
+      "clips": [
+        { "name": "dots", "fps": 6, "loop": true, "file": "bubble_dots.txt" }
+      ]
+    },
+    {
+      "name": "zzz",
+      "grid": { "width": 6, "height": 12 },
+      "anchor": "head_right",
+      "offset": [3, -4],
+      "default_clip": "rise",
+      "clips": [
+        { "name": "rise", "fps": 4, "loop": true, "file": "zzz_rise.txt" }
+      ]
+    },
+    {
+      "name": "question",
+      "grid": { "width": 4, "height": 9 },
+      "anchor": "head_right",
+      "offset": [4, -4],
+      "default_clip": "bob",
+      "clips": [
+        { "name": "bob", "fps": 4, "loop": true, "file": "question_bob.txt" }
+      ]
+    },
+    {
+      "name": "steam",
+      "grid": { "width": 5, "height": 8 },
+      "anchor": "head_right",
+      "offset": [3, -4],
+      "default_clip": "puff",
+      "clips": [
+        { "name": "puff", "fps": 8, "loop": true, "file": "steam_puff.txt" }
+      ]
+    }
+  ]
+}

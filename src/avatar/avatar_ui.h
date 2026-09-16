@@ -1,13 +1,14 @@
 #pragma once
 // The avatar window's panel, in ImGui: the status bar, the collapsible chat
 // and the transport buttons. Everything above the panel is the avatar itself
-// (the cube), which this never draws over.
+// (the pixel grid), which this never draws over.
 //
 // The panel auto-sizes to its content, so draw() reports back how tall the
 // window needs to be; main.cpp resizes the OS window to match, which is what
 // makes closing the chat shrink the widget instead of leaving a transparent
 // hole that still swallows desktop clicks.
 #include <cstdint>
+#include <string>
 
 #include "voice_session.h"
 
@@ -33,12 +34,43 @@ struct AvatarUiState {
   // Same contract as `chat_open`: user state, written only by its button and
   // kept for the session. Defaults to the behaviour that predates the button.
   AvatarVisibility avatar_mode = AvatarVisibility::Always;
+  // What is in the message field (M1b.2). A fixed buffer rather than a
+  // std::string because imgui_stdlib is not in this build, and a corner
+  // window's typed message has no business being longer than this anyway.
+  char message[2048] = {};
+  // Seconds left on the "why that Enter did nothing" line under the field.
+  // Counted down here so the refusal is visible for a moment without the row
+  // itself appearing and disappearing, which would resize the window.
+  float refusal_left = 0.0f;
+  std::string refusal;
+
+  // M1b.4: the live partial transcript is written into the message field
+  // itself, not into a label of its own (user, 16 Sep 2026) — so what is being
+  // heard is visible whether or not the chat is open, and a dictation can be
+  // edited where it lands. `Writing` is speech filling the field; `Yielded` is
+  // the user having touched it mid-utterance, after which speech keeps its
+  // hands off until the microphone next opens.
+  enum class Dictation { Idle, Writing, Yielded };
+  Dictation dictation = Dictation::Idle;
+  // Whatever the user had already typed when the microphone opened. Speech
+  // appends after it rather than over it, and an auto-sent utterance reverts
+  // the field to it — which is a plain clear in the normal case where nothing
+  // was typed, and keeps the typed half otherwise.
+  std::string dictation_prefix;
+  // The exact text speech last wrote. Anything else in the field means the
+  // user edited it, which is how `Yielded` is detected.
+  std::string dictation_last;
+  VoiceSession::State prev_state = VoiceSession::State::Loading;
 };
 
 struct AvatarUiResult {
   bool talk_clicked = false;  // Talk clicked: toggle the mic latch
   bool silence = false;  // Silence pressed
   bool pause = false;    // Pause pressed
+  // The message field's contents, on the frame Enter sent them; the field has
+  // already been cleared. Empty on every other frame, including the ones where
+  // a send was refused — the text stays in the field then, never swallowed.
+  std::string send_text;
   // Total window height the layout wants, avatar area included.
   std::uint32_t desired_height = 0;
 };
@@ -52,8 +84,11 @@ struct AvatarUiResult {
 // at Loading for the whole M1.5 crossfade rather than only until the session
 // reports itself idle — so this stays a pure function of the snapshot it is
 // given, and everything the loading screen covers changes on one frame.
+// `submit` is one plain-Enter press, from WinTextInput — which withholds that
+// key from ImGui so the multiline message field never turns it into a newline.
+// Shift+Enter never arrives here; ImGui sees it and inserts the newline itself.
 AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot& snap,
                               bool voice_enabled, bool mic_on, std::uint32_t width,
-                              std::uint32_t top);
+                              std::uint32_t top, bool submit);
 
 }  // namespace aii

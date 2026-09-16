@@ -1,0 +1,54 @@
+# question mark: hangs beside the head and bobs. 4 fps. Long holds at the top
+# and bottom of the bob and short ones in between, so it hesitates rather than
+# oscillating; a question mark moving at a constant speed looks like a cursor.
+#
+# Four cells wide, because a three-wide hook has no room to curve back under
+# itself and comes out as a squiggle.
+
+# at rest
+@frame hold=3
+....
+.##.
+#..#
+...#
+..#.
+..#.
+....
+..#.
+....
+
+# up a cell
+@frame hold=2
+.##.
+#..#
+...#
+..#.
+..#.
+....
+..#.
+....
+....
+
+# back
+@frame hold=3
+....
+.##.
+#..#
+...#
+..#.
+..#.
+....
+..#.
+....
+
+# down a cell
+@frame hold=2
+....
+....
+.##.
+#..#
+...#
+..#.
+..#.
+....
+..#.
