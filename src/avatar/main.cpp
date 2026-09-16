@@ -56,6 +56,10 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <commctrl.h>
+#include <windowsx.h>
+
+#include "imgui.h"  // B2 spike only: the second window draws its own widgets here
 
 #include <algorithm>
 #include <chrono>
@@ -150,6 +154,76 @@ void pinToCorner(HWND hwnd, int width, int height) {
     placeInCorner(hwnd, width, height);
 }
 
+// B2/M7.3 spike. WS_EX_TRANSPARENT on its own does *not* make this window
+// click-through: the usual recipe pairs it with WS_EX_LAYERED, and the engine's
+// D3D12 swapchain deliberately strips WS_EX_LAYERED when it takes the window
+// over for DirectComposition ("Transparent D3D12 target: ex-style ... -> ...",
+// d3d12_swapchain.cpp) because layered and a composition visual are mutually
+// exclusive. Measured: with WS_EX_TRANSPARENT set and layered stripped, a click
+// over the window was still taken by it and a window underneath got nothing.
+// Answering WM_NCHITTEST with HTTRANSPARENT is the way through that costs
+// nothing and needs no engine change — the same HWND-subclass lever B1 already
+// uses for the keyboard.
+LRESULT CALLBACK clickThroughProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
+                                  DWORD_PTR) {
+    if (msg == WM_NCHITTEST) return HTTRANSPARENT;
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+// B2 question 3, the one M4/M5/M6 actually need: can a second window own its
+// own input? `platform::Event` has no window field and `pumpEvents()` is
+// backend-global, so the engine's events cannot tell one window from the other.
+// This is B1's answer applied to the mouse as well as the keyboard: an HWND
+// subclass on the second window feeds *that window's* messages into *that
+// window's* ImGui context, in its own client coordinates, and the engine's pump
+// is left to the first window alone.
+struct SpikeInput {
+    aii::ImGuiLayer* ui = nullptr;
+};
+
+LRESULT CALLBACK spikeInputProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
+                                DWORD_PTR ref) {
+    auto* in = reinterpret_cast<SpikeInput*>(ref);
+    if (in && in->ui) {
+        in->ui->make_current();
+        ImGuiIO& io = ImGui::GetIO();
+        switch (msg) {
+        case WM_MOUSEMOVE:
+            io.AddMousePosEvent(static_cast<float>(GET_X_LPARAM(lp)),
+                                static_cast<float>(GET_Y_LPARAM(lp)));
+            break;
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONUP:
+            io.AddMousePosEvent(static_cast<float>(GET_X_LPARAM(lp)),
+                                static_cast<float>(GET_Y_LPARAM(lp)));
+            io.AddMouseButtonEvent(0, msg == WM_LBUTTONDOWN);
+            break;
+        case WM_MOUSEWHEEL:
+            io.AddMouseWheelEvent(0.0f, GET_WHEEL_DELTA_WPARAM(wp) / 120.0f);
+            break;
+        case WM_CHAR:
+            if (wp >= 32 && wp != 127)
+                io.AddInputCharacterUTF16(static_cast<unsigned short>(wp));
+            break;
+        case WM_KEYDOWN:
+        case WM_KEYUP: {
+            // Enough of a table for the spike: letters, digits and Backspace.
+            ImGuiKey key = ImGuiKey_None;
+            if (wp >= 'A' && wp <= 'Z')
+                key = static_cast<ImGuiKey>(ImGuiKey_A + (wp - 'A'));
+            else if (wp >= '0' && wp <= '9')
+                key = static_cast<ImGuiKey>(ImGuiKey_0 + (wp - '0'));
+            else if (wp == VK_BACK) key = ImGuiKey_Backspace;
+            if (key != ImGuiKey_None) io.AddKeyEvent(key, msg == WM_KEYDOWN);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
 std::string utf8FromWide(const wchar_t* w) {
     int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
     if (len <= 1) return {};
@@ -236,6 +310,21 @@ int main(int /*argc*/, char** /*argv*/) {
     std::string clipName;
     std::vector<std::string> spriteNames;
     std::string buttonsFile;
+    // ---- B2 spike, throwaway and flag-guarded (docs/spike-two-windows.md) ----
+    // None of this is a feature. It exists to answer "can this app open a
+    // second window, and what does it cost", and should be deleted or rewritten
+    // as a real one once M4/M5/M7.3 are planned from the answer.
+    bool spikeWindow = false;   // --spike-window: open the second window at all
+    double spikeDelay = 0.0;    // --spike-delay S: create it S seconds in, not at startup
+    double spikeGrow = -1.0;    // --spike-grow S: at S, resize it past its creation size
+    double spikeClose = -1.0;   // --spike-close S: at S, destroy it and keep running
+    bool spikeSolid = false;    // --spike-solid: hit-testable (no WS_EX_TRANSPARENT)
+    bool spikeRoam = true;      // --spike-still: leave it parked instead of moving it
+    bool spikeNoUi = false;     // --spike-no-ui: no second ImGui context (bisecting)
+    bool spikeNoAvatar = false; // --spike-no-avatar: no second avatar pass (bisecting)
+    bool spikeLayered = false;  // --spike-layered: put WS_EX_LAYERED back after the swapchain
+    bool spikeNoHit = false;    // --spike-nohit: skip the WM_NCHITTEST subclass
+    bool spikeHit = false;      // --spike-hit: transparent AND hit-testable (the M4/M5 shape)
     {
         // Wide command line so Japanese survives (argv is ANSI-mangled).
         int wargc = 0;
@@ -264,6 +353,17 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (a == L"--sprite" && i + 1 < wargc)
                 spriteNames.push_back(utf8FromWide(wargv[++i]));
             else if (a == L"--buttons" && i + 1 < wargc) buttonsFile = utf8FromWide(wargv[++i]);
+            else if (a == L"--spike-window") spikeWindow = true;
+            else if (a == L"--spike-delay" && i + 1 < wargc) spikeDelay = _wtof(wargv[++i]);
+            else if (a == L"--spike-grow" && i + 1 < wargc) spikeGrow = _wtof(wargv[++i]);
+            else if (a == L"--spike-close" && i + 1 < wargc) spikeClose = _wtof(wargv[++i]);
+            else if (a == L"--spike-solid") spikeSolid = true;
+            else if (a == L"--spike-still") spikeRoam = false;
+            else if (a == L"--spike-no-ui") spikeNoUi = true;
+            else if (a == L"--spike-no-avatar") spikeNoAvatar = true;
+            else if (a == L"--spike-layered") spikeLayered = true;
+            else if (a == L"--spike-nohit") spikeNoHit = true;
+            else if (a == L"--spike-hit") spikeHit = true;
         }
         if (wargv) LocalFree(wargv);
     }
@@ -666,6 +766,154 @@ int main(int /*argc*/, char** /*argv*/) {
     // snaps to whatever the mode already asks for, so the default mode does
     // not fade the avatar band in from nothing behind the loading screen.
     float visFade = -1.0f;
+
+    // ---- B2 spike: the second window (throwaway; see docs/spike-two-windows.md) ----
+    //
+    // Everything a second window needs, owned together so it can be torn down
+    // as a unit: its own PresentationTarget, Swapchain, FrameRenderer, ImGui
+    // context and AvatarRenderer. Nothing here is shared with the widget above
+    // except the Device, the Instance and the platform backend.
+    struct SpikeWindow {
+        std::unique_ptr<platform::PresentationTarget> target;
+        std::unique_ptr<gpu::Swapchain> swapchain;
+        std::unique_ptr<gpu::FrameRenderer> renderer;
+        std::unique_ptr<aii::ImGuiLayer> ui;
+        std::unique_ptr<gpu::DescriptorTable> table;
+        std::unique_ptr<aii::AvatarRenderer> avatar;
+        std::unique_ptr<SpikeInput> input;
+        HWND hwnd = nullptr;
+        std::uint32_t w = 0, h = 0;
+        bool grown = false;
+        int clicks = 0;
+    };
+    std::unique_ptr<SpikeWindow> spike;
+    // Closing one window cleanly: the subclasses come off the HWND before
+    // anything they point at is freed, the renderer's callbacks are dropped
+    // before the objects they capture, and the GPU is waited on first.
+    const auto spikeTeardown = [&](std::unique_ptr<SpikeWindow>& s) {
+        if (!s) return;
+        if (s->hwnd) {
+            RemoveWindowSubclass(s->hwnd, clickThroughProc, 1);
+            RemoveWindowSubclass(s->hwnd, spikeInputProc, 2);
+        }
+        s->renderer->waitIdle();
+        s->renderer->setOverlayRecorder(nullptr);
+        s->renderer->setFramePasses({});
+        s.reset();
+    };
+    constexpr std::uint32_t kSpikeW = 256, kSpikeH = 256;
+    constexpr std::uint32_t kSpikeGrownW = 420, kSpikeGrownH = 420;
+    auto spikeCreate = [&]() -> std::unique_ptr<SpikeWindow> {
+        auto s = std::make_unique<SpikeWindow>();
+        s->w = kSpikeW;
+        s->h = kSpikeH;
+        auto t = backend->createTarget({
+            .style = spikeSolid ? platform::WindowStyle::Borderless
+                                : platform::WindowStyle::BorderlessTransparent,
+            .size = {s->w, s->h},
+            .title = "AIInterface spike",
+            .vulkan = api == gpu::Api::Vulkan,
+        });
+        if (!t) { log::error("spike: createTarget: {}", t.error().message); return nullptr; }
+        s->target = std::move(t).value();
+        s->hwnd = static_cast<HWND>(backend->nativeWindowHandle(*s->target));
+        if (!s->hwnd) { log::error("spike: no HWND"); return nullptr; }
+
+        // M7.3's roaming window, exactly as the plan describes it: always on
+        // top, off the taskbar, never activated, and (unless --spike-solid)
+        // click-through so a click lands on whatever is behind it.
+        // The engine's createTarget ends in SDL_ShowWindow, which *activates*
+        // the window — measured: it was the foreground window before any click.
+        // WS_EX_NOACTIVATE added afterwards cannot undo an activation that has
+        // already happened, so the window is hidden, restyled and shown again
+        // with SW_SHOWNOACTIVATE. Only the last step is what makes "never
+        // steals focus" true from the first frame.
+        ShowWindow(s->hwnd, SW_HIDE);
+        LONG_PTR ex = GetWindowLongPtrW(s->hwnd, GWL_EXSTYLE);
+        ex |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        if (!spikeSolid && !spikeHit) ex |= WS_EX_TRANSPARENT;
+        SetWindowLongPtrW(s->hwnd, GWL_EXSTYLE, ex);
+        SetWindowPos(s->hwnd, HWND_TOPMOST, 2500, 1300, static_cast<int>(s->w),
+                     static_cast<int>(s->h), SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        ShowWindow(s->hwnd, SW_SHOWNOACTIVATE);
+        if (!spikeSolid && !spikeNoHit && !spikeHit)
+            SetWindowSubclass(s->hwnd, clickThroughProc, 1, 0);
+
+        auto sc = gpu::Swapchain::create(*instance, *device, {
+            .nativeSurface = s->hwnd,
+            .width = s->w,
+            .height = s->h,
+            .transparent = !spikeSolid,
+            .vsync = false,  // two vsynced swapchains would halve the frame rate
+        });
+        if (!sc) { log::error("spike: swapchain: {}", sc.error().message); return nullptr; }
+        s->swapchain = std::move(sc).value();
+
+        // WS_EX_TRANSPARENT's pass-through only continues to windows *in the
+        // same thread* (WM_NCHITTEST/HTTRANSPARENT is documented that way), so
+        // for a click meant for another process's window the usual recipe is
+        // WS_EX_LAYERED alongside it. The engine's swapchain strips LAYERED for
+        // DirectComposition; this puts it back afterwards, to find out whether
+        // per-pixel alpha survives it.
+        if (spikeLayered) {
+            LONG_PTR ex2 = GetWindowLongPtrW(s->hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(s->hwnd, GWL_EXSTYLE, ex2 | WS_EX_LAYERED);
+            SetLayeredWindowAttributes(s->hwnd, 0, 255, LWA_ALPHA);
+            SetWindowPos(s->hwnd, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                             SWP_FRAMECHANGED);
+            log::info("spike: WS_EX_LAYERED restored after the swapchain");
+        }
+
+        auto fr = gpu::FrameRenderer::create(*device, *s->swapchain);
+        if (!fr) { log::error("spike: frame renderer: {}", fr.error().message); return nullptr; }
+        s->renderer = std::move(fr).value();
+        s->renderer->setClearColor(0.0f, 0.0f, 0.0f, spikeSolid ? 1.0f : 0.0f);
+
+        std::string err;
+        if (!spikeNoUi) {
+            s->ui = aii::ImGuiLayer::create(*device, s->swapchain->imageFormat(), kFontPx, &err);
+            if (!s->ui) log::warn("spike: no second ImGui context: {}", err);
+        }
+
+        auto tbl = gpu::DescriptorTable::create(
+            *device, gpu::DescriptorTableDesc{.maxTextures = 1, .userStorageBuffers = 1});
+        if (!tbl) { log::error("spike: table: {}", tbl.error().message); return nullptr; }
+        s->table = std::move(tbl).value();
+        s->avatar = aii::AvatarRenderer::create(*device, s->swapchain->imageFormat(), *s->table, 0,
+                                                shaderDir, &err);
+        if (!s->avatar) { log::error("spike: avatar renderer: {}", err); return nullptr; }
+
+        SpikeWindow* raw = s.get();
+        if (!spikeNoAvatar) {
+            raw->renderer->setFramePasses({
+                gpu::FramePass{
+                    .point = gpu::PassPoint::InScene,
+                    .name = "spike-avatar-grid",
+                    .record = [raw](gpu::CommandContext& cmd, const gpu::PassContext& ctx) {
+                        raw->avatar->record(cmd, ctx.slot, raw->w, raw->h);
+                    },
+                },
+            });
+        }
+        if (raw->ui) {
+            raw->renderer->setOverlayRecorder(
+                [raw](gpu::CommandContext& cmd) { raw->ui->end_frame(cmd); });
+            // Its own input, from its own window, into its own context.
+            raw->input = std::make_unique<SpikeInput>();
+            raw->input->ui = raw->ui.get();
+            if (!SetWindowSubclass(raw->hwnd, spikeInputProc, 2,
+                                   reinterpret_cast<DWORD_PTR>(raw->input.get())))
+                log::warn("spike: could not subclass the second window for input");
+        }
+        log::info("spike: second window up, hwnd {:p}, {}x{}, {}, {}",
+                  static_cast<void*>(raw->hwnd), raw->w, raw->h,
+                  spikeSolid ? "opaque/hit-testable" : "transparent/click-through",
+                  spikeRoam ? "roaming" : "parked");
+        return s;
+    };
+    if (spikeWindow && spikeDelay <= 0.0) spike = spikeCreate();
+
     while (running) {
         // ---- the window's geometry, before a single one of this frame's
         // events is read ----
@@ -756,11 +1004,20 @@ int main(int /*argc*/, char** /*argv*/) {
             case platform::Event::Type::KeyUp:
                 if (event.key == platform::Key::Space) releaseSpace(true);
                 break;
-            case platform::Event::Type::Resized:
-                width = event.size.width;
-                height = event.size.height;
+            case platform::Event::Type::Resized: {
+                // B2: `Event` carries no window identity and `pumpEvents()` is
+                // backend-global, so this event may well belong to the *other*
+                // window. Observed, the first time two windows ran: the second
+                // window's 256x256 birth resize recreated the widget's own
+                // swapchain at 256x256. Asking our own target for its size,
+                // instead of believing the event's payload, is immune to that
+                // — the event is then only a hint that something resized.
+                const auto now = target->sizeInPixels();
+                width = now.width;
+                height = now.height;
                 renderer->resize(width, height);
                 break;
+            }
             default:
                 break;
             }
@@ -1044,6 +1301,94 @@ int main(int /*argc*/, char** /*argv*/) {
             log::error("draw: {}", r.error().message);
             break;
         }
+
+        // ---- B2 spike: the second window's own frame ----
+        if (spikeWindow && !spike && spikeDelay > 0.0 && t >= spikeDelay) {
+            log::info("spike: creating the second window at t={:.2f}s (runtime, not startup)", t);
+            spike = spikeCreate();
+            if (!spike) spikeWindow = false;
+        }
+        if (spike && spikeClose >= 0.0 && t >= spikeClose) {
+            log::info("spike: closing the second window at t={:.2f}s, keeping the first", t);
+            spikeTeardown(spike);
+            spikeWindow = false;
+            log::info("spike: second window closed; first window still running");
+        }
+        if (spike) {
+            SpikeWindow& sp = *spike;
+            if (spikeGrow >= 0.0 && !sp.grown && t >= spikeGrow) {
+                sp.grown = true;
+                sp.w = kSpikeGrownW;
+                sp.h = kSpikeGrownH;
+                RECT r{};
+                GetWindowRect(sp.hwnd, &r);
+                SetWindowPos(sp.hwnd, HWND_TOPMOST, r.left, r.top, static_cast<int>(sp.w),
+                             static_cast<int>(sp.h), SWP_NOACTIVATE);
+                sp.renderer->resize(sp.w, sp.h);
+                log::info("spike: grew past its creation size to {}x{} (commit-once test)", sp.w,
+                          sp.h);
+            }
+            if (spikeRoam) {
+                // M7.3: move it with SetWindowPos alone, no swapchain touched.
+                RECT work{};
+                SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+                const float span = static_cast<float>(work.right - work.left) -
+                                   static_cast<float>(sp.w);
+                const float u = 0.5f - 0.5f * std::cos(static_cast<float>(t) * 0.9f);
+                const int x = work.left + static_cast<int>(span * u);
+                const int y = work.top + 200 + static_cast<int>(120.0f *
+                                  std::sin(static_cast<float>(t) * 1.7f));
+                SetWindowPos(sp.hwnd, HWND_TOPMOST, x, y, 0, 0,
+                             SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOOWNERZORDER);
+            }
+            const bool trace = !aii::env_or("AII_SPIKE_TRACE", "").empty();
+            const auto step = [&](const char* s) {
+                if (trace) { std::fprintf(stderr, "[spike] %s\n", s); std::fflush(stderr); }
+            };
+            step("frame begin");
+            if (sp.ui) {
+                step("ui begin_frame");
+                sp.ui->begin_frame(sp.w, sp.h, dt);
+                step("ui widgets");
+                ImGui::SetNextWindowPos(ImVec2(0, 0));
+                // Only the top strip, so the avatar grid pass underneath is
+                // visible in the rest of the window rather than covered by an
+                // opaque ImGui background.
+                ImGui::SetNextWindowSize(ImVec2(static_cast<float>(sp.w), 118.0f));
+                ImGui::Begin("spike", nullptr,
+                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+                ImGui::TextUnformatted("SECOND WINDOW");
+                ImGui::Text("%ux%u  t=%.1f", sp.w, sp.h, t);
+                ImGui::TextUnformatted("\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\xe3\x82\x82");
+                ImGui::Separator();
+                static char buf[64] = "";
+                ImGui::InputText("##spike", buf, sizeof(buf));
+                if (ImGui::Button("spike button")) {
+                    ++sp.clicks;
+                    log::info("spike: its own button was clicked ({} so far), field='{}'",
+                              sp.clicks, buf);
+                }
+                ImGui::SameLine();
+                ImGui::Text("clicks %d", sp.clicks);
+                ImGui::End();
+                step("ui widgets done");
+            }
+            if (auto r = sp.renderer->waitFrameSlot(); !r) {
+                log::error("spike wait: {}", r.error().message);
+            } else {
+                step("write_slot");
+                sp.avatar->write_slot(sp.renderer->frameSlot(), grid, sp.w, sp.h, 1.0f);
+                step("drawFrame");
+                if (auto d = sp.renderer->drawFrame(nullptr); !d)
+                    log::error("spike draw: {}", d.error().message);
+                step("drawFrame done");
+            }
+        }
+    }
+    if (spike) {
+        spikeTeardown(spike);
+        log::info("spike: second window torn down at exit");
     }
     // Anything still inside the debounce window goes now: a mode clicked and
     // then Esc pressed half a second later is still a change the user made.

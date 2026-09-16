@@ -72,6 +72,12 @@ class ImGuiLayer {
   // for exactly this reason. `hwnd` is the window; a null one is a no-op.
   void sync_pointer(void* hwnd);
 
+  // Makes this layer's ImGui context the current one. Every method below does
+  // it for itself; this is public so a caller that draws widgets between
+  // begin_frame() and end_frame() of a *different* layer can put itself back.
+  // One window never needs it — ImGui's ambient context is then always ours.
+  void make_current();
+
   void begin_frame(std::uint32_t width, std::uint32_t height, float dt);
   // Records the frame's draw data. Call inside the overlay recorder, which
   // runs in an active rendering pass on the swapchain image.

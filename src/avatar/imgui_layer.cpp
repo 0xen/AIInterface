@@ -145,6 +145,17 @@ std::unique_ptr<ImGuiLayer> ImGuiLayer::create(const gpu::Device& device,
 
   IMGUI_CHECKVERSION();
   s.ctx = ImGui::CreateContext();
+  // B2, and it cost an access violation to find: ImGui::CreateContext()
+  // *restores the previously current context* before returning (imgui.cpp,
+  // "Restore previous context if any, else keep new one"). With one window
+  // there is no previous context and the new one is left current, so this line
+  // was never needed; with two, everything below — the fonts, the style, and
+  // ImGui_ImplDX12_Init — silently configured the *first* window's context a
+  // second time and left the second one empty. The crash then landed a frame
+  // later inside ImGui_ImplDX12_NewFrame, dereferencing the null backend data
+  // of a context nothing had initialised (its IM_ASSERT is compiled out in
+  // Release). Nothing about it says "second window".
+  ImGui::SetCurrentContext(s.ctx);
   ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = nullptr;  // a corner widget has no layout worth persisting
   io.LogFilename = nullptr;
@@ -215,13 +226,30 @@ std::unique_ptr<ImGuiLayer> ImGuiLayer::create(const gpu::Device& device,
 
 ImGuiLayer::~ImGuiLayer() {
   if (!s_) return;
+  // The backend's shutdown reads the context it was initialised against, and
+  // frees its font descriptor through g_state's allocator: both have to point
+  // at *this* layer, not at whichever one happened to draw last.
+  make_current();
   if (s_->backend_up) ImGui_ImplDX12_Shutdown();
   if (s_->ctx) ImGui::DestroyContext(s_->ctx);
   if (s_->srv_heap) s_->srv_heap->Release();
   if (g_state == s_.get()) g_state = nullptr;
 }
 
+// B2 spike: ImGui's API works on one ambient "current context", and the D3D12
+// backend keeps its own state inside that context. With a second window there
+// are two, so every entry point into a layer has to say which one it is about
+// before touching ImGui at all. `g_state` follows for the same reason: the SRV
+// allocator the D3D12 backend calls is a plain function pointer with no user
+// data, so it has to find the heap belonging to whichever layer is current.
+void ImGuiLayer::make_current() {
+  if (!s_) return;
+  ImGui::SetCurrentContext(s_->ctx);
+  g_state = s_.get();
+}
+
 bool ImGuiLayer::handle_event(const platform::Event& event) {
+  make_current();
   ImGuiIO& io = ImGui::GetIO();
   switch (event.type) {
     case platform::Event::Type::MouseMoved:
@@ -257,6 +285,7 @@ bool ImGuiLayer::handle_event(const platform::Event& event) {
 
 void ImGuiLayer::sync_pointer(void* hwnd) {
   if (!hwnd) return;
+  make_current();
   POINT p{};
   RECT client{};
   if (!GetCursorPos(&p)) return;
@@ -278,11 +307,14 @@ void ImGuiLayer::sync_pointer(void* hwnd) {
 }
 
 bool ImGuiLayer::wants_keyboard() const {
+  if (!s_) return false;
+  ImGui::SetCurrentContext(s_->ctx);
   const ImGuiIO& io = ImGui::GetIO();
   return io.WantCaptureKeyboard || io.WantTextInput;
 }
 
 void ImGuiLayer::begin_frame(std::uint32_t width, std::uint32_t height, float dt) {
+  make_current();
   // A frame the renderer never got to (a skipped or failed drawFrame) would
   // otherwise trip NewFrame's "forgot to call Render" assert.
   if (s_->frame_active) ImGui::EndFrame();
@@ -295,6 +327,7 @@ void ImGuiLayer::begin_frame(std::uint32_t width, std::uint32_t height, float dt
 }
 
 void ImGuiLayer::end_frame(gpu::CommandContext& cmd) {
+  make_current();
   if (!s_->frame_active) return;
   s_->frame_active = false;
   ImGui::Render();
