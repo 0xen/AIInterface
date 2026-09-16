@@ -100,9 +100,20 @@ void VoiceSession::log(const std::string& s) {
   std::fflush(stdout);
 }
 
+void VoiceSession::set_state_locked(State s) {
+  if (s == state_) return;
+  // Every transition is traced because the sequence is the only honest record
+  // of this machine. The Speaking->Idle->Listening flutter that used to open
+  // the microphone mid-reply held Idle for four milliseconds — too short to
+  // read off the panel, and what the avatar's minimum dwell was masking — so
+  // it was found here, and it is proved gone here.
+  rend::log::trace("state: {} -> {}", state_name(state_), state_name(s));
+  state_ = s;
+}
+
 void VoiceSession::set_state(State s) {
   std::lock_guard<std::mutex> l(mutex_);
-  state_ = s;
+  set_state_locked(s);
 }
 
 void VoiceSession::set_status(const std::string& s) {
@@ -251,7 +262,28 @@ void VoiceSession::update() {
       }
     }
   } else if (s == State::Speaking) {
-    if (speech_->idle()) {
+    // A reply is over when the turn thread has stopped producing text *and*
+    // the queue has run dry. `speech_->idle()` on its own is not that test.
+    // The state turns to Speaking on the first text delta, but the splitter
+    // holds the first chunk until a comma or twelve words and synthesis then
+    // takes a few hundred milliseconds, so for that whole gap there is nothing
+    // queued, nothing synthesising and nothing playing — which idle() has to
+    // report as true, because from the queue's side it *is* true. The same gap
+    // reopens every time the speaker catches up with a reply that is still
+    // arriving. Read alone it meant "finished": the state dropped to Idle and
+    // the branch below reopened the microphone into the middle of the reply.
+    // On this machine the speakers face the C920, so the app then transcribed
+    // Claude's own voice back in as the user — and begin_listening()'s
+    // speech_->clear() threw away the rest of the reply on the way.
+    //
+    // `turn_running_` is the missing half and only the session can know it:
+    // the queue cannot tell "nothing to do" from "more sentences are still
+    // coming". Keeping the test here rather than teaching the queue to stay
+    // busy from mark_new_reply() also cannot hang — a reply that speaks
+    // nothing at all (an error, or a reply that was only a worker command
+    // block) still ends its thread, where a queue-side promise would wait for
+    // audio that is never coming.
+    if (!turn_running_ && speech_->idle()) {
       set_state(State::Idle);
       set_status("ready.");
     }
@@ -276,6 +308,10 @@ void VoiceSession::begin_listening() {
     set_status("mic failed to start");
     return;
   }
+  // The only place the capture device is ever started, so this line answers
+  // "did the microphone open while Claude was talking?" on its own. It is what
+  // the speakers-into-the-C920 defect is checked against; keep it.
+  rend::log::trace("mic: open (latch={})", mic_open_);
   // Start the silence clock now: without this the first frame would look
   // like a pause that had already run long enough to send.
   listen_began_ = std::chrono::steady_clock::now();
@@ -285,7 +321,7 @@ void VoiceSession::begin_listening() {
     std::lock_guard<std::mutex> l(mutex_);
     partial_.clear();
     status_ = "listening... pause sends; click Mute to stop";
-    state_ = State::Listening;
+    set_state_locked(State::Listening);
   }
 }
 
@@ -321,7 +357,7 @@ void VoiceSession::end_listening_unsent() {
   std::lock_guard<std::mutex> l(mutex_);
   partial_ = text;
   ++dictated_seq_;
-  state_ = State::Idle;
+  set_state_locked(State::Idle);
   status_ = text.empty() ? "heard nothing. ready."
                          : "in the message box. edit it, then press Enter.";
 }
@@ -449,7 +485,7 @@ void VoiceSession::pause() {
     mic_->stop();
     std::lock_guard<std::mutex> l(mutex_);
     partial_.clear();
-    state_ = State::Idle;
+    set_state_locked(State::Idle);
     status_ = "cancelled. ready.";
   }
 }
@@ -467,7 +503,7 @@ void VoiceSession::start_turn(std::string text) {
     lines_.push_back({true, text});
     lines_.push_back({false, ""});
     if (lines_.size() > kMaxLines) lines_.erase(lines_.begin(), lines_.begin() + (lines_.size() - kMaxLines));
-    state_ = State::Thinking;
+    set_state_locked(State::Thinking);
     status_ = "thinking...";
   }
   const unsigned gen = ++turn_generation_;
@@ -490,7 +526,7 @@ void VoiceSession::run_turn(std::string text) {
       if (first) {
         first = false;
         status_ = "speaking...";
-        state_ = State::Speaking;
+        set_state_locked(State::Speaking);
       }
     }
     splitter.feed(delta);
@@ -506,11 +542,11 @@ void VoiceSession::run_turn(std::string text) {
     if (!lines_.empty() && !lines_.back().user) lines_.back().text = strip_aii_blocks(lines_.back().text);
     if (!r.ok) {
       status_ = "error: " + r.error;
-      state_ = State::Idle;
+      set_state_locked(State::Idle);
       ++turn_failed_seq_;
       return;
     }
-    state_ = State::Speaking;  // update() returns to Idle once the audio drains
+    set_state_locked(State::Speaking);  // update() returns to Idle once the audio drains
     status_ = "speaking...";
   }
   // Worker commands ride in a fenced block, which is shown but never spoken.
@@ -539,7 +575,7 @@ bool VoiceSession::flush_announcements() {
     if (pending_announce_.empty()) return false;
     say_now.swap(pending_announce_);
     partial_.clear();
-    state_ = State::Speaking;
+    set_state_locked(State::Speaking);
     status_ = "speaking...";
   }
   // Close the microphone for the same reason a reply does: nothing said into

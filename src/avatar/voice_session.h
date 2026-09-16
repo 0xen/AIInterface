@@ -132,6 +132,11 @@ class VoiceSession {
   // True if it took the floor. Frame loop only.
   bool flush_announcements();
   void set_state(State s);
+  // The same, for callers that already hold mutex_ because they are publishing
+  // a state change together with the text that goes with it. Both overloads
+  // exist so that no path assigns state_ directly: the trace line lives here,
+  // and a transition that skipped it would be a hole in the record.
+  void set_state_locked(State s);
   void set_status(const std::string& s);
   void log(const std::string& s);
 
