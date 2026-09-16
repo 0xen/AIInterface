@@ -1,0 +1,22 @@
+models/
+build/
+out/
+.vs/
+*.user
+spikes/**/bin/
+spikes/**/build/
+*.wav
+
+# spike evidence too large or vendored for git
+spikes/**/build-*/
+spikes/**/out/
+spikes/tts_src/zonos2.cpp/
+spikes/tts_src/zonos2.cpp-b/
+spikes/tts_cpu/voicevox/voicevox_core/
+spikes/tts_cpu/voicevox/download-windows-x64.exe
+spikes/stt/testdata/
+*.dll
+*.exe
+*.lib
+*.obj
+spikes/**/*.log
