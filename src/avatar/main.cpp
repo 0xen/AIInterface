@@ -73,6 +73,7 @@
 #include "loader_anim.h"
 #include "settings.h"
 #include "voice_session.h"
+#include "watermark.h"
 #include "win_text_input.h"
 
 using namespace rend;
@@ -116,6 +117,14 @@ float smoothstep(float a, float b, float x) {
     return s * s * (3.0f - 2.0f * s);
 }
 
+// The bottom margin actually used, which is kCornerMargin on an activated
+// Windows and more when the widget is dodging the activation watermark (M1d.1,
+// aii::corner_bottom_margin). It is settled once at startup — it needs the
+// HWND for the window's DPI and the override for the mode — and read from
+// there on, because placeInCorner is also called from the deferred resize path
+// and both callers have to agree on where the bottom edge is.
+int gBottomMargin = kCornerMargin;
+
 // Places the window in the bottom-right of the primary monitor's work area.
 // The anchor is the bottom edge, so a height change grows or shrinks the
 // window upward and the corner it sits in never moves.
@@ -123,7 +132,7 @@ void placeInCorner(HWND hwnd, int width, int height) {
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     SetWindowPos(hwnd, HWND_TOPMOST, work.right - width - kCornerMargin,
-                 work.bottom - height - kCornerMargin, width, height, SWP_NOACTIVATE);
+                 work.bottom - height - gBottomMargin, width, height, SWP_NOACTIVATE);
 }
 
 // Keeps the window above every other one and off the taskbar, then places it.
@@ -191,6 +200,16 @@ int main(int /*argc*/, char** /*argv*/) {
         aii::parse_commands("```aii\n" + body + "\n```");
     }
 
+    // M1b.5: the panel's user state comes back the way it was left, and M1d.1
+    // reads its override from the same file. Loaded here, before the window is
+    // created, because the watermark dodge decides where the window is *first*
+    // placed — settling it afterwards would put the widget on screen in one
+    // place and move it in the next frame. The panel's own fields are read
+    // further down, where they are used; this is only the file.
+    aii::Settings settings;
+    settings.load(aii::settings_file_path());
+    if (settings.take_status_change()) log::warn("{}", settings.status());
+
     // The voice loop loads its engines in the background while the window comes up.
     std::unique_ptr<aii::VoiceSession> session;
     if (voiceEnabled) session = std::make_unique<aii::VoiceSession>(aii::Config::from_env());
@@ -242,6 +261,23 @@ int main(int /*argc*/, char** /*argv*/) {
 
     HWND hwnd = static_cast<HWND>(backend->nativeWindowHandle(*target));
     if (hwnd && transparent) {
+        // M1d.1: the activation watermark is composited by DWM over topmost
+        // windows, so the only way past it is to not be under it. The mode
+        // comes from the settings file (so M1c.3's surface can expose it
+        // later) with AII_DODGE_WATERMARK overruling it, which is the order
+        // every other override in this app uses: the file is the preference,
+        // the environment is this run.
+        const auto stored = static_cast<aii::WatermarkDodge>(
+            settings.get_enum("window", "dodge_watermark", aii::kWatermarkDodgeNames,
+                              aii::kWatermarkDodgeCount,
+                              static_cast<int>(aii::WatermarkDodge::Auto)));
+        const aii::WatermarkDodge dodge =
+            aii::parse_watermark_dodge(aii::env_or("AII_DODGE_WATERMARK", ""), stored);
+        gBottomMargin = aii::corner_bottom_margin(hwnd, kCornerMargin, dodge);
+        // Logged, never shown: the console says what the placement did, and
+        // the window itself says nothing about activation anywhere.
+        log::info("corner bottom margin {} ({} dodge)", gBottomMargin,
+                  aii::kWatermarkDodgeNames[static_cast<int>(dodge)]);
         pinToCorner(hwnd, kWindowW, kWindowH);
     }
 
@@ -440,17 +476,16 @@ int main(int /*argc*/, char** /*argv*/) {
     aii::AvatarUiState uiState;
 
     // M1b.5: the panel's user state comes back the way it was left. Read here,
-    // before the loop and so before the first frame is built, because a load
-    // any later would draw the window in its default state and correct it
+    // before the loop and so before the first frame is built, because reading
+    // it any later would draw the window in its default state and correct it
     // afterwards — a visible flip on every start, and on a window whose height
-    // follows the panel, a resize with it.
-    aii::Settings settings;
-    settings.load(aii::settings_file_path());
+    // follows the panel, a resize with it. The file itself was loaded before
+    // the window (M1d.1 needs it to place the window at all); a load failure
+    // was already reported there, and every key here answers with its default.
     uiState.chat_open = settings.get_bool("panel", "chat_open", uiState.chat_open);
     uiState.avatar_mode = static_cast<aii::AvatarVisibility>(
         settings.get_enum("panel", "avatar_mode", aii::kAvatarVisibilityNames,
                           aii::kAvatarVisibilityCount, static_cast<int>(uiState.avatar_mode)));
-    if (settings.take_status_change()) log::warn("{}", settings.status());
 
     log::info("avatar live: {}x{} {} {}", extent.width, extent.height,
               transparent ? "transparent" : "opaque", gpu::apiName(api));
