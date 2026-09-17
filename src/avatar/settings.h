@@ -14,8 +14,18 @@
 //     "version": 1,
 //     "panel": { "chat_open": false, "avatar_mode": "always" },
 //     "language": { "enabled": "en,ja" },
-//     "timing": { "listen_timeout": 60.0 }
+//     "timing": { "listen_timeout": 60.0 },
+//     "inspector": { "placed": true, "x": 1180, "y": 420, "w": 1100, "h": 700 }
 //   }
+//
+// `inspector` (M5.1) is the prompt inspector window's geometry: `x`/`y` are its
+// **window** rect's top-left and `w`/`h` its **client** size, which is the pair
+// the window is actually created at — mixing the two is how a remembered window
+// walks down the screen by one title bar per restart. `placed` is a flag rather
+// than a sentinel coordinate because 0,0 is a real position and a second
+// monitor to the left has real negative ones; false means "never placed" and
+// the window centres itself. Nothing here is trusted as still legal: a rect
+// that no longer lands on any monitor is re-fitted when the window is made.
 //
 // `timing.listen_timeout` (M1f.2) is seconds, and **0 means never** — the same
 // spelling the mechanism already uses (`Config::listen_timeout`,

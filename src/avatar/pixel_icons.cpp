@@ -42,6 +42,27 @@ constexpr IconRows kIconFolder = {
     ".............",
 };
 
+// M5.1: the prompt inspector. A page with lines of text on it, drawn as a
+// solid block with the lines cut *out* of it rather than as an outline with
+// lines inside — a 1-cell outline is 2 px at this scale and reads as a smudge
+// beside the cog's chunky teeth, while negative space is the idiom the folder
+// already uses and stays legible.
+constexpr IconRows kIconPrompts = {
+    ".............",
+    ".###########.",
+    ".###########.",
+    ".#.........#.",
+    ".###########.",
+    ".#.........#.",
+    ".###########.",
+    ".#.....#####.",
+    ".###########.",
+    ".#.........#.",
+    ".###########.",
+    ".###########.",
+    ".............",
+};
+
 }  // namespace
 
 void draw_icon(ImDrawList* dl, const char* const* rows, ImVec2 p, ImU32 ink, ImU32 mark,
@@ -61,6 +82,7 @@ const char* const* icon_for_glyph(ButtonGlyph glyph) {
   switch (glyph) {
     case ButtonGlyph::Cog: return kIconCog;
     case ButtonGlyph::Folder: return kIconFolder;
+    case ButtonGlyph::Prompts: return kIconPrompts;
     default: return nullptr;
   }
 }

@@ -109,6 +109,7 @@
 #include "core/schedule.h"
 #include "core/worker_pool.h"
 #include "imgui_layer.h"
+#include "inspector_window.h"
 #include "loader_anim.h"
 #include "settings.h"
 #include "sidebar_window.h"
@@ -1114,6 +1115,58 @@ int main(int /*argc*/, char** /*argv*/) {
     // Register such a button *outside* the `if` below, whether or not the
     // strip is ever made: it is a button, not a piece of the strip, and the
     // fallback surface draws it exactly as it draws the cog.
+    // ---- M5.1: the prompt inspector, a real third window ----
+    //
+    // Its button is registered here, *before* the strip is made and outside the
+    // `if` that makes it, for the two reasons the block above states: a button
+    // is not a piece of the strip (without one the registry hands it to the
+    // panel's toolbar row, which dispatches Invoke exactly as the strip does),
+    // and the strip sizes itself at create() from the buttons it is going to
+    // draw — registering afterwards would have it born one button short and
+    // resize on its first frame.
+    //
+    // The click only *asks*. Creating or destroying a window inside the strip's
+    // ImGui frame would tear down GPU objects and switch ImGui contexts with a
+    // half-built frame on the stack, so the callback sets a flag and the frame
+    // loop answers it between frames — which is also what makes a second click
+    // close the window rather than open a second one.
+    bool inspectorToggle = false;
+    std::unique_ptr<aii::InspectorWindow> inspector;
+    // The remembered geometry, read once here and written back whenever it
+    // changes. `placed` is a stored flag rather than a sentinel coordinate
+    // because 0,0 is a real position and a multi-monitor desktop has real
+    // negative ones; false simply means "never placed", which is first run.
+    // Whether the rect still lands on a monitor is not decided here — see
+    // fit_to_desktop() in inspector_window.cpp, which re-checks it against the
+    // desktop as it is at the moment the window is made.
+    aii::InspectorGeometry inspectorGeom;
+    inspectorGeom.placed = settings.get_bool("inspector", "placed", false);
+    inspectorGeom.x = static_cast<int>(settings.get_float("inspector", "x", 0.0f));
+    inspectorGeom.y = static_cast<int>(settings.get_float("inspector", "y", 0.0f));
+    inspectorGeom.w = static_cast<unsigned>(
+        std::max(0.0f, settings.get_float("inspector", "w", static_cast<float>(inspectorGeom.w))));
+    inspectorGeom.h = static_cast<unsigned>(
+        std::max(0.0f, settings.get_float("inspector", "h", static_cast<float>(inspectorGeom.h))));
+    // Every setter is a no-op when the value already matches, so this can be
+    // called every frame and "on change" stays a decision the store makes.
+    const auto rememberInspector = [&] {
+        settings.set_bool("inspector", "placed", inspectorGeom.placed);
+        settings.set_float("inspector", "x", static_cast<float>(inspectorGeom.x));
+        settings.set_float("inspector", "y", static_cast<float>(inspectorGeom.y));
+        settings.set_float("inspector", "w", static_cast<float>(inspectorGeom.w));
+        settings.set_float("inspector", "h", static_cast<float>(inspectorGeom.h));
+    };
+    {
+        aii::ButtonAction open;
+        open.kind = aii::ButtonActionKind::Invoke;
+        open.callback = [&inspectorToggle] { inspectorToggle = true; };
+        std::string buttonError;
+        if (!aii::ButtonRegistry::instance().add_app_button(
+                "inspector", aii::ButtonGlyph::Prompts, "Prompt inspector",
+                aii::ButtonSurface::Sidebar, std::move(open), &buttonError))
+            log::warn("no inspector button: {}", buttonError);
+    }
+
     std::unique_ptr<aii::SidebarWindow> sidebar;
     if (transparent && hwnd && ui) {
         // Set *before* create(), not after: the strip sizes itself from the
@@ -1627,6 +1680,35 @@ int main(int /*argc*/, char** /*argv*/) {
                     uiState.refusal_left = 2.5f;
                 }
             }
+            // M5.1: the inspector's own life, answered here — between the
+            // strip's frame and the widget's, which is the only place a window
+            // may be created or destroyed. The toggle was set by the button's
+            // callback, from either surface; a close box sets nothing and is
+            // reported by draw() returning false instead, because that message
+            // arrives while the widget's pumpEvents is running.
+            if (inspectorToggle) {
+                inspectorToggle = false;
+                if (inspector) {
+                    inspectorGeom = inspector->geometry();
+                    inspector.reset();
+                } else {
+                    std::string inspectorError;
+                    inspector = aii::InspectorWindow::create(*backend, *instance, *device, kFontPx,
+                                                             inspectorGeom, &inspectorError);
+                    // Survivable: the button stays and the next click tries
+                    // again. Nothing above the inspector depends on it.
+                    if (!inspector) log::warn("no inspector window: {}", inspectorError);
+                }
+            }
+            if (inspector) {
+                // Its own ImGui context and its own present, exactly as the
+                // strip's, and like the strip everything after this line makes
+                // the widget's context current again for itself.
+                const bool stillOpen = inspector->draw(dt);
+                inspectorGeom = inspector->geometry();
+                rememberInspector();
+                if (!stillOpen) inspector.reset();
+            }
             // After the resize above, never before it: the pointer's client
             // coordinates are meaningless until the window it is measured
             // against has stopped moving this frame.
@@ -1770,6 +1852,14 @@ int main(int /*argc*/, char** /*argv*/) {
         raceThread.join();
     }
     sidebar.reset();
+    // And the inspector with it, for the same reason and with one addition:
+    // where it was is written down first. The frame loop already mirrors that
+    // every frame, so this only catches a window moved on the very last one.
+    if (inspector) {
+        inspectorGeom = inspector->geometry();
+        rememberInspector();
+        inspector.reset();
+    }
     // Python next, and before anything the scripts can still reach. The
     // engine's host stops the interpreter and joins its thread; the app's own
     // teardown must not be racing a script that is still posting. Nothing is

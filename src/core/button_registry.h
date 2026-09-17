@@ -85,7 +85,9 @@ struct ButtonAction {
 //
 // Registered buttons are always `Label`: a script cannot invent a glyph, and
 // letting it pick from the built-in ones would only produce two cogs.
-enum class ButtonGlyph { Label, Cog, Folder };
+// M5.1 adds `Prompts`, the inspector's page-of-text icon. A glyph is a name
+// here and a grid in src/avatar/pixel_icons.cpp; nothing in this header draws.
+enum class ButtonGlyph { Label, Cog, Folder, Prompts };
 
 struct ToolbarButton {
   std::string id;

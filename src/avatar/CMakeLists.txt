@@ -17,6 +17,8 @@ add_executable(avatar
   avatar_ui.h
   imgui_layer.cpp
   imgui_layer.h
+  inspector_window.cpp
+  inspector_window.h
   loader_anim.cpp
   loader_anim.h
   pixel_icons.cpp
