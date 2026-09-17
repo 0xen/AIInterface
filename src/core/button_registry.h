@@ -85,7 +85,7 @@ struct ButtonAction {
 //
 // Registered buttons are always `Label`: a script cannot invent a glyph, and
 // letting it pick from the built-in ones would only produce two cogs.
-enum class ButtonGlyph { Label, Cog, Folder, Avatar };
+enum class ButtonGlyph { Label, Cog, Folder };
 
 struct ToolbarButton {
   std::string id;

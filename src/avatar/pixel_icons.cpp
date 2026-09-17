@@ -42,25 +42,6 @@ constexpr IconRows kIconFolder = {
     ".............",
 };
 
-// The avatar's own art directory. Deliberately *not* a second folder: the
-// strip would then carry two identical pictures whose meanings were only in
-// their tooltips. It is the slime, because the slime is what is in there.
-constexpr IconRows kIconAvatar = {
-    ".............",
-    ".............",
-    ".....###.....",
-    "....#####....",
-    "...#######...",
-    "..#########..",
-    "..#########..",
-    ".###.###.###.",
-    ".###.###.###.",
-    ".###########.",
-    ".###########.",
-    "..#########..",
-    ".............",
-};
-
 }  // namespace
 
 void draw_icon(ImDrawList* dl, const char* const* rows, ImVec2 p, ImU32 ink, ImU32 mark,
@@ -80,7 +61,6 @@ const char* const* icon_for_glyph(ButtonGlyph glyph) {
   switch (glyph) {
     case ButtonGlyph::Cog: return kIconCog;
     case ButtonGlyph::Folder: return kIconFolder;
-    case ButtonGlyph::Avatar: return kIconAvatar;
     default: return nullptr;
   }
 }

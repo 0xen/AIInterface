@@ -690,35 +690,13 @@ int main(int /*argc*/, char** /*argv*/) {
     // widget to dock against: --opaque is a decorated debugging window and
     // --vulkan has no ImGui layer at all.
     //
-    // One more button is registered before it exists, and that is the point of
-    // M4.4: the strip has no list of its own, so this is the whole of adding
-    // a button to it. M5's inspector and M6's editor do exactly this, with an
-    // Invoke action instead of a path, and neither the strip nor the panel is
-    // edited when they do.
-    //
-    // It is registered whether or not the strip is ever made, because it is a
-    // button, not a piece of the strip: the fallback surface draws it exactly
-    // as it draws the cog. (Registering it inside the `if` below left the
-    // --opaque build with two buttons instead of three, which the fallback
-    // capture caught.)
-    {
-        // The avatar's own art, under %APPDATA%. It is a directory the user
-        // edits by hand — the definition hot-reloads while the app is running
-        // — and there is no other way to reach it from the widget.
-        aii::ButtonAction art;
-        art.kind = aii::ButtonActionKind::OpenPath;
-        art.path = aii::avatar_user_root().string();
-        // Built before the call, not inside its argument list: the action is
-        // moved into the same call, and the order two arguments are evaluated
-        // in is unspecified — which cost this tooltip its second line until a
-        // capture showed it missing.
-        const std::string tip = "Open the avatar art\n" + art.path;
-        std::string err;
-        if (!aii::ButtonRegistry::instance().add_app_button(
-                "avatar_art", aii::ButtonGlyph::Avatar, tip, aii::ButtonSurface::Sidebar,
-                std::move(art), &err))
-            log::warn("[button] {}", err);
-    }
+    // The strip keeps no list of its own (M4.4): a button reaches it by being
+    // registered with ButtonSurface::Sidebar, from anywhere, and neither the
+    // strip nor the panel is edited when one is. M5's inspector and M6's
+    // editor will do exactly that, with an Invoke action instead of a path.
+    // Register such a button *outside* the `if` below, whether or not the
+    // strip is ever made: it is a button, not a piece of the strip, and the
+    // fallback surface draws it exactly as it draws the cog.
     std::unique_ptr<aii::SidebarWindow> sidebar;
     if (transparent && hwnd && ui) {
         // Set *before* create(), not after: the strip sizes itself from the
