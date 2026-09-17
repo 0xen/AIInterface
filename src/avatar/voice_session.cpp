@@ -760,9 +760,31 @@ void VoiceSession::close_latch_after_silence(float quiet_for) {
   mic_level_ = 0.0f;
   ++listen_timeout_seq_;
   set_state_locked(State::Idle);
-  // M1f.3 owns what this says; a plain sentence until then, so the state is
-  // never a mystery to somebody reading the panel in the meantime.
-  status_ = "stopped listening: nothing heard. ready.";
+  // M1f.3. The wording is the whole job of this line, and M1f.2's review is
+  // why it changed: the placeholder read "stopped listening: nothing heard.
+  // ready.", which is one word away from line 640's "heard nothing. ready." --
+  // the ordinary empty utterance -- and ends in the same "ready." that the
+  // idle line and the cancel line end in. Somebody coming back to the desk
+  // would have read it as the app sitting where they left it.
+  //
+  // Three things are deliberate. **"by itself"** is the fact that has to
+  // survive: the question the user has on walking back is *who* stopped it,
+  // and the three answers -- I clicked Stop, a reply finished, it gave up on
+  // me -- are otherwise indistinguishable in this line. **The number** is the
+  // setting quoted back, so the line explains the behaviour rather than merely
+  // reporting it; this is the one feature in the panel that can never teach
+  // itself through use (M1f.2), and the only moment it is on screen is the
+  // moment the user is asking why. **No "ready."** -- the word every idle line
+  // here ends with, and the word that made the placeholder look ordinary.
+  //
+  // English, like every other line in this panel and unlike the spoken table
+  // in core/app_strings (7c51862), which excludes the status line by name.
+  // Nothing here is spoken, and one Japanese sentence among twenty English
+  // ones is not a localised panel, it is an inconsistent one.
+  status_ = "stopped listening by itself: no voice for " +
+            std::to_string(static_cast<int>(listen_timeout_.load(std::memory_order_relaxed) +
+                                            0.5f)) +
+            " s.";
 }
 
 // M1f.1. A level, the same shape as set_muted()/set_languages().

@@ -220,6 +220,24 @@ struct AvatarUiState {
   // piece of state that can disagree with the one in force.
   bool listen_timeout_on = false;
   int listen_timeout_sec = 0;
+  // M1f.3. The latched microphone shut itself on silence, and nothing has
+  // happened since. What the microphone button draws while this is true is a
+  // face of its own (MicFace::Dozed) rather than the bare Idle capsule, which
+  // is the difference between the button saying "it gave up on you" and the
+  // button saying nothing at all.
+  //
+  // **A level here because the session only offers an edge.**
+  // `Snapshot::listen_timeout_seq` is bumped on exactly one frame, and the
+  // panel has to keep drawing the consequence for as long as the user is away
+  // — which is the entire point of a reaction aimed at somebody who is not at
+  // the desk. So the edge is converted here, once, and `listen_timeout_seq`
+  // below is the counter it is converted against.
+  //
+  // **Not persisted**, unlike the two fields above it. It describes a moment
+  // in this run; an app that came back up claiming it had just dozed off would
+  // be reporting something that never happened.
+  bool mic_dozed = false;
+  unsigned listen_timeout_seq = 0;
   // What is in the message field (M1b.2). A fixed buffer rather than a
   // std::string because imgui_stdlib is not in this build, and a corner
   // window's typed message has no business being longer than this anyway.

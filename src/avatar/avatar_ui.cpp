@@ -66,7 +66,7 @@ ImVec4 red_deep() { return ui_color(0.62f, 0.10f, 0.10f); }
 // surface that ever wants a cog.
 constexpr float kTransportButton = 30.0f;  // kIconPx plus 2 px of air all round
 
-// The microphone, five ways. Idle is the bare capsule-and-cradle; everything
+// The microphone, six ways. Idle is the bare capsule-and-cradle; everything
 // else is that same shape with something added, so the button never changes
 // what it *is*, only what it is doing — the shape is the noun and the addition
 // is the verb.
@@ -134,6 +134,35 @@ constexpr IconRows kIconMicShut = {
     "..o...#......",
     ".o.#######...",
     "o............",
+};
+
+// M1f.3. Shut, and shut *by itself*: the latch timed out on a silent room.
+//
+// This is a sixth face rather than a reuse of one of the five, and the reason
+// is the failure it exists to prevent. Without it the button falls back to
+// `Idle` the instant the timeout fires -- the same bare capsule as a
+// microphone nobody has ever clicked -- so the one channel on the button that
+// could say what happened would be saying nothing happened. It is the same
+// argument the status line's wording is making, on the other surface.
+//
+// The mark is a `z`, matching the slime's `zzz` overlay a hundred pixels
+// above it, so the two read as one sentence rather than two coincidences. It
+// sits in the corner the capsule does not use, and the capsule itself is
+// untouched: the shape is still the noun, the addition is still the verb.
+constexpr IconRows kIconMicDozed = {
+    ".....###.oooo",
+    ".....###...o.",
+    ".....###..o..",
+    ".....###.oooo",
+    ".....###.....",
+    "...#.###.#...",
+    "...#.###.#...",
+    "...#.....#...",
+    "....#####....",
+    "......#......",
+    "......#......",
+    "...#######...",
+    ".............",
 };
 
 // The speaker, for the mute button. Same trick: one shape, one mark.
@@ -1551,7 +1580,7 @@ bool transport_slot(const char* id, ImVec2 pos, const char* const* rows,
   return clicked;
 }
 
-// The five faces of the microphone button. Every one of them is something the
+// The six faces of the microphone button. Every one of them is something the
 // session can actually report — there is no "about to listen" or "hearing
 // noise" here, because nothing in VoiceSession knows either.
 enum class MicFace {
@@ -1560,26 +1589,34 @@ enum class MicFace {
   Dictating,    // a Talk press is down; the words are going into the box
   Listening,    // latched on and hearing the room
   Latched,      // latched on but deliberately shut while Claude replies
+  Dozed,        // M1f.3: shut because the latch timed out on a silent room
 };
+constexpr int kMicFaceCount = 6;
 
+// `dozed` is the panel's latched reading of `Snapshot::listen_timeout_seq` —
+// see AvatarUiState::mic_dozed for why it is a level here and an edge there.
+// It is tested last of the closed cases and first among them, which is the
+// whole of its precedence: it only ever competes with `Idle`, because it only
+// exists while the microphone is shut and nothing has happened since.
 MicFace mic_face(const VoiceSession::Snapshot& snap, bool voice_enabled, bool loading,
-                 bool mic_on, bool mic_hold) {
+                 bool mic_on, bool mic_hold, bool dozed) {
   // The same escape hatch `--clip` and `--sprite` give the avatar's art, and
-  // for the same reason: two of these five faces are only reachable by talking
-  // into a microphone, so without this there is no way to *look* at them — and
-  // "verified by looking at a capture" is the standard this panel is held to.
-  // `AII_MIC_FACE=0..4` pins one; `cycle` walks all five, two seconds each.
+  // for the same reason: three of these six faces are only reachable by
+  // talking into a microphone or by walking away from one, so without this
+  // there is no way to *look* at them — and "verified by looking at a capture"
+  // is the standard this panel is held to. `AII_MIC_FACE=0..5` pins one;
+  // `cycle` walks all six, two seconds each.
   if (const char* pin = std::getenv("AII_MIC_FACE")) {
     const int n = std::strcmp(pin, "cycle") == 0
-                      ? static_cast<int>(ImGui::GetTime() * 0.5) % 5
+                      ? static_cast<int>(ImGui::GetTime() * 0.5) % kMicFaceCount
                       : std::atoi(pin);
-    return static_cast<MicFace>(std::clamp(n, 0, 4));
+    return static_cast<MicFace>(std::clamp(n, 0, kMicFaceCount - 1));
   }
   if (loading || !voice_enabled) return MicFace::Unavailable;
   // A hold is not the latch and never sets it (VoiceSession::talk_pressed),
   // so this order is not a preference between two true things.
   if (mic_hold) return MicFace::Dictating;
-  if (!mic_on) return MicFace::Idle;
+  if (!mic_on) return dozed ? MicFace::Dozed : MicFace::Idle;
   return snap.state == VoiceSession::State::Listening ? MicFace::Listening : MicFace::Latched;
 }
 
@@ -1588,6 +1625,7 @@ const char* const* mic_icon(MicFace face) {
     case MicFace::Dictating: return kIconMicHold;
     case MicFace::Listening: return kIconMicLive;
     case MicFace::Latched: return kIconMicShut;
+    case MicFace::Dozed: return kIconMicDozed;
     default: return kIconMic;
   }
 }
@@ -1608,6 +1646,16 @@ TransportSkin mic_skin(MicFace face) {
     case MicFace::Dictating:
       return {ui_color(0.62f, 0.42f, 0.10f), ui_color(0.74f, 0.51f, 0.14f),
               ui_color(0.50f, 0.33f, 0.07f), ui_color(1.00f, 0.97f, 0.90f), warn()};
+    case MicFace::Dozed: {
+      // The plate is the ordinary one and the capsule is dimmed, because the
+      // microphone really is off and a lit button would be a lie about that.
+      // The `z` is the only thing carrying the news, so it gets the same amber
+      // mark ink the latched face's slash uses — one mark colour across the
+      // button, so a second colour never has to be learned.
+      TransportSkin skin = neutral_skin(dim());
+      skin.mark = warn();
+      return skin;
+    }
     case MicFace::Unavailable:
       return neutral_skin(dim());
     default:
@@ -1623,6 +1671,14 @@ const char* mic_tooltip(MicFace face) {
     case MicFace::Idle: return "Click to talk  -  hold to dictate into the box";
     case MicFace::Dictating: return "Recording - release to put it in the box";
     case MicFace::Listening: return "Listening - click to stop  (hold to dictate)";
+    // The one face whose tooltip has to explain itself rather than name a
+    // gesture: nobody pressed anything to get here, so "what did I do?" is the
+    // question, and the second line is the answer to "and will it keep doing
+    // that?" — the setting, quoted, since this is the only moment it is worth
+    // reading about.
+    case MicFace::Dozed:
+      return "Stopped listening by itself - no voice was heard.\n"
+             "Click to talk.  (Settings > Timing sets how long it waits.)";
     default: return "Conversation mode - the mic reopens when Claude finishes.\nClick to stop.";
   }
 }
@@ -1696,7 +1752,7 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
   // single click, because the session opens the microphone on the press —
   // before the gesture's meaning is known — so that neither reading of it loses
   // the words spoken while it was still undecided.
-  const MicFace face = mic_face(snap, voice_enabled, loading, mic_on, mic_hold);
+  const MicFace face = mic_face(snap, voice_enabled, loading, mic_on, mic_hold, state.mic_dozed);
   transport_slot("##mic", slot_pos(0), mic_icon(face), mic_skin(face));
   // One line per edge of the gesture, with everything needed to decide *why* a
   // release was judged off the button: the item's rect, where ImGui thinks the
@@ -1842,6 +1898,28 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
   // loading overlay draws in too, so the two agree by construction — and
   // main.cpp keeps the snapshot in Loading until the M1.5 handoff is over.
   const bool loading = snap.state == VoiceSession::State::Loading;
+
+  // M1f.3. The session's one-frame edge, latched into something the button can
+  // keep drawing; see AvatarUiState::mic_dozed.
+  //
+  // The clear is an `else if` rather than a second statement, and that is not
+  // a tidiness choice: on the frame the timeout fires the session has *already*
+  // put itself back in Idle with the microphone shut, so a clear that ran
+  // unconditionally would wipe the flag on the same frame it was set and the
+  // face would never appear once. The edge wins its own frame; the level takes
+  // every frame after it.
+  //
+  // What clears it is the same rule the slime wakes on (avatar_controller.cpp)
+  // stated in the terms this surface has: the microphone being open either way
+  // round, or the session doing anything at all. A click, a hold, the latch, a
+  // typed turn, a reply — each one is the user back at the desk, and none of
+  // them should leave a `z` on the button.
+  if (snap.listen_timeout_seq != state.listen_timeout_seq) {
+    state.listen_timeout_seq = snap.listen_timeout_seq;
+    state.mic_dozed = true;
+  } else if (mic_on || mic_hold || snap.state != VoiceSession::State::Idle) {
+    state.mic_dozed = false;
+  }
 
   ImGui::SetNextWindowPos(ImVec2(0.0f, static_cast<float>(top)));
   ImGui::SetNextWindowSize(ImVec2(w, 0.0f));  // auto height, fixed width

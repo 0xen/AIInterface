@@ -74,6 +74,12 @@ struct AvatarTuning {
   // showing one and yanking it back.
   float think_delay = 0.35f;
   // Idle for this long and the slime droops. The milestone says two minutes.
+  //
+  // M1f.3 gives `sleepy` a *second* entrance that has no number here on
+  // purpose: the auto-listen timeout dozes the slime the moment it fires,
+  // because that timeout is itself the measured silence and a second waiting
+  // period stacked on top of it would mean the reaction arrived minutes after
+  // the thing it is reacting to -- quite possibly after the user was back.
   float sleepy_seconds = 120.0f;
   // Context fullness, with hysteresis so a reading that sits on the line does
   // not switch the steam on and off.
@@ -207,6 +213,26 @@ class AvatarController {
   bool seeded_ = false;  // first update() records the world without reacting to it
   bool woke_ = false;
   unsigned last_failed_seq_ = 0;
+  // M1f.3. The latched microphone closed itself on silence, and the slime has
+  // not been given a reason to wake up since.
+  //
+  // **A latch rather than a one-shot, and that is the whole design.** The
+  // reaction has to still be on screen when the user comes back, which may be
+  // minutes; `start_oneshot()` would play the droop for the length of
+  // sleepy.txt and hand the avatar back to `idle` long before anybody saw it,
+  // which is the same as not reacting at all. So this feeds the *ambient*
+  // branch instead -- the `sleepy` the two-minute idle rule already reaches --
+  // and the clip loops for as long as nothing has happened.
+  //
+  // **What clears it is the one thing that can never be got wrong here.** A
+  // slime stuck asleep is worse than a slime that never slept, so the rule is
+  // not a list of events to remember to handle: it is `snap.state != Idle`,
+  // checked every frame, which is exactly the test `idle_age_` beside it
+  // already uses. A click, the latch reopening, a typed turn, a reply, a
+  // failure -- every one of them leaves Idle, and every one of them therefore
+  // wakes it, including any that get added later without reading this comment.
+  bool dozed_ = false;
+  unsigned last_timeout_seq_ = 0;
   std::map<std::string, WorkerPool::State> worker_state_;
 
   bool ctx_high_ = false;

@@ -111,6 +111,13 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
     state_age_ += dt;
   }
   idle_age_ = snap.state == VoiceSession::State::Idle ? idle_age_ + dt : 0.0f;
+  // M1f.3's wake, first and unconditionally. Anything that is not Idle is the
+  // user back at the desk (or Claude working for them), and both are reasons
+  // to stop dozing. Placed above the edge test below so that a timeout landing
+  // on a frame where the session has not yet settled into Idle still takes:
+  // the clear is a level, the set is an edge, and a level cannot swallow an
+  // edge that comes after it.
+  if (snap.state != VoiceSession::State::Idle) dozed_ = false;
   entered_ += dt;
 
   // Fast to rise, slow to fall. The raw levels are per audio block and jump
@@ -131,6 +138,7 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
     // reaction to something that happened before this object existed.
     seeded_ = true;
     last_failed_seq_ = snap.turn_failed_seq;
+    last_timeout_seq_ = snap.listen_timeout_seq;
     for (const auto& w : snap.workers) worker_state_[w.name] = w.state;
     blink_wait_ = roll_blink_wait();
   }
@@ -141,6 +149,17 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
   if (snap.turn_failed_seq != last_failed_seq_) {
     last_failed_seq_ = snap.turn_failed_seq;
     start_oneshot("confused", Yield::ToMic);
+  }
+  // M1f.3. The latched microphone gave up on a room with nobody in it. This is
+  // the only place the timeout is read, and `listen_timeout_seq` is the only
+  // thing read: the status line's words and the microphone icon's face are
+  // other readers of the same edge, and none of them can fire on a Stop, on a
+  // finished reply or on a hand closing the latch, because none of those
+  // touches this counter (voice_session.cpp::close_latch_after_silence is its
+  // single writer).
+  if (snap.listen_timeout_seq != last_timeout_seq_) {
+    last_timeout_seq_ = snap.listen_timeout_seq;
+    dozed_ = true;
   }
   for (const auto& w : snap.workers) {
     const auto it = worker_state_.find(w.name);
@@ -209,7 +228,14 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
           start_oneshot("frustrated", Yield::ToMic);
         }
       }
-      if (idle_age_ >= tune_.sleepy_seconds) {
+      // Two entrances, one clip. The droop means the same thing either way --
+      // nobody is talking to me -- and the difference is only how it was
+      // found out, which is why `why` distinguishes them for the trace line
+      // and nothing else does.
+      if (dozed_) {
+        want = "sleepy";
+        why = "listen-timeout";
+      } else if (idle_age_ >= tune_.sleepy_seconds) {
         want = "sleepy";
         why = "sleepy";
       }
