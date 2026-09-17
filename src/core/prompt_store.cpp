@@ -440,12 +440,80 @@ std::string PromptInjector::decorate(const std::string& user_text) {
   return out;
 }
 
+// ------------------------------------------------- the pre-prompt beside the exe
+
+namespace {
+
+// Remove every `<!-- … -->` span. The file next to the exe is the one prompt
+// surface a user finds without being told where to look, so it carries a header
+// explaining what it is and when an edit takes effect — and that header must not
+// reach Claude. An unterminated `<!--` swallows the rest of the file, which is
+// the safe direction: a half-written comment sends nothing rather than sending
+// the explanation as if it were an instruction.
+std::string strip_html_comments(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  std::size_t i = 0;
+  while (i < s.size()) {
+    const std::size_t open = s.find("<!--", i);
+    if (open == std::string::npos) {
+      out.append(s, i, std::string::npos);
+      break;
+    }
+    out.append(s, i, open - i);
+    const std::size_t close = s.find("-->", open + 4);
+    if (close == std::string::npos) break;
+    i = close + 3;
+  }
+  return out;
+}
+
+// Leading blank lines and spaces, so that a body written under a stripped
+// comment composes to the same bytes as the same body written on line one.
+std::string trim_front(const std::string& s) {
+  std::size_t i = 0;
+  while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) ++i;
+  return s.substr(i);
+}
+
+}  // namespace
+
+fs::path local_prompt_path() {
+  if (const std::string over = env_or("AII_PRE_PROMPT", ""); !over.empty()) return fs::path(over);
+  return exe_dir() / "pre-prompt.md";
+}
+
+std::string local_prompt() {
+  const fs::path p = local_prompt_path();
+  std::error_code ec;
+  // Create-if-missing, never refresh. See the header: a rebuild must not
+  // overwrite prose the user has rewritten, and this file exists to be
+  // rewritten.
+  if (!fs::exists(p, ec)) {
+    const fs::path shipped = fs::path(AII_ASSETS_DIR) / "pre-prompt.md";
+    if (fs::exists(shipped, ec)) {
+      fs::create_directories(p.parent_path(), ec);
+      fs::copy_file(shipped, p, ec);
+      if (ec) std::fprintf(stderr, "[prompts] seeding %s: %s\n", p.string().c_str(), ec.message().c_str());
+    }
+  }
+  std::string text;
+  if (!read_file(p, &text)) return {};  // no file, or unreadable: run on the store alone
+  return trim_end(trim_front(strip_html_comments(text)));
+}
+
 const std::string& system_prompt() {
   static const std::string kComposed = [] {
     PromptStore store;
     std::string err;
     if (!store.load(&err) && !err.empty()) std::fprintf(stderr, "[prompts] %s\n", err.c_str());
-    return store.compose("system");
+    std::string composed = store.compose("system");
+    // Appended, never substituted, and last so that it has the final word.
+    if (const std::string local = local_prompt(); !local.empty()) {
+      if (!composed.empty()) composed += kSeparator;
+      composed += local;
+    }
+    return composed;
   }();
   return kComposed;
 }

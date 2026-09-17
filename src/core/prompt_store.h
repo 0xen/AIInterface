@@ -104,7 +104,53 @@ class PromptStore {
   std::vector<PromptGraph> graphs_;
 };
 
-// The composed system prompt for this process, computed once on first use.
+// ------------------------------------------------- the pre-prompt beside the exe
+//
+// `pre-prompt.md`, in the directory holding the running executable. The user
+// asked for "a file that is at the base directory of this AI, for example next
+// to the exe file, describing the purpose of this AI", and this is it: one
+// plain Markdown file, no graph, no JSON, nothing to learn before editing it.
+//
+// **It is composed, not substituted, and that is the whole design.** The store
+// still supplies everything it supplied before and this text is appended after
+// it. A file that *replaced* the composed prompt would be the obvious reading
+// of "the pre-prompt lives here", and it is the dangerous one: `system/voice.md`
+// carries the language rule and the fence rule that the speech path depends on,
+// and `system/workers.md` is the only place the fenced `aii` protocol is
+// documented to the model. Drop that and the model simply stops emitting the
+// block — no error, no warning, workers quietly never start again. So the exe
+// file cannot delete anything; it can only add, and being last it has the final
+// word wherever it disagrees with the store, which is what "the user's own file
+// wins" should mean here.
+//
+// **Precedence, since both files exist.** They are not rivals: `%APPDATA%` is
+// per-user and survives a rebuild, and holds the rules the *app* needs; the exe
+// folder is per-install, travels with a copied app, and holds the rules the
+// *user* wants. Emptying `pre-prompt.md` opts out cleanly; deleting it re-seeds
+// it on the next launch.
+//
+// **Seeded when missing, and only when missing** — unlike `seed_tree`'s
+// refresh-if-newer rule. That rule is right for assets the app reads and the
+// user rarely touches; this is a file the user is being invited to rewrite, and
+// a rebuild must never overwrite what they wrote. The cost of the strict rule
+// (a shipped edit not reaching an existing install) is the 636f24e trap, but it
+// does not bite here: the exe directory is created fresh by every install, and
+// the shipped text is a starting point rather than something the app depends on.
+//
+// **No hot-reload**, for the same reason the store has none: this becomes
+// `--system-prompt`, which the CLI receives once at child creation. Editing the
+// file while the app runs changes nothing until the next launch, and the file's
+// own header comment says so. That comment — any `<!-- … -->` span — is stripped
+// before the text is sent, so the file can explain itself without explaining
+// itself to Claude.
+std::filesystem::path local_prompt_path();
+
+// The contents of that file: seeded if absent, comments stripped, trailing
+// whitespace trimmed. Empty when the file is empty or unreadable.
+std::string local_prompt();
+
+// The composed system prompt for this process, computed once on first use:
+// the `system` graph, then `pre-prompt.md`.
 //
 // A function and not a `const char* const` any more: it reads files, so it
 // cannot be a static initialiser, and it is cached because `build_llm` asks

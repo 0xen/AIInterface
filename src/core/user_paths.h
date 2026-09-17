@@ -13,6 +13,20 @@
 
 namespace aii {
 
+// The directory holding the running executable.
+//
+// This is the *per-install* root, as distinct from `user_data_root()`'s
+// per-user one, and the two answer different questions. `%APPDATA%` survives a
+// rebuild and follows the user between installs; the exe's own folder is what
+// travels when the app is copied to another machine or handed to someone else,
+// and it is the folder a user opens when they go looking for "the file next to
+// the exe". Something meant to travel *with the app* belongs here; something
+// meant to outlive a given copy of the app belongs in `user_data_root()`.
+//
+// Falls back to the current directory if the OS will not say, so a caller can
+// always compose a path against it.
+std::filesystem::path exe_dir();
+
 // `%APPDATA%\AIInterface`, the roaming per-user root. `settings.json`,
 // `avatars/` and `prompts/` are all directly under it. Falls back to a
 // relative path when APPDATA is somehow unset, which keeps a headless or

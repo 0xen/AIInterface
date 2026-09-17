@@ -1,5 +1,8 @@
 #include "core/user_paths.h"
 
+#include <windows.h>
+
+#include <iterator>
 #include <system_error>
 
 #include "core/config.h"
@@ -7,6 +10,13 @@
 namespace fs = std::filesystem;
 
 namespace aii {
+
+fs::path exe_dir() {
+  wchar_t buf[MAX_PATH * 4] = {};
+  const DWORD n = ::GetModuleFileNameW(nullptr, buf, static_cast<DWORD>(std::size(buf)));
+  if (n == 0 || n >= std::size(buf)) return fs::current_path();
+  return fs::path(buf, buf + n).parent_path();
+}
 
 fs::path user_data_root() {
   const std::string appdata = env_or("APPDATA", "");
