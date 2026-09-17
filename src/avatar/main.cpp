@@ -317,6 +317,9 @@ int main(int /*argc*/, char** /*argv*/) {
     // latched. `V` of 0 is never, matching the file and the mechanism.
     bool settingsOpen = false;
     bool settingsScrollTiming = false;
+    // --inspector: open the prompt inspector on the first frame, as if the
+    // sidebar button had been clicked. Nothing else about it differs.
+    bool inspectorOpen = false;
     std::vector<std::pair<double, int>> listenTimeoutAt;
     int cancelRaceReps = 0;
     // M2b.5. Seconds of Idle between one --say and the next. Two is enough to
@@ -409,6 +412,12 @@ int main(int /*argc*/, char** /*argv*/) {
             // exactly as much as the test that can fail it.
             else if (a == L"--mic-hold" && i + 1 < wargc) micHoldSeconds = _wtof(wargv[++i]);
             // M1f.2's pose and drive flags; see the declarations above.
+            // M5.2's harness. The inspector is otherwise reachable only by a
+            // click on a 48 px strip whose position depends on the panel, and
+            // "find the button, then look at the window" is two tests where
+            // one was wanted. Same shape as --settings above: it poses the UI,
+            // it does not fake anything inside it.
+            else if (a == L"--inspector") inspectorOpen = true;
             else if (a == L"--settings") settingsOpen = true;
             else if (a == L"--settings-timing") { settingsOpen = true; settingsScrollTiming = true; }
             else if (a == L"--listen-timeout-at" && i + 1 < wargc) {
@@ -1130,7 +1139,7 @@ int main(int /*argc*/, char** /*argv*/) {
     // half-built frame on the stack, so the callback sets a flag and the frame
     // loop answers it between frames — which is also what makes a second click
     // close the window rather than open a second one.
-    bool inspectorToggle = false;
+    bool inspectorToggle = inspectorOpen;  // --inspector: the same latch the click sets
     std::unique_ptr<aii::InspectorWindow> inspector;
     // The remembered geometry, read once here and written back whenever it
     // changes. `placed` is a stored flag rather than a sentinel coordinate
@@ -1704,7 +1713,19 @@ int main(int /*argc*/, char** /*argv*/) {
                 // Its own ImGui context and its own present, exactly as the
                 // strip's, and like the strip everything after this line makes
                 // the widget's context current again for itself.
-                const bool stillOpen = inspector->draw(dt);
+                // M5.2. Copied here, every frame, from the session — which is
+                // where the store and the injector actually live and which
+                // took its own lock to hand this over. The window never
+                // touches either, and because the copy is taken per frame the
+                // list is live: a prompt injected by the turn running right
+                // now is in the next frame's copy.
+                //
+                // Default-constructed when there is no session (`--no-voice`):
+                // `ready` is false, and the window says the store has not been
+                // read rather than that there is nothing in it.
+                aii::PromptInventory inventory;
+                if (session) inventory = session->prompt_inventory();
+                const bool stillOpen = inspector->draw(dt, inventory);
                 inspectorGeom = inspector->geometry();
                 rememberInspector();
                 if (!stillOpen) inspector.reset();

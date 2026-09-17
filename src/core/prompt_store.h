@@ -34,6 +34,7 @@
 // the child.
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace aii {
@@ -99,6 +100,16 @@ class PromptStore {
   // the enabled node bodies. See prompt_store.cpp for the ordering rule and
   // why byte-stability matters here.
   std::string compose(const std::string& name = "system") const;
+
+  // M5.2. The same walk, stopping one step short: the ids of the nodes whose
+  // bodies `compose()` concatenates, in the order it concatenates them.
+  //
+  // It exists so the inspector can *name* what went into the system prompt
+  // without re-deriving the traversal. A second walk that drifted from this
+  // one would show the user a list that is not what Claude was actually sent,
+  // which is the precise failure this window exists to prevent — so
+  // `compose()` is written in terms of this function rather than beside it.
+  std::vector<std::string> compose_order(const std::string& name = "system") const;
 
  private:
   std::vector<PromptGraph> graphs_;
@@ -223,5 +234,92 @@ class PromptInjector {
   std::vector<std::string> loaded_;
   std::vector<std::string> pending_;  // ids queued by `load name=`
 };
+
+// ------------------------------------------------------- M5.2: the inventory
+//
+// What the prompt inspector draws: one flat description of everything in
+// Claude's head, built where the truth lives and handed to the window.
+//
+// **It is a value, and that is the point.** `PromptStore` is read on the load
+// thread and `PromptInjector` is written on the turn thread; the inspector is
+// drawn on the frame loop. So the frame loop never touches either — it asks
+// the session for a copy of this, taken under the session's own lock, and
+// draws that. No window in this app reaches into the store.
+//
+// It is rebuilt (strictly: re-copied) every frame rather than once, because
+// the list has to be *live*: a project prompt injected by the turn that is
+// running right now must appear without the window being reopened.
+
+// Which pool a row belongs to, and therefore which section draws it. `Cli` is
+// the fourth one and is not ours: see kCliSource.
+enum class PromptSection { Cli, Global, Project, Skill };
+
+struct PromptRow {
+  PromptSection section = PromptSection::Global;
+  std::string title;   // what the user calls it
+  std::string source;  // the file it came from, or where it came from
+  // Has this text actually reached the model? Global rows are true from the
+  // moment the session starts (they *are* `--system-prompt`). Project and
+  // skill rows are false until the turn that mentions them, which is what
+  // makes M5.4's greyed-out unloaded rows a flag rather than a second list.
+  bool injected = false;
+  // True when it arrived with the session rather than during it. Session start
+  // and "eleven minutes in" are different facts about a prompt and the row
+  // says which; `at` is seconds since the session began, so the window can age
+  // it without owning a clock.
+  bool at_session_start = true;
+  double at = 0.0;
+  // M5.4's trigger words. Collected now because the injector already has them
+  // and a second pass to fetch them would be a second source of truth.
+  std::vector<std::string> triggers;
+};
+
+struct PromptInventory {
+  // False until the store has been read — which happens on the load thread,
+  // several seconds in. It is a distinct state from "read, and empty": one is
+  // "not yet", the other is "nothing here", and the inspector must not draw
+  // them the same way. An empty Project section is the *normal* state of this
+  // app (nothing authors project prompts since M6 was removed), so it must not
+  // read as a failure, and "still loading" must not read as "you have none".
+  bool ready = false;
+  // Seconds since the session started, stamped when the copy is taken. Every
+  // row's age is `uptime - at`, so the window needs no clock of its own and
+  // cannot disagree with the session about what time it is.
+  double uptime = 0.0;
+  std::vector<PromptRow> rows;
+};
+
+// The rows for context the Claude Code CLI brings in by itself, which no flag
+// of ours removes (M3.5, measured against a live model rather than read out of
+// `--help`).
+//
+// **These are not a caveat, they are part of the answer.** A window that
+// listed only the prompts this app injects would tell the user that Claude's
+// head contains exactly what we put there, and that is false: a harness
+// preamble, the working directory, git status, the platform, the model id, the
+// token budget, the date and the user's own email address all arrive before a
+// byte of ours does. Showing our list alone would be a comfortable falsehood,
+// and preventing exactly that is why this milestone was written.
+//
+// They carry no timestamp of their own beyond "session start" because they are
+// the child process's own preamble: they exist from the first token.
+std::vector<PromptRow> cli_context_rows();
+
+// What a `Cli` row puts in its source column, and the phrase this window uses
+// for anything it cannot change. One definition, because it appears in the
+// section header as well as the rows.
+extern const char kCliSource[];
+extern const char kNotManagedHere[];
+
+// Every row the store and injector can describe right now, in the order the
+// inspector draws them: the CLI's own context first, then the composed global
+// prompts in composition order, then project and skill prompts.
+//
+// Call it where both objects are safe to read — for the live session that is
+// under `VoiceSession`'s lock, on the thread that owns them. `loaded_at` maps
+// a node id to the second it was injected; ids missing from it are drawn as
+// not yet injected.
+PromptInventory build_inventory(const PromptStore& store, const PromptInjector& injector,
+                                const std::vector<std::pair<std::string, double>>& loaded_at);
 
 }  // namespace aii

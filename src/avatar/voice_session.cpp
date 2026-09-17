@@ -334,6 +334,13 @@ void VoiceSession::load() {
   // this process at launch, and these have not been sent at all yet.
   if (std::string perr; !prompts_.load(&perr) && !perr.empty()) log("[prompts] " + perr);
   injector_.reset(prompts_);
+  // M5.2. First publication: the store has just been read, so the inspector
+  // can stop saying "still loading" and start naming the global prompts. It
+  // happens here rather than in the constructor because "the store has not
+  // been read yet" and "the store has been read and is empty" are different
+  // things to tell the user, and the flag that distinguishes them is set by
+  // this call.
+  publish_inventory();
   log("speaker: " + speaker_->device_name());
   log("mic:     " + mic_->device_name());
   set_status("ready. click the mic or press SPACE to speak.");
@@ -1026,6 +1033,18 @@ void VoiceSession::run_turn(std::string text, bool is_injected) {
     std::string names;
     for (const std::string& id : injector_.loaded()) names += (names.empty() ? "" : ", ") + id;
     log("[prompts] injected context; loaded this session: " + names);
+    // M5.2. Stamp the ones that fired on *this* turn and republish, so the
+    // inspector's list changes while it is open. This is the whole of "the
+    // list is live": nothing polls, and nothing is rebuilt at startup and then
+    // believed for the rest of the session.
+    const double now =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - session_began_).count();
+    for (const std::string& id : injector_.loaded()) {
+      bool known = false;
+      for (const auto& seen : prompt_times_) known = known || seen.first == id;
+      if (!known) prompt_times_.emplace_back(id, now);
+    }
+    publish_inventory();
   }
   // M2b.5. What the user is still waiting for, composed into the turn rather
   // than written into the system prompt (which is a launch argument and cannot
@@ -1819,6 +1838,27 @@ void VoiceSession::run_commands(const std::string& reply_text) {
     }
   }
   request_cancel(std::move(cancels));
+}
+
+void VoiceSession::publish_inventory() {
+  // Built here, on a thread that owns `prompts_` and `injector_`, and handed
+  // over as a value. The lock covers the handover only: build_inventory does
+  // file work (it asks whether `pre-prompt.md` has anything in it) and holding
+  // `mutex_` across that would stall the frame loop on a disk read.
+  PromptInventory inv = build_inventory(prompts_, injector_, prompt_times_);
+  std::lock_guard<std::mutex> l(mutex_);
+  inventory_ = std::move(inv);
+}
+
+PromptInventory VoiceSession::prompt_inventory() const {
+  // Read the clock before the lock, for no better reason than that nothing
+  // else in this class holds `mutex_` across anything it does not have to.
+  const double up =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - session_began_).count();
+  std::lock_guard<std::mutex> l(mutex_);
+  PromptInventory inv = inventory_;
+  inv.uptime = up;
+  return inv;
 }
 
 VoiceSession::Snapshot VoiceSession::snapshot() const {

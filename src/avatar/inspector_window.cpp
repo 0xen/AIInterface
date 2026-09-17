@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "imgui_layer.h"
+#include "inspector_list.h"
 
 using namespace rend;
 
@@ -286,7 +287,7 @@ HWND InspectorWindow::hwnd() const { return p_->hwnd; }
 
 InspectorGeometry InspectorWindow::geometry() const { return p_->remembered; }
 
-bool InspectorWindow::draw(float dt) {
+bool InspectorWindow::draw(float dt, const PromptInventory& inv) {
   Impl& s = *p_;
   if (s.input && s.input->close_requested) return false;
   if (!s.ui) return true;
@@ -383,17 +384,12 @@ bool InspectorWindow::draw(float dt) {
   // Nothing above this comment is theirs; nothing inside the child is M5.1's.
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ui_color(0.11f, 0.12f, 0.15f));
   ImGui::BeginChild("##inspector_body", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders);
-  ImGui::Spacing();
-  ImGui::TextColored(ui_color(0.62f, 0.65f, 0.72f), "Nothing to show yet.");
-  ImGui::Spacing();
-  ImGui::PushStyleColor(ImGuiCol_Text, ui_color(0.50f, 0.53f, 0.60f));
-  ImGui::TextWrapped(
-      "M5.2 fills this with the three live sections - Global, Project (loaded) and "
-      "Skills - one row per prompt with its source file and when it was injected. "
-      "M5.3 adds an estimated token count per row and a total against the real "
-      "context fullness. M5.4 lists the project prompts that exist but have not "
-      "fired, greyed out, with the trigger words that would fire them.");
-  ImGui::PopStyleColor();
+  // M5.2, and everything M5.3 and M5.4 add, is in inspector_list.cpp. The
+  // comment above says this child is the whole of what they touch in this
+  // file; drawing the list needs file-scope helpers, and every one of them
+  // would have had to live outside the child. One call keeps that promise
+  // exactly rather than approximately.
+  draw_prompt_list(inv);
   ImGui::EndChild();
   ImGui::PopStyleColor();
 

@@ -198,6 +198,19 @@ class VoiceSession {
   void drop_schedules(const std::vector<Schedule>& dropped);
 
   Snapshot snapshot() const;
+
+  // M5.2. A copy of what is in Claude's head, for the prompt inspector. Any
+  // thread; the frame loop is the caller.
+  //
+  // **A copy of a published value, not a read of the live objects.** The store
+  // is filled on the load thread and the injector is written on the turn
+  // thread; this returns a `PromptInventory` those threads built and left
+  // behind under `mutex_`, with the age stamped on the way out. So the window
+  // is live — a prompt injected by the turn running right now is in the next
+  // frame's copy — without the frame loop ever touching `prompts_` or
+  // `injector_`.
+  PromptInventory prompt_inventory() const;
+
   static const char* state_name(State s);
 
  private:
@@ -306,6 +319,21 @@ class VoiceSession {
   // from nowhere else, which is why neither is behind `mutex_`.
   PromptStore prompts_;
   PromptInjector injector_;
+  // M5.2. The inspector's view of both, republished by whichever of those two
+  // threads last changed them, and read by the frame loop under `mutex_`. It
+  // exists because the alternative — the window reaching into `prompts_` and
+  // `injector_` to build its own list — is a read of the turn thread's data
+  // from the frame loop, i.e. the race the two comments above spent their
+  // whole length ruling out.
+  PromptInventory inventory_;                                 // mutex_
+  std::vector<std::pair<std::string, double>> prompt_times_;  // turn thread; id -> uptime
+  // When this session began, for the inspector's "how long ago". Steady, so a
+  // clock change mid-session cannot make a prompt look like it was injected in
+  // the future. Set once, in the constructor, so it covers the load as well.
+  std::chrono::steady_clock::time_point session_began_ = std::chrono::steady_clock::now();
+  // Republish `inventory_` from the current store and injector. Turn thread or
+  // load thread only — it reads both — and it takes `mutex_` itself.
+  void publish_inventory();
 
   // Frame-loop state: touched only from update()/set_mic_open().
   bool mic_open_ = false;

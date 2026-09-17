@@ -48,6 +48,8 @@
 #include <memory>
 #include <string>
 
+#include "core/prompt_store.h"
+
 struct HWND__;
 using HWND = HWND__*;
 
@@ -103,13 +105,20 @@ class InspectorWindow {
   // ImGui frame. It re-reads its client size first, so a resize the user is
   // in the middle of is picked up on the frame it happens.
   //
-  // **Seam for M5.2.** The three-section list is drawn from a snapshot the
-  // frame loop builds — `PromptStore`'s rows plus the session's injection
-  // state — and passed in here as a second argument. It is passed rather than
-  // reached for: the store is written on the turn thread, and a window that
-  // read it directly would be reading it mid-write. M5.3's token totals and
-  // M5.4's unloaded prompts ride in the same snapshot.
-  bool draw(float dt);
+  // **The seam M5.1 left, now filled.** `inv` is the three-section list plus
+  // the CLI's own context: `PromptStore`'s rows and the session's injection
+  // state, built by the session and copied by the frame loop. It is passed
+  // rather than reached for, because the store is filled on the load thread
+  // and the injector is written on the turn thread, and a window that read
+  // either directly would be reading it mid-write. M5.3's token totals and
+  // M5.4's unloaded prompts ride in the same value — the unloaded rows are
+  // already in it, flagged, so M5.4 is a drawing change and not a plumbing
+  // one.
+  //
+  // A fresh copy every frame, not a snapshot kept across frames: the list has
+  // to be live, and a prompt injected by the turn running right now appears on
+  // the next frame without the window being reopened.
+  bool draw(float dt, const PromptInventory& inv);
 
   // Where the window is now, for the caller to remember. Read after draw().
   InspectorGeometry geometry() const;

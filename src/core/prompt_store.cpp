@@ -233,7 +233,7 @@ const PromptGraph* PromptStore::graph(const std::string& name) const {
   return nullptr;
 }
 
-std::string PromptStore::compose(const std::string& name) const {
+std::vector<std::string> PromptStore::compose_order(const std::string& name) const {
   const PromptGraph* g = graph(name);
   if (!g) return {};
 
@@ -255,6 +255,11 @@ std::string PromptStore::compose(const std::string& name) const {
   //  - bodies are trailing-trimmed and joined with exactly one blank line, so
   //    a text editor's opinion about the final newline cannot change the
   //    output, and the result never ends in a newline.
+  //
+  // M5.2 split this function in two at the last line: the walk decides *which*
+  // nodes, in what order, and compose() below joins their bodies. A node whose
+  // body is empty after trimming contributes nothing to the prompt, so it is
+  // not named here either — the list and the text stay the same list.
   std::vector<std::string> parts;
   std::vector<std::string> seen;
   // Iterative DFS: `stack` holds ids still to visit, in reverse order, so the
@@ -269,7 +274,7 @@ std::string PromptStore::compose(const std::string& name) const {
     if (id != g->start_id) {
       const PromptNode* n = g->find(id);
       if (!n || !n->enabled) continue;  // and do not walk on through it
-      if (const std::string body = trim_end(n->body); !body.empty()) parts.push_back(body);
+      if (!trim_end(n->body).empty()) parts.push_back(n->id);
     }
 
     std::vector<const PromptLink*> out;
@@ -281,10 +286,20 @@ std::string PromptStore::compose(const std::string& name) const {
     for (auto it = out.rbegin(); it != out.rend(); ++it) stack.push_back((*it)->to);
   }
 
+  return parts;
+}
+
+std::string PromptStore::compose(const std::string& name) const {
+  const PromptGraph* g = graph(name);
+  if (!g) return {};
   std::string composed;
-  for (std::size_t i = 0; i < parts.size(); ++i) {
-    if (i) composed += kSeparator;
-    composed += parts[i];
+  bool first = true;
+  for (const std::string& id : compose_order(name)) {
+    const PromptNode* n = g->find(id);
+    if (!n) continue;  // cannot happen: compose_order only names nodes it found
+    if (!first) composed += kSeparator;
+    first = false;
+    composed += trim_end(n->body);
   }
   return composed;
 }
@@ -516,6 +531,113 @@ const std::string& system_prompt() {
     return composed;
   }();
   return kComposed;
+}
+
+// ------------------------------------------------------- M5.2: the inventory
+
+const char kCliSource[] = "Claude Code CLI";
+const char kNotManagedHere[] = "not managed here";
+
+std::vector<PromptRow> cli_context_rows() {
+  // Measured, not guessed. M3.5 audited a live model rather than reading
+  // `--help`, and these are the things it could still recite after
+  // `--system-prompt`, `--safe-mode` and `--disable-slash-commands` had all
+  // been applied. They are listed one per item rather than as a single
+  // "CLI preamble" row because the user's own email address being in there is
+  // a specific fact they should be able to see, not a footnote inside a
+  // summary.
+  //
+  // No values are shown. This window answers "what is in Claude's head", and
+  // for these rows the honest answer is the category — the values change with
+  // the directory and the day, and printing a stale one would be its own small
+  // lie. The row's job is to stop the list above it being read as complete.
+  static const char* const kItems[] = {
+      "Harness preamble (tool and safety instructions)",
+      "Working directory",
+      "Git status of the working directory",
+      "Platform and OS version",
+      "Model id",
+      "Token budget",
+      "Today's date",
+      "Your account email address",
+  };
+  std::vector<PromptRow> rows;
+  for (const char* item : kItems) {
+    PromptRow r;
+    r.section = PromptSection::Cli;
+    r.title = item;
+    r.source = kCliSource;
+    r.injected = true;          // from the child's first token
+    r.at_session_start = true;  // it *is* the session's start
+    r.at = 0.0;
+    rows.push_back(std::move(r));
+  }
+  return rows;
+}
+
+PromptInventory build_inventory(const PromptStore& store, const PromptInjector& injector,
+                                const std::vector<std::pair<std::string, double>>& loaded_at) {
+  PromptInventory inv;
+  inv.ready = true;
+  inv.rows = cli_context_rows();
+
+  // ---- Global: the composed system prompt, in the order it was composed ----
+  //
+  // Composition order rather than file order, because that is the order Claude
+  // read them in and this window claims to show what Claude read.
+  if (const PromptGraph* g = store.graph("system")) {
+    for (const std::string& id : store.compose_order("system")) {
+      const PromptNode* n = g->find(id);
+      if (!n) continue;
+      PromptRow r;
+      r.section = PromptSection::Global;
+      r.title = n->title.empty() ? n->id : n->title;
+      r.source = n->file.empty() ? n->id : n->file;
+      r.injected = true;
+      r.at_session_start = true;
+      inv.rows.push_back(std::move(r));
+    }
+  }
+  // `pre-prompt.md` beside the exe is part of the system prompt and is the one
+  // piece of it the user was explicitly invited to edit, so leaving it out
+  // would be the same omission as leaving out the CLI's rows, one file closer
+  // to home. It is last because it is appended last.
+  if (!local_prompt().empty()) {
+    PromptRow r;
+    r.section = PromptSection::Global;
+    r.title = "Pre-prompt";
+    r.source = local_prompt_path().string();
+    r.injected = true;
+    r.at_session_start = true;
+    inv.rows.push_back(std::move(r));
+  }
+
+  // ---- Project and Skill: everything injectable, loaded or not ----
+  //
+  // Taken by `kind` and not by which graph a node sits in, for the same reason
+  // PromptInjector::reset does: the grouping the store chooses must not be
+  // able to change what this window says. Nodes that have not fired are
+  // carried with `injected == false` — M5.2 does not draw them, M5.4 greys
+  // them in, and neither needs a second enumeration.
+  for (const PromptGraph& g : store.graphs()) {
+    for (const PromptNode& n : g.nodes) {
+      if (n.kind == PromptKind::Global || !n.enabled) continue;
+      PromptRow r;
+      r.section = n.kind == PromptKind::Project ? PromptSection::Project : PromptSection::Skill;
+      r.title = n.title.empty() ? n.id : n.title;
+      r.source = n.file.empty() ? n.id : n.file;
+      r.triggers = n.triggers;
+      r.injected = injector.is_loaded(n.id);
+      // Injected *during* the session unless the caller says otherwise: these
+      // are never part of the launch argument, so "session start" would be
+      // wrong even for one that fired on the first turn.
+      r.at_session_start = false;
+      for (const auto& [id, when] : loaded_at)
+        if (id == n.id) r.at = when;
+      inv.rows.push_back(std::move(r));
+    }
+  }
+  return inv;
 }
 
 }  // namespace aii
