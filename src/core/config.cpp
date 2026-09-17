@@ -34,6 +34,13 @@ Config Config::from_env() {
   c.early_words = std::atoi(env_or("AII_EARLY_WORDS", "12").c_str());
   c.endpoint_silence = (float)std::atof(env_or("AII_ENDPOINT_SILENCE", "1.0").c_str());
   if (c.endpoint_silence < 0.2f) c.endpoint_silence = 0.2f;
+  // M1f.1. Parsed, not clamped, here: a negative or zero value is "never" and
+  // is a legal answer rather than a mistake to be repaired. The lower clamp on
+  // the positive side lives in VoiceSession, next to the constant that names
+  // it. An unparseable string reads as 0 through atof and therefore disables
+  // the timeout, which is the safe direction to fail — the microphone then
+  // behaves exactly as it did before M1f.
+  c.listen_timeout = (float)std::atof(env_or("AII_LISTEN_TIMEOUT", "60").c_str());
   c.worker_bypass = env_or("AII_WORKER_BYPASS", "1") != "0";
 
   c.models_dir = AII_MODELS_DIR;

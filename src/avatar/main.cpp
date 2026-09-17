@@ -292,6 +292,8 @@ int main(int /*argc*/, char** /*argv*/) {
     std::vector<std::string> schedulePhrasedArgs;
     std::vector<std::string> scheduleWorkerArgs;
     bool micLatch = false;
+    double micHoldSeconds = 0.0;  // M1f.1 harness: --mic-hold S
+    std::chrono::steady_clock::time_point micHoldBegan{};
     int cancelRaceReps = 0;
     // M2b.5. Seconds of Idle between one --say and the next. Two is enough to
     // read as a conversation; a longer one is how a harness arranges for a
@@ -375,6 +377,13 @@ int main(int /*argc*/, char** /*argv*/) {
             // and "a schedule fires with the microphone open" is one of the
             // two interleavings this task had to get right.
             else if (a == L"--mic-latch") micLatch = true;
+            // M1f.1's harness. The other half of the Talk gesture, which
+            // --mic-latch could not reach: hold the microphone for S seconds
+            // and then release it as a dictation. It exists because "hold-to-
+            // dictate never times out" is a claim about a gesture nothing
+            // could previously drive, and a claim of that shape is worth
+            // exactly as much as the test that can fail it.
+            else if (a == L"--mic-hold" && i + 1 < wargc) micHoldSeconds = _wtof(wargv[++i]);
             // M2b.5. `--cancel-race <reps>`: drive the cancel verb's own path
             // against the tick, from another thread, with the cancel jittered
             // across the frame the schedule is due on. This project has twice
@@ -434,6 +443,14 @@ int main(int /*argc*/, char** /*argv*/) {
     aii::Config voiceCfg = aii::Config::from_env();
     voiceCfg.langs = aii::language_selection_from_spec(
         settings.get_string("language", "enabled", aii::language_spec(voiceCfg.langs)));
+    // M1f.2's seam. The auto-listen timeout arrives here the same way the
+    // language selection does: read out of settings.json over the default in
+    // `voiceCfg.listen_timeout` (Config, AII_LISTEN_TIMEOUT, 60 s, <= 0 means
+    // never), then pushed down as a level from the frame loop with
+    // `session->set_listen_timeout()` beside the set_muted() call, so the
+    // control can change it without a restart. `Settings` has no numeric
+    // accessor yet — a get_float/set_float pair alongside get_bool is the one
+    // piece of plumbing M1f.2 has to add. M1f.1 stops at the mechanism.
 
     // The voice loop loads its engines in the background while the window comes up.
     std::unique_ptr<aii::VoiceSession> session;
@@ -1227,6 +1244,23 @@ int main(int /*argc*/, char** /*argv*/) {
                 micLatch = false;
                 session->toggle_mic();
                 log::info("[harness] microphone latched");
+            }
+            // M1f.1's harness: press once the engines are up, hold for the
+            // requested seconds, release as a dictation. The verdict the
+            // session prints for the release (AII_TALK_DEBUG) is what proves
+            // the gesture was still alive at the end of the hold.
+            if (micHoldSeconds > 0.0 && micHoldBegan.time_since_epoch().count() == 0 &&
+                snap.state == aii::VoiceSession::State::Idle && !session->mic_open()) {
+                micHoldBegan = std::chrono::steady_clock::now();
+                session->talk_pressed();
+                log::info("[harness] talk held for {:.1f} s", micHoldSeconds);
+            } else if (micHoldSeconds > 0.0 && micHoldBegan.time_since_epoch().count() != 0 &&
+                       std::chrono::duration<double>(std::chrono::steady_clock::now() - micHoldBegan)
+                               .count() >= micHoldSeconds) {
+                micHoldSeconds = 0.0;
+                log::info("[harness] talk released after hold (mic_hold={})",
+                          session->mic_hold() ? 1 : 0);
+                session->talk_released(true, true);
             }
         }
 

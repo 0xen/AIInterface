@@ -80,6 +80,38 @@ constexpr float kFloorMax = 0.02f;
 // over an open microphone.
 constexpr float kAnnounceGapSec = 0.4f;
 
+// M1f.1. The lowest positive auto-listen timeout the mechanism will honour.
+// This is *not* the floor a person is allowed to type — that one belongs to
+// M1f.2's control, where a value below it can be refused visibly instead of
+// being silently rewritten. This one exists so that a timeout small enough to
+// be meaningless (or a stray 0.001 from a hand-edited file) cannot make the
+// latch close the moment it opens, and so that the harness can measure the
+// mechanism at five seconds instead of sitting through a real minute.
+constexpr float kListenTimeoutFloorSec = 1.0f;
+
+// M1f.1, and the one number in this feature that was measured rather than
+// chosen. How long the noise gate has to stay open, continuously, before the
+// auto-listen timeout accepts it as *a voice* and restarts its clock.
+//
+// The gate itself is unchanged and is still the only detector: this is a
+// duration on the same signal, not a second threshold and not a second
+// opinion about loudness. It exists because the gate is tuned for a job that
+// lasts about a second — deciding whether a pause has ended an utterance —
+// where reacting to a single loud frame is exactly right and costs nothing.
+// Read over a minute it means something else entirely. Measured on the user's
+// machine with a C920 on a quiet desk (six 20 s runs, 17 Sep 2026), the raw
+// gate opened on a transient roughly every 1-3 s: a keyboard press, a chair,
+// the GPU fan changing note. A timeout restarted by each of those never
+// elapses, and the whole feature would have shipped looking correct and
+// silently never firing — the most expensive way to be wrong.
+//
+// 0.25 s is below any syllable the recogniser can decode and far above the
+// transients: a click is tens of milliseconds, a vowel is hundreds. A word so
+// short it does not clear this bar still decodes, still endpoints and still
+// sends, and the turn resets the clock by leaving the Listening state — so no
+// utterance the user actually gets a reply to can be missed by this.
+constexpr float kVoiceRunSec = 0.25f;
+
 float rms(const std::vector<float>& s) {
   if (s.empty()) return 0.0f;
   double sum = 0.0;
@@ -90,6 +122,10 @@ float rms(const std::vector<float>& s) {
 
 VoiceSession::VoiceSession(Config cfg) : cfg_(std::move(cfg)) {
   langs_bits_ = pack_langs(cfg_.langs);
+  // M1f.1. The configured default; M1f.2's control overwrites it as a level
+  // once there is a settings surface to read one from.
+  set_listen_timeout(cfg_.listen_timeout);
+  timeout_blocked_at_ = std::chrono::steady_clock::now();
   // The bring-up plan for *this* run, decided before the thread starts. With
   // Japanese off the Japanese voice is not in it at all, so its weight never
   // enters the progress denominator and the bar reaches 100% at the right
@@ -332,6 +368,13 @@ void VoiceSession::update() {
   if (turn_.joinable() && !turn_running_) turn_.join();
   if (workers_) workers_->update();
 
+  // M1f.1. Every frame this session is doing something other than listening —
+  // thinking, speaking, or idle with the microphone shut — is a frame that
+  // must not be banked as silence. Stamping here as well as in the Listening
+  // branch below means the stamp is unconditional: there is no state, and no
+  // early return past this point, in which the clock quietly keeps running.
+  if (s != State::Listening) timeout_blocked_at_ = std::chrono::steady_clock::now();
+
   if (s == State::Listening) {
     chunk_.clear();
     mic_->drain(chunk_);
@@ -350,13 +393,43 @@ void VoiceSession::update() {
       } else if (level < gate) {
         noise_floor_ += (level - noise_floor_) * kFloorRate;
       }
-      if (level > gate || listening_for < kCalibrateSec) last_voice_ = now;
+      const bool voiced = level > gate || listening_for < kCalibrateSec;
+      if (voiced) last_voice_ = now;
+      // M1f.1. The same gate, read over a longer window. `last_voice_` above
+      // is endpointing's and is deliberately untouched — it has to react to
+      // the first loud frame or an utterance would be cut off. The auto-listen
+      // timeout wants "somebody is in the room and talking", which a single
+      // loud frame is not; see kVoiceRunSec.
+      if (voiced) {
+        if (voice_run_began_.time_since_epoch().count() == 0) voice_run_began_ = now;
+        if (std::chrono::duration<float>(now - voice_run_began_).count() >= kVoiceRunSec)
+          last_sustained_voice_ = now;
+      } else {
+        voice_run_began_ = {};
+      }
 
       eng_.stt->feed(chunk_.data(), (int)chunk_.size(), kMicRate);
       std::string p = eng_.stt->partial();
       // Published against the gate rather than raw (see Snapshot::mic_level):
       // the gate already encodes what this room's silence sounds like, so the
       // avatar leans to the *voice* and not to the air conditioning.
+      // M1f.1. The second thing that restarts the auto-listen clock, and the
+      // one that makes failure mode "the latch closed mid-sentence"
+      // unreachable rather than merely unlikely: the decoder's hypothesis
+      // *changed*. New words are being produced, so somebody is talking, and
+      // no tuning of the gate can disagree with that — it is the recogniser's
+      // own opinion, which is the thing the gate exists to stay in step with.
+      //
+      // Changed, not merely non-empty, on purpose. A partial that is sitting
+      // still is not somebody talking; it is a hypothesis the decoder has
+      // stopped adding to. Keying on "non-empty" would mean an utterance the
+      // endpointer never accepts (which is exactly what off-prompt speech
+      // does here — it decodes as blanks and never endpoints) could hold the
+      // latch open forever, which is the bug this whole task exists to close.
+      if (p != timeout_partial_) {
+        timeout_partial_ = p;
+        last_sustained_voice_ = now;
+      }
       const float loud = std::min(1.0f, level / std::max(gate * 6.0f, 1e-6f));
       {
         std::lock_guard<std::mutex> l(mutex_);
@@ -386,6 +459,70 @@ void VoiceSession::update() {
         // canned line goes first when both are waiting: it is instant and
         // already written, where a turn spends seconds and usage.
         if (!flush_announcements()) flush_injected_turns();
+      }
+    }
+    // M1f.1. The auto-listen timeout, evaluated *outside* the chunk block on
+    // purpose: a capture device that stops delivering is the one case where a
+    // latch could stay open forever with nothing to notice it, and a check
+    // that only runs when audio arrives would be blind to exactly that.
+    //
+    // Three deliberate choices, all of them visible in this one expression:
+    //
+    //  1. **No second detector.** The clock is restarted by two signals and
+    //     both of them already existed: the session's own RMS gate (the same
+    //     threshold on the same samples that end-of-utterance detection uses,
+    //     read over a longer window — see kVoiceRunSec) and the recogniser's
+    //     hypothesis changing. Nothing here measures audio for itself, and
+    //     that is the point: a detector of its own would eventually disagree
+    //     with the recogniser about whether the user is talking, and the
+    //     moment it did, the latch would close mid-sentence.
+    //
+    //  2. **Any voice activity resets it, not a completed utterance.** The gate
+    //     opening is enough. The user's words were "if it's not heard any
+    //     voice", and the difference is a real one: someone thinking aloud in
+    //     fragments never finishes an utterance the endpointer will accept, and
+    //     an utterance-based timer would cut them off precisely while they were
+    //     working out what to say. The cost is that a noisy room holds the latch
+    //     open — which is the correct failure, because a noisy room is one that
+    //     somebody is in.
+    //
+    //  3. **The latch only.** `mic_open_ && !hold_` — a Talk press is held by
+    //     the user's own finger, and a gesture that expired under it would be
+    //     the app deciding it knew better than the hand on the button.
+    //
+    // `turn_running_` and a busy speaker are folded in through
+    // timeout_blocked_at_ rather than merely suppressing the fire, which is
+    // the difference between "never counts the app's own time as silence" and
+    // "fires the instant a long reply ends". See the member's comment.
+    {
+      const auto now = std::chrono::steady_clock::now();
+      const float timeout = listen_timeout_.load(std::memory_order_relaxed);
+      const bool eligible = mic_open_ && !hold_ && timeout > 0.0f && !turn_running_ &&
+                            (!speech_ || speech_->idle());
+      if (!eligible) {
+        timeout_blocked_at_ = now;
+      } else {
+        const auto since = std::max(last_sustained_voice_, timeout_blocked_at_);
+        const float quiet_for = std::chrono::duration<float>(now - since).count();
+        if (quiet_for >= timeout) close_latch_after_silence(quiet_for);
+      }
+      // Behind an environment variable for the same reason [talk] verdict is:
+      // a line a second, wanted only by the harness that has to prove the
+      // clock is running and to distinguish "it did not fire" from "it was
+      // never allowed to run". Once a second, not per frame.
+      if (std::getenv("AII_LISTEN_DEBUG")) {
+        static auto last_dbg = std::chrono::steady_clock::time_point{};
+        if (std::chrono::duration<float>(now - last_dbg).count() >= 1.0f) {
+          last_dbg = now;
+          rend::log::info(
+              "[listen-timeout] eligible={} quiet={:.1f}s raw_quiet={:.1f}s timeout={:.1f}s "
+              "latch={} hold={} turn={} speech_idle={} floor={:.4f}",
+              eligible ? 1 : 0,
+              std::chrono::duration<float>(now - std::max(last_sustained_voice_, timeout_blocked_at_)).count(),
+              std::chrono::duration<float>(now - std::max(last_voice_, timeout_blocked_at_)).count(),
+              timeout, mic_open_ ? 1 : 0, hold_ ? 1 : 0, turn_running_ ? 1 : 0,
+              (!speech_ || speech_->idle()) ? 1 : 0, noise_floor_);
+        }
       }
     }
   } else if (s == State::Speaking) {
@@ -448,6 +585,11 @@ void VoiceSession::begin_listening() {
   // like a pause that had already run long enough to send.
   listen_began_ = std::chrono::steady_clock::now();
   last_voice_ = listen_began_;
+  // M1f.1. Every reopen is a fresh window, which is what makes the stretch in
+  // which the microphone was shut for a reply a *reset* rather than a pause.
+  last_sustained_voice_ = listen_began_;
+  voice_run_began_ = {};
+  timeout_partial_.clear();
   noise_floor_ = 0.0f;
   {
     std::lock_guard<std::mutex> l(mutex_);
@@ -583,6 +725,54 @@ void VoiceSession::set_mic_open(bool open) {
   }
   // Muted. Anything said but not yet sent goes now rather than being lost.
   if (s == State::Listening) end_listening_and_send();
+}
+
+// M1f.1. The latch has heard no voice for the configured time. Close it.
+//
+// Deliberately *not* set_mic_open(false). That path exists for a user
+// deciding to stop, and it sends whatever was captured but not yet sent —
+// which is right for a click and wrong for this. By construction the gate has
+// heard nothing for the whole window, so anything still sitting in the
+// decoder is at least `timeout` seconds old and was never enough to endpoint;
+// sending it would spend a turn on a fragment and then speak Claude's answer
+// into a room the user has left. The premise of this whole feature is that
+// they are not there. So it is dropped, exactly as Stop drops it.
+//
+// Nothing is spoken here and nothing should be: the reaction the user learns
+// this from is M1f.3's, and it is silent by design.
+void VoiceSession::close_latch_after_silence(float quiet_for) {
+  mic_open_ = false;
+  hold_ = false;
+  mic_->stop();
+  // The one line that proves this fired, and when. Deliberately at info and
+  // deliberately carrying the measured seconds and the configured value:
+  // "the latch closed" and "the latch closed on time" are different claims,
+  // and only the second one is worth anything.
+  rend::log::info("[listen-timeout] latch closed after {:.1f} s without voice (timeout {:.1f} s)",
+                  quiet_for, listen_timeout_.load(std::memory_order_relaxed));
+  std::lock_guard<std::mutex> l(mutex_);
+  partial_.clear();
+  mic_level_ = 0.0f;
+  ++listen_timeout_seq_;
+  set_state_locked(State::Idle);
+  // M1f.3 owns what this says; a plain sentence until then, so the state is
+  // never a mystery to somebody reading the panel in the meantime.
+  status_ = "stopped listening: nothing heard. ready.";
+}
+
+// M1f.1. A level, the same shape as set_muted()/set_languages().
+void VoiceSession::set_listen_timeout(float seconds) {
+  // "Never" is a first-class value, not a disabled feature: anything at or
+  // below zero stores exactly 0, so every reader has one spelling to test.
+  const float v = seconds <= 0.0f ? 0.0f : std::max(seconds, kListenTimeoutFloorSec);
+  const float was = listen_timeout_.exchange(v, std::memory_order_relaxed);
+  if (was == v) return;  // no-op unless it changed; this is called every frame
+  if (v <= 0.0f) log("[listen-timeout] never");
+  else log("[listen-timeout] " + std::to_string((int)(v + 0.5f)) + " s");
+}
+
+float VoiceSession::listen_timeout() const {
+  return listen_timeout_.load(std::memory_order_relaxed);
 }
 
 void VoiceSession::say(const std::string& text) {
@@ -1624,6 +1814,7 @@ VoiceSession::Snapshot VoiceSession::snapshot() const {
   s.partial = partial_;
   s.dictated_seq = dictated_seq_;
   s.turn_failed_seq = turn_failed_seq_;
+  s.listen_timeout_seq = listen_timeout_seq_;
   // Gated on the state here rather than zeroed wherever the microphone
   // closes: there are five paths out of Listening and only one of them would
   // have remembered, and a stale level would leave the avatar leaning at

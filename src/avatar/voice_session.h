@@ -62,6 +62,17 @@ class VoiceSession {
     // AvatarController is the first reader (M2.4: a failed turn is what puts
     // the `?` over the avatar's head).
     unsigned turn_failed_seq = 0;
+    // M1f.1. Bumped once each time the latched microphone closed itself
+    // because it had heard no voice for the configured timeout. An edge, for
+    // the same reason turn_failed_seq is one: the status line carries words,
+    // and a front-end that wants to *react* cannot react to words.
+    //
+    // **This is the seam M1f.3 hangs the silent reaction off.** Nothing is
+    // spoken when it fires — the user has walked away — so the whole of the
+    // user-visible answer is what a reader does with this counter: the status
+    // line, the microphone icon's face, and the slime dozing off. M1f.1
+    // deliberately does none of that; it only makes the moment visible.
+    unsigned listen_timeout_seq = 0;
     // The two continuous signals the avatar's motion is driven by (M2.4).
     // Both are already computed inside the loop; neither had a way out of it.
     //
@@ -148,6 +159,13 @@ class VoiceSession {
   // The caller guarantees at least one language is on; a selection with none
   // is repaired to both rather than obeyed.
   void set_languages(LanguageSelection sel);
+  // M1f.1. How long the *latched* microphone may hear no voice before it
+  // closes itself, in seconds; <= 0 means never. Pushed down as a level every
+  // frame, exactly as mute and the language selection are, so that the
+  // settings file stays the one owner of record and this is a no-op unless it
+  // changed. **This is the call M1f.2 makes.** Any thread.
+  void set_listen_timeout(float seconds);
+  float listen_timeout() const;
   void say(const std::string& text);   // send typed/scripted text as the user turn
   bool quitting_ok() const;            // true once no worker is mid-turn
 
@@ -209,6 +227,10 @@ class VoiceSession {
   // Returns the progress it published, for the trace line.
   float begin_load_stage(size_t index);
   void set_mic_open(bool open);
+  // M1f.1. The latch has heard no voice for long enough: close it, silently.
+  // Frame loop only. Deliberately *not* set_mic_open(false), which sends what
+  // was captured — see the definition.
+  void close_latch_after_silence(float quiet_for);
   void begin_listening();
   // Closes the mic and decodes what is left, returning the final text. Both
   // ends of an utterance go through here so the decode is written once.
@@ -305,6 +327,44 @@ class VoiceSession {
   std::chrono::steady_clock::time_point listen_began_{};
   float noise_floor_ = 0.0f;
 
+  // M1f.1. The auto-listen timeout.
+  //
+  // `listen_timeout_` is the configured value in seconds, <= 0 meaning never.
+  // Atomic only because M1f.2 may push it from a settings surface that is not
+  // guaranteed to be this frame loop; the read below is the frame loop's.
+  //
+  // `timeout_blocked_at_` is the whole of the "do not count the app's own
+  // busy time as silence" rule, and it is a **reset**, not a pause: every
+  // frame on which the timeout is not eligible to run — not listening, not
+  // latched, a Talk press held, a turn in flight, or the speaker playing —
+  // this is stamped with now. The elapsed silence is then measured from
+  // max(last_voice_, timeout_blocked_at_), so the instant the app stops being
+  // busy the user gets a fresh, whole window rather than a stale one that
+  // expires a heartbeat later. That is the honest behaviour as well as the
+  // safe one: a user who has just been answered is being invited to reply,
+  // and the clock on that invitation should start when the invitation ends.
+  //
+  // Both are frame-loop-only in every path that exists today (the microphone
+  // is drained from update(), not from an audio callback), so there is no
+  // lock here and none is needed; see the note above the check in update().
+  std::atomic<float> listen_timeout_{0.0f};
+  std::chrono::steady_clock::time_point timeout_blocked_at_{};
+  // The same noise gate as last_voice_, read over a longer window: when the
+  // gate was last open *continuously* for kVoiceRunSec, and when the run
+  // currently open began (zero when the gate is shut). This is what the
+  // timeout measures from, and it is not a second detector — endpointing and
+  // the timeout are decided against the same threshold on the same samples,
+  // which is the property that keeps them from disagreeing about whether the
+  // user is talking. See kVoiceRunSec for why the duration is there at all,
+  // and for the measurement that put it there.
+  std::chrono::steady_clock::time_point last_sustained_voice_{};
+  std::chrono::steady_clock::time_point voice_run_began_{};
+  // The decoder's last hypothesis, as the timeout saw it. A change in it is
+  // the second thing that restarts the clock; see the note at the assignment.
+  // Frame loop only, and deliberately separate from `partial_` under mutex_,
+  // which the panel reads and which is cleared on paths this must not follow.
+  std::string timeout_partial_;
+
   // M8.3. Which stages of the bring-up table this run actually performs, by
   // index. Built in the constructor from the language selection, because a
   // skipped Japanese voice must not leave a weighted slice of the progress bar
@@ -341,6 +401,7 @@ class VoiceSession {
   std::string partial_;
   unsigned dictated_seq_ = 0;
   unsigned turn_failed_seq_ = 0;
+  unsigned listen_timeout_seq_ = 0;  // M1f.1; see Snapshot::listen_timeout_seq
   float mic_level_ = 0.0f;
   std::vector<Line> lines_;
   // Worker reports waiting for a gap in which to be spoken.

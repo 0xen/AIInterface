@@ -35,6 +35,24 @@ struct Config {
   // the utterance is treated as finished and sent. Raise it if you are being
   // cut off while thinking mid-sentence; lower it for snappier turn-taking.
   float endpoint_silence = 1.0f;
+  // M1f.1. AII_LISTEN_TIMEOUT: how long the *latched* microphone may go
+  // without hearing a voice before it closes itself, in seconds. **0 (or any
+  // value <= 0) means never**, which is the behaviour that predates M1f and
+  // the one the user asked to keep available. Default 60.
+  //
+  // This is the single place the value lives today, and it is the seam M1f.2
+  // writes into: the settings surface reads `settings.json`, clamps against
+  // the user-facing floor it owns, and pushes the number down through
+  // `VoiceSession::set_listen_timeout()` every frame the way mute and the
+  // language selection are pushed. Nothing below this line should ever spell
+  // "60" again.
+  //
+  // The floor enforced *here* is deliberately low (kListenTimeoutFloorSec in
+  // voice_session.cpp, 1 s) and is not the user-facing one. It exists only so
+  // that a harness can ask for a five-second timeout and measure the
+  // mechanism without sitting through a real minute; the floor a person is
+  // allowed to type belongs in M1f.2's control, where a refusal can be shown.
+  float listen_timeout = 60.0f;
   bool worker_bypass = true;   // AII_WORKER_BYPASS: workers skip permission prompts
                                // (nothing in this app can answer one, so a worker
                                // that asks would hang). Set to 0 to make them ask
