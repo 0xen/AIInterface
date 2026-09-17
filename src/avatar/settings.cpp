@@ -5,6 +5,7 @@
 #include <system_error>
 
 #include "core/config.h"
+#include "core/user_paths.h"
 
 namespace aii {
 
@@ -35,11 +36,9 @@ const json& member(const json& j, const char* key) {
 fs::path settings_file_path() {
   if (const std::string override = env_or("AII_SETTINGS_FILE", ""); !override.empty())
     return fs::path(override);
-  // Per-user roaming data, beside avatars/ — see avatar_user_root(), which
-  // picks the same root for the same reason.
-  const std::string appdata = env_or("APPDATA", "");
-  if (appdata.empty()) return fs::path("settings.json");
-  return fs::path(appdata) / "AIInterface" / "settings.json";
+  // Per-user roaming data, beside avatars/ and prompts/ — one root, named in
+  // `core/user_paths.h`, so nothing here can drift from where the rest writes.
+  return user_data_root() / "settings.json";
 }
 
 void Settings::load(fs::path path) {

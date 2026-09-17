@@ -16,8 +16,14 @@
 //        AII_EARLY_WORDS   (default 12; first chunk of a reply is spoken at a comma or after this many words, 0 = off)
 //        AII_STT_LANG       (default auto)
 //
+//        AII_PROMPTS_DIR    prompt store location (default %APPDATA%\AIInterface\prompts)
+//
 // Modes: --say "<text>"    one typed turn through Claude, spoken, then exit
 //        --speak "<text>"  no Claude; speak the text and exit
+//        --dump-system-prompt <file>
+//                          write the composed system prompt and exit; nothing
+//                          else starts. This is M3.2's regression test — diff
+//                          the file against a known-good capture.
 
 #include <conio.h>
 #include <windows.h>
@@ -35,6 +41,7 @@
 #include "audio/mic_in.h"
 #include "core/config.h"
 #include "core/engines.h"
+#include "core/prompt_store.h"
 #include "core/sentence_splitter.h"
 #include "core/speech_queue.h"
 #include "core/text_util.h"
@@ -74,7 +81,7 @@ int main(int argc, char** argv) {
 
   // Arguments come from the wide command line so Japanese survives (argv is ANSI-mangled).
   (void)argc; (void)argv;
-  std::string say_text, speak_text;
+  std::string say_text, speak_text, dump_prompt;
   {
     int wargc = 0;
     wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
@@ -82,8 +89,26 @@ int main(int argc, char** argv) {
       std::wstring a = wargv[i];
       if (a == L"--say") say_text = utf8_from_wide(wargv[i + 1]);
       if (a == L"--speak") speak_text = utf8_from_wide(wargv[i + 1]);
+      if (a == L"--dump-system-prompt") dump_prompt = utf8_from_wide(wargv[i + 1]);
     }
     if (wargv) LocalFree(wargv);
+  }
+  // M3.2's own regression test, and the only way to see the composed prompt
+  // without reading it out of a running process. It writes the exact bytes
+  // that become `--system-prompt`, opened in binary so nothing here turns an
+  // LF into a CRLF — the file is meant to be diffed, and a diff that reports
+  // every line as changed would be worse than no test at all.
+  if (!dump_prompt.empty()) {
+    const std::string& composed = aii::system_prompt();
+    FILE* f = nullptr;
+    if (fopen_s(&f, dump_prompt.c_str(), "wb") != 0 || !f) {
+      std::fprintf(stderr, "cannot write %s\n", dump_prompt.c_str());
+      return 1;
+    }
+    std::fwrite(composed.data(), 1, composed.size(), f);
+    std::fclose(f);
+    std::printf("wrote %zu bytes to %s\n", composed.size(), dump_prompt.c_str());
+    return 0;
   }
   const bool scripted = !say_text.empty() || !speak_text.empty();
 

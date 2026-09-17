@@ -33,9 +33,11 @@ add_library(aii_core STATIC
   src/core/button_registry.cpp
   src/core/config.cpp
   src/core/engines.cpp
+  src/core/prompt_store.cpp
   src/core/sentence_splitter.cpp
   src/core/speech_queue.cpp
   src/core/text_util.cpp
+  src/core/user_paths.cpp
   src/core/worker_pool.cpp)
 target_include_directories(aii_core PUBLIC
   src
@@ -48,7 +50,8 @@ target_link_libraries(aii_core PUBLIC
   winhttp shell32 gdi32 user32)
 target_compile_definitions(aii_core
   PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN
-  PRIVATE AII_MODELS_DIR="${MODELS_DIR}" AII_VV_CORE_DIR="${VV_CORE_DIR}")
+  PRIVATE AII_MODELS_DIR="${MODELS_DIR}" AII_VV_CORE_DIR="${VV_CORE_DIR}"
+          AII_ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
 if(MSVC)
   target_compile_options(aii_core PRIVATE /utf-8 /W4 /wd4996)
 endif()

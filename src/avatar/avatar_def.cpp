@@ -8,6 +8,7 @@
 #include <system_error>
 
 #include "core/config.h"
+#include "core/user_paths.h"
 #include "json.hpp"
 
 namespace aii {
@@ -875,35 +876,17 @@ void avatar_recolour(AvatarDefinition& def, const AvatarPalette& pal) {
 fs::path avatar_user_root() {
   // Per-user roaming data, which is where a definition the user edits belongs
   // — it has to survive a rebuild, and it is theirs, not the install's.
-  const std::string appdata = env_or("APPDATA", "");
-  if (appdata.empty()) return fs::path("avatars");
-  return fs::path(appdata) / "AIInterface" / "avatars";
+  return user_data_root() / "avatars";
 }
 
 fs::path seed_avatar_definition(const std::string& name) {
   const fs::path dest = avatar_user_root() / name;
-  std::error_code ec;
-  const fs::path source = fs::path(AII_ASSETS_DIR) / "avatars" / name;
-  if (!fs::exists(source, ec)) return dest;  // the loader reports the miss
-  fs::create_directories(dest.parent_path(), ec);
-  // `update_existing`, and it used to be a bare `exists()` check that returned
-  // early. That was a silent one-way door: the copy ran exactly once, so any
-  // art added to assets/ afterwards never reached a machine that had already
-  // started the app once. It cost a round on 16 Sep 2026 — a new sprite was
-  // authored, declared, wired up, and simply never appeared, because the
-  // definition being read was the one seeded days earlier and it had never
-  // heard of it. Every clip and sprite the milestone plan still has to add
-  // would have hit the same wall.
-  //
-  // The rule this replaces it with is the ordinary installer one: a file is
-  // refreshed only when the shipped copy is *newer* than the user's. Art the
-  // user has edited since the last release keeps their edit — which is the
-  // property the old early return was reaching for — and art they have never
-  // touched follows the app. `recursive` also adds files that are simply not
-  // there yet, which is most of what this has to do.
-  fs::copy(source, dest,
-           fs::copy_options::recursive | fs::copy_options::update_existing, ec);
-  return dest;
+  // The `recursive | update_existing` rule, and the story of the one-way door
+  // it replaced (636f24e), both moved to `core/user_paths.h` when M3's prompt
+  // store needed exactly the same thing from aii_core. A second copy of a rule
+  // this project has already got wrong once was the thing to avoid.
+  seed_tree(fs::path(AII_ASSETS_DIR) / "avatars" / name, dest);
+  return dest;  // a missing source is the loader's miss to report, not ours
 }
 
 std::vector<std::string> avatar_definition_names() {

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 
+#include "core/prompt_store.h"
 #include "llm/claude_client.h"
 #include "llm/claude_code_client.h"
 
@@ -31,13 +32,13 @@ bool build_llm(const Config& cfg, Engines& out, const LogFn& log, std::string* e
       return false;
     }
     const std::string model = cfg.model_override.empty() ? "claude-opus-5" : cfg.model_override;
-    out.llm = std::make_unique<ApiLlmClient>(cfg.api_key, model, cfg.effort, kSystemPrompt);
+    out.llm = std::make_unique<ApiLlmClient>(cfg.api_key, model, cfg.effort, system_prompt());
     say(log, "api backend  model=" + model);
     return true;
   }
   ClaudeCodeClient::Options o;
   o.exe = cfg.claude_exe;
-  o.system_prompt = kSystemPrompt;
+  o.system_prompt = system_prompt();
   o.model = cfg.model_override;
   o.effort = cfg.effort;
   o.tools = false;

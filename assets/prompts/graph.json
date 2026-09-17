@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "graphs": {
+    "system": {
+      "start": { "id": "start", "pos": [0, 0] },
+      "nodes": [
+        {
+          "id": "voice",
+          "title": "Voice and style",
+          "file": "system/voice.md",
+          "kind": "global",
+          "enabled": true,
+          "pos": [320, -80]
+        },
+        {
+          "id": "workers",
+          "title": "Workers and buttons",
+          "file": "system/workers.md",
+          "kind": "global",
+          "enabled": true,
+          "pos": [320, 80]
+        }
+      ],
+      "links": [
+        { "from": "start", "to": "voice", "order": 0, "enabled": true },
+        { "from": "start", "to": "workers", "order": 1, "enabled": true }
+      ]
+    },
+    "project": {
+      "start": { "id": "start", "pos": [0, 0] },
+      "nodes": [],
+      "links": []
+    },
+    "skill": {
+      "start": { "id": "start", "pos": [0, 0] },
+      "nodes": [],
+      "links": []
+    }
+  }
+}

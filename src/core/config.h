@@ -1,15 +1,15 @@
 #pragma once
-// Runtime configuration shared by every executable: environment variables,
-// model locations baked in by CMake, and the assistant's system prompt.
+// Runtime configuration shared by every executable: environment variables and
+// the model locations baked in by CMake.
+//
+// The system prompt used to be a `kSystemPrompt` literal here. It is now a
+// seeded, composed prompt tree — see `core/prompt_store.h` and `aii::system_prompt()`.
 #include <string>
 
 namespace aii {
 
 // Environment variable or a default (empty values count as unset).
 std::string env_or(const char* name, const std::string& def);
-
-// The spoken-assistant system prompt (plain prose, language follows the user).
-extern const char* const kSystemPrompt;
 
 struct Config {
   std::string backend;         // AII_BACKEND: "code" (Claude Code CLI) or "api"
