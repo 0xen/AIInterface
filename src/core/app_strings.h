@@ -70,10 +70,37 @@ enum class Msg {
   // --- WorkerPool, a live worker reaching the end of its run -------------
   WorkerPausedShown,     // transcript/panel, keeps the worker's name
   PausedSpoken,          // spoken, never names the worker (WorkerPool::ReportFn)
-  WorkerFailedShown,     // {name}, {reason}
-  TaskFailedSpoken,      // {reason} -- the reason is the CLI's, still English
+  WorkerFailedShown,     // {name}, {reason} -- the raw reason, kept verbatim
+  TaskFailedSpoken,      // {reason} -- one of the Fail* lines below, never the raw one
   WorkerFinishedShown,   // {name}, {what it said}
   FinishedSpoken,        // {what it said} -- the model's words, already localised
+
+  // --- Why a worker failed, in words a person can hear -------------------
+  //
+  // A client error string ("claude process exited: ", "CreateProcess failed
+  // (2): ...") is the CLI's own jargon: it names a process, a Win32 call and
+  // an exit code, which is exactly what the pre-prompt asks the *model* never
+  // to say -- and no prompt can reach these, because the worker never spoke.
+  // The sentence is assembled by the app, so the app has to own the wording.
+  //
+  // `failure_reason()` picks one of these from the raw string; it is the whole
+  // of the mapping, and adding a client error string means adding a rule there
+  // and, if nothing here fits, a line here.
+  FailAlreadyRunning,    // the pool refused: that name is taken
+  FailCouldNotStart,     // it never came up (CreateProcess/CreatePipe/died at startup)
+  FailNeverStarted,      // it was already gone when the work was handed over
+  FailStopped,           // it ended part-way through the task
+  FailStoppedByUs,       // cancelled from this side
+  FailCouldNotSend,      // the task never reached it
+  FailCouldNotReach,     // network, HTTP, a timeout
+  FailAtItsLimit,        // usage or rate limit, overloaded
+  FailWouldNotDo,        // a refusal came back
+  // The one for everything unrecognised. It is deliberately **not** vague
+  // about *whether* something failed -- the wrapper around it has already said
+  // that -- only about why, and it points at the place the raw reason really
+  // is. A vague line here would hide a real failure; the raw string would be
+  // jargon; this says "it failed, I cannot say why, look here".
+  FailUnclear,
 
   // --- Workers addressed by voice ---------------------------------------
   SpawnFailed,           // {name}, {error}
@@ -118,6 +145,15 @@ struct AppLine {
 
 // The raw row, untouched.
 const AppLine& app_line(Msg m);
+
+// A client's own error string -> the one Fail* line that says what happened in
+// words. Matching is case-insensitive substring, first rule wins, and anything
+// unrecognised is `FailUnclear` rather than the raw text: a client error string
+// that has not been mapped yet must degrade to a plain sentence, never leak.
+//
+// It returns the key rather than the sentence so that the caller stays in
+// charge of the language and the test can check both columns of one row.
+Msg failure_reason(const std::string& client_error);
 
 // **The fallback rule, and the only one.** A missing translation falls back to
 // English -- never to an empty string, never to the name of the key. A silent

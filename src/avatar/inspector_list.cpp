@@ -18,6 +18,10 @@ ImVec4 heading() { return ui_color(0.91f, 0.92f, 0.94f); }
 ImVec4 body() { return ui_color(0.80f, 0.83f, 0.88f); }
 ImVec4 quiet() { return ui_color(0.58f, 0.61f, 0.68f); }
 ImVec4 dim() { return ui_color(0.46f, 0.49f, 0.56f); }
+// The one colour that is not a shade of the others, for the one thing on this
+// window that is not a statement about Claude's head but about this app
+// failing to fill it.
+ImVec4 warn() { return ui_color(0.88f, 0.62f, 0.38f); }
 
 // How long ago, in the coarsest unit that still says something. Seconds below
 // a minute, then minutes, then hours and minutes — a prompt injected 73
@@ -190,7 +194,7 @@ const ImGuiTableFlags kTableFlags = ImGuiTableFlags_BordersInnerH | ImGuiTableFl
 void available_rows(PromptSection s, const PromptInventory& inv) {
   int n = 0;
   for (const PromptRow& r : inv.rows)
-    if (r.section == s && !r.injected) ++n;
+    if (r.section == s && !r.injected && !r.failed) ++n;
   if (n == 0) return;
 
   ImGui::Spacing();
@@ -210,7 +214,7 @@ void available_rows(PromptSection s, const PromptInventory& inv) {
     ImGui::TableSetupColumn("Tokens", ImGuiTableColumnFlags_WidthStretch, 0.16f);
     ImGui::TableHeadersRow();
     for (const PromptRow& r : inv.rows) {
-      if (r.section != s || r.injected) continue;
+      if (r.section != s || r.injected || r.failed) continue;
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       ImGui::TextWrapped("%s", r.title.c_str());
@@ -229,12 +233,38 @@ void available_rows(PromptSection s, const PromptInventory& inv) {
   ImGui::PopStyleColor();
 }
 
+// Prompts that are declared and could not be read. Its own block, above both
+// tables, because it belongs in neither: it is not loaded, and it is not
+// "available" either -- no trigger word will ever load it. Listing one of
+// these as an ordinary row would be a worse lie than the omission this
+// replaces, which is why it is three lines of its own rather than a flag on a
+// row somewhere in the table.
+void failed_rows(PromptSection s, const PromptInventory& inv) {
+  int n = 0;
+  for (const PromptRow& r : inv.rows)
+    if (r.section == s && r.failed) ++n;
+  if (n == 0) return;
+
+  ImGui::PushStyleColor(ImGuiCol_Text, warn());
+  ImGui::TextWrapped("Declared, but could not be read - none of this reached Claude:");
+  for (const PromptRow& r : inv.rows) {
+    if (r.section != s || !r.failed) continue;
+    ImGui::Bullet();
+    ImGui::TextWrapped("%s (%s)", r.title.c_str(), r.source.c_str());
+  }
+  ImGui::PopStyleColor();
+  ImGui::Spacing();
+}
+
 // One section: heading, note, the table of what is loaded, and beneath it
 // (M5.4) what is available and is not.
 void section(PromptSection s, const PromptInventory& inv) {
   int drawn = 0, defined = 0;
   for (const PromptRow& r : inv.rows) {
-    if (r.section != s) continue;
+    // A failed row is neither defined-and-waiting nor drawn: it has its own
+    // block, and counting it here would make the empty state say "1 defined,
+    // none mentioned yet", which is a promise it will arrive later.
+    if (r.section != s || r.failed) continue;
     ++defined;
     if (r.injected) ++drawn;
   }
@@ -246,6 +276,11 @@ void section(PromptSection s, const PromptInventory& inv) {
   ImGui::TextWrapped("%s", section_note(s));
   ImGui::PopStyleColor();
   ImGui::Spacing();
+
+  // Above everything, including the empty states: if a section is empty
+  // *because* its prompts could not be read, "None." on its own would be the
+  // lie this block exists to prevent.
+  failed_rows(s, inv);
 
   if (drawn == 0) {
     // M5.2's three empty states, unchanged and still first. M5.4's rows go

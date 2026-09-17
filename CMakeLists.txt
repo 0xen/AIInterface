@@ -132,6 +132,29 @@ if(MSVC)
 endif()
 aii_copy_runtime_dlls(worker_report_test)
 
+# ---- failure_reason_test: the CLI's jargon, mapped to something hearable ----
+# Same rule as app_strings_test, and the same two files: the mapping lives
+# beside the table it selects from, so it needs nothing else. The Japanese in
+# it is checked by app_strings_test's byte assertions.
+add_executable(failure_reason_test tests/failure_reason_test.cpp src/core/app_strings.cpp
+                                   src/core/text_util.cpp)
+target_include_directories(failure_reason_test PRIVATE src)
+target_compile_definitions(failure_reason_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+if(MSVC)
+  target_compile_options(failure_reason_test PRIVATE /utf-8 /W4)
+endif()
+
+# ---- prompt_body_test: a declared prompt body that cannot be read ----
+# Links aii_core: PromptStore reaches user_paths and config, and build_inventory
+# is in the same translation unit. It builds its own store under the temp
+# directory and points AII_PROMPTS_DIR at it, so it never touches the user's.
+add_executable(prompt_body_test tests/prompt_body_test.cpp)
+target_link_libraries(prompt_body_test PRIVATE aii_core)
+if(MSVC)
+  target_compile_options(prompt_body_test PRIVATE /utf-8 /W4)
+endif()
+aii_copy_runtime_dlls(prompt_body_test)
+
 # ---- avatar: the corner window on the Renderer engine (sibling checkout) ----
 option(AII_BUILD_AVATAR "Build the avatar window (needs the Renderer checkout and the Vulkan SDK's dxc)" ON)
 set(AII_RENDERER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Renderer" CACHE PATH "Checkout of the rend engine")

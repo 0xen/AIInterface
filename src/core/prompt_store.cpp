@@ -99,12 +99,15 @@ fs::path PromptStore::root() {
 
 bool PromptStore::load(std::string* error) {
   graphs_.clear();
+  problems_.clear();
   const fs::path dir = root();
   // Seeded every start, not only when the directory is absent — see
   // `seed_tree`, and commit 636f24e for what the other rule cost.
   std::string seed_err;
-  if (!seed_tree(fs::path(AII_ASSETS_DIR) / "prompts", dir, &seed_err) && error)
-    *error = seed_err;  // not fatal: an existing store still loads
+  if (!seed_tree(fs::path(AII_ASSETS_DIR) / "prompts", dir, &seed_err)) {
+    problems_.push_back(seed_err);  // not fatal: an existing store still loads
+    if (error) *error = seed_err;
+  }
 
   std::string text;
   if (!read_file(dir / "graph.json", &text)) {
@@ -152,7 +155,16 @@ bool PromptStore::load(std::string* error) {
         // A declared body that is not on disk is worth saying out loud: it is
         // exactly the shape of the avatar-seed bug, and composing silently
         // without it would be the same silent degradation.
-        if (error) *error = "prompt `" + n.id + "`: cannot read " + n.file;
+        //
+        // Three places, because one was not enough: on the node, so the
+        // inspector can say this prompt is not in Claude's head; in
+        // `problems()`, so the caller sees it whatever `load()` returned; and
+        // in `*error`, which is only the last of them and is why this needed
+        // the other two.
+        n.body.clear();  // belt and braces: nothing composes from a failed read
+        n.body_error = "cannot read " + n.file;
+        problems_.push_back("prompt `" + n.id + "`: " + n.body_error);
+        if (error) *error = problems_.back();
       }
       g.nodes.push_back(std::move(n));
     }
@@ -198,6 +210,11 @@ bool PromptStore::save(std::string* error) const {
       if (!n.cwd.empty()) nj["cwd"] = n.cwd;
       nodes_j.push_back(std::move(nj));
       if (n.file.empty()) continue;
+      // A body we failed to *read* is never written back. `body` is empty for
+      // one of those, and writing it would truncate a file that may be perfectly
+      // good and merely locked when the store was read -- turning a temporary
+      // failure into a permanent one, on a file the user wrote by hand.
+      if (!n.body_error.empty()) continue;
       const fs::path bp = dir / fs::path(n.file);
       fs::create_directories(bp.parent_path(), ec);
       // Binary, so the bytes that were loaded are the bytes written back: a
@@ -523,6 +540,10 @@ const std::string& system_prompt() {
     PromptStore store;
     std::string err;
     if (!store.load(&err) && !err.empty()) std::fprintf(stderr, "[prompts] %s\n", err.c_str());
+    // This is the string that actually becomes `--system-prompt`, so a prompt
+    // that is declared and missing from it is the exact failure worth shouting
+    // about, whatever `load()` returned.
+    for (const std::string& p : store.problems()) std::fprintf(stderr, "[prompts] %s\n", p.c_str());
     std::string composed = store.compose("system");
     // Appended, never substituted, and last so that it has the final word.
     if (const std::string local = local_prompt(); !local.empty()) {
@@ -599,6 +620,26 @@ PromptInventory build_inventory(const PromptStore& store, const PromptInjector& 
       r.at_session_start = true;
       inv.rows.push_back(std::move(r));
     }
+    // A global prompt whose body could not be read is *not* in the composed
+    // order -- an empty body drops out of `compose_order()` -- so without this
+    // it would not appear here at all, and a window whose whole purpose is to
+    // say what is in Claude's head would answer a question about a declared
+    // prompt with silence. It is listed where the user declared it, marked
+    // failed, injected false, tokens unknown: every one of those is true.
+    for (const PromptNode& n : g->nodes) {
+      // Disabled nodes are left out for the same reason they are left out of
+      // composition: the user switched them off, so their body not being there
+      // is not a failure of anything.
+      if (n.kind != PromptKind::Global || !n.enabled || n.body_error.empty()) continue;
+      PromptRow r;
+      r.section = PromptSection::Global;
+      r.title = n.title.empty() ? n.id : n.title;
+      r.source = n.file.empty() ? n.id : n.file;
+      r.failed = true;
+      r.injected = false;
+      r.at_session_start = true;
+      inv.rows.push_back(std::move(r));
+    }
   }
   // `pre-prompt.md` beside the exe is part of the system prompt and is the one
   // piece of it the user was explicitly invited to edit, so leaving it out
@@ -632,6 +673,16 @@ PromptInventory build_inventory(const PromptStore& store, const PromptInjector& 
       r.triggers = n.triggers;
       // Estimated whether or not it has fired: an unloaded row shows what it
       // *would* cost, which is half of why M5.4 lists it at all.
+      // Same for a project or skill prompt: a body that could not be read can
+      // never be injected, however often its trigger words are said, so the
+      // row says failed rather than "available, not loaded".
+      if (!n.body_error.empty()) {
+        r.failed = true;
+        r.injected = false;
+        r.at_session_start = false;
+        inv.rows.push_back(std::move(r));
+        continue;
+      }
       r.est_tokens = estimate_tokens(n.body);
       r.injected = injector.is_loaded(n.id);
       // Injected *during* the session unless the caller says otherwise: these

@@ -166,6 +166,7 @@ int main(int argc, char** argv) {
   if (speak_text.empty()) {
     std::string perr;
     if (!prompts.load(&perr) && !perr.empty()) std::fprintf(stderr, "[prompts] %s\n", perr.c_str());
+    for (const std::string& p : prompts.problems()) std::fprintf(stderr, "[prompts] %s\n", p.c_str());
     injector.reset(prompts);
   }
 

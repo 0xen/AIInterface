@@ -155,7 +155,15 @@ void WorkerPool::run(Worker* w) {
       // with an exception is one the user hears break; the panel row and the
       // transcript still say which worker failed, and a failure is acted on by
       // looking, not by listening.
-      spoken = app_text(Msg::TaskFailedSpoken, why);
+      //
+      // And it loses the CLI's wording as well. `why` above is the raw reason
+      // and it stays where it can be read: on the transcript line above, in
+      // `w->result` and so in every `snapshot()` the panel is drawn from, and
+      // in the log. What is *said* is one of the Fail* sentences, mapped from
+      // the whole error rather than from the clipped first sentence -- the
+      // clip is for the eye, and classifying what is left of a truncated
+      // string would lose the very word that identifies it.
+      spoken = app_text(Msg::TaskFailedSpoken, app_text(failure_reason(r.error)));
     } else {
       w->state = State::Done;
       w->activity = "done";

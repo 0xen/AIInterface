@@ -54,6 +54,13 @@ struct PromptNode {
   std::vector<std::string> triggers;  // M3.3, en + ja; unused until then
   std::string cwd;                    // M3.3 project scope; unused until then
   std::string body;                   // loaded from `file`
+  // Non-empty when `file` was declared and could not be read. The node stays
+  // in the graph -- it is still declared, it is still what the user wrote --
+  // but `body` is empty and everything downstream has to be able to tell that
+  // apart from a body that is genuinely empty. Silently composing without it
+  // is the avatar-seed bug again: wired up correctly, never arrives, nothing
+  // says so.
+  std::string body_error;
 };
 
 struct PromptLink {
@@ -85,8 +92,24 @@ class PromptStore {
   // Seed from `assets/prompts/`, then read `graph.json` and every body.
   // Returns false only on a malformed store; a *missing* one is seeded and so
   // is never missing by the time it is read.
+  //
+  // **A body it could not read does not make this false, and that is on
+  // purpose.** The return value answers "is this store usable", and one
+  // unreadable body does not stop the other eight prompts reaching Claude --
+  // making it fatal would turn a partial failure into a total one. What was
+  // actually wrong before was that such a body was invisible: `*error` was set
+  // and the return value was `true`, and the one caller only looked at
+  // `*error` when the call had returned `false`. So the failure got its own
+  // channel instead, `problems()`, which cannot be missed by a caller that
+  // checks the return value, and `PromptNode::body_error`, which carries it as
+  // far as the inspector.
   bool load(std::string* error = nullptr);
   bool reload(std::string* error = nullptr) { return load(error); }
+
+  // Everything that went wrong during the last `load()` without stopping it:
+  // one sentence per unreadable body, plus a seeding failure if there was one.
+  // Empty on a clean load. Sentences, not codes -- these are logged and shown.
+  const std::vector<std::string>& problems() const { return problems_; }
 
   // Write `graph.json` and every body back. M6 is the caller that will need
   // this; it is here now so the format has exactly one writer from the start.
@@ -113,6 +136,7 @@ class PromptStore {
 
  private:
   std::vector<PromptGraph> graphs_;
+  std::vector<std::string> problems_;
 };
 
 // ------------------------------------------------- the pre-prompt beside the exe
@@ -278,6 +302,15 @@ struct PromptRow {
   // tokens, and this app never sees a byte of it. A 0 there would have read as
   // "free", which is the one thing it is not.
   int est_tokens = -1;
+  // The prompt is declared but its body could not be read, so none of it
+  // reached Claude. It is a row of its own and not an absence, because an
+  // absence is what the old behaviour already looked like from here -- an
+  // empty body drops out of `compose_order()` and the prompt simply vanished
+  // from this window. It must also never be drawn as an ordinary row: a
+  // prompt that failed to load, listed beside ones that did, is a worse lie
+  // than not listing it. `failed` rows carry `injected == false` and
+  // `est_tokens == -1`, both of which are literally true of them.
+  bool failed = false;
 };
 
 struct PromptInventory {

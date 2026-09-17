@@ -27,15 +27,36 @@ const AppLine kLines[] = {
     {"{} paused.", "{} はいったん止めたよ。"},
     {"Paused.", "いったん止めたよ。"},
     {"{} failed: {}", "{} は失敗しちゃった: {}"},
-    // The reason is the CLI's own words and still English; a separate task
-    // maps those to plain sentences. What matters here is that the sentence
-    // *around* it is hers, so a Japanese conversation does not open with an
-    // English clause.
+    // `{}` is one of the Fail* lines below -- never the CLI's own words, which
+    // stay on the panel row and in the log where they are read rather than
+    // heard.
     {"The task failed. {}", "うまくいかなかったみたい。{}"},
     // `{}` here is the worker's first sentence -- the model's words, so it is
     // already in the user's language and must not be touched.
     {"{} finished. {}", "{} が終わったよ。{}"},
     {"Finished. {}", "終わったよ。{}"},
+
+    // --- Why a worker failed ----------------------------------------------
+    //
+    // Every one of these is a whole sentence that follows another whole
+    // sentence ("The task failed. ..."), so they are short and they name
+    // nothing: no process, no exit code, no flag, no path. A person who has
+    // never opened a terminal has to be able to act on them, and what they can
+    // act on is "it never got going" versus "it stopped part-way".
+    {"There is already one of those running.", "それはもう動いてるよ。"},
+    {"It never got going.", "そもそも動き出さなかったよ。"},
+    {"It had already stopped, so the work never started.",
+     "もう止まってたから、作業は始まってもいないんだ。"},
+    {"It stopped before it finished.", "途中で止まっちゃった。"},
+    {"It was stopped before it finished.", "途中で止められちゃった。"},
+    {"I could not hand the work over to it.", "作業をうまく渡せなかったよ。"},
+    {"I could not reach it.", "つながらなかったよ。"},
+    {"It has used up what it is allowed for now.", "今は使える分を使い切っちゃったみたい。"},
+    {"It would not do that one.", "それはやらないって言われちゃった。"},
+    // The unrecognised one. It says the reason exists and where it is, rather
+    // than pretending there is none.
+    {"I cannot say why, but the reason is on screen.",
+     "理由はうまく言えないんだけど、画面に出してるよ。"},
 
     // --- Workers addressed by voice ---------------------------------------
     {"Could not start worker {}. {}", "{} を始められなかったよ。{}"},
@@ -95,6 +116,36 @@ const AppLine& app_line(Msg m) {
   // of telling someone their build broke.
   if (i >= static_cast<size_t>(Msg::Count)) return kLines[static_cast<size_t>(Msg::PausedSpoken)];
   return kLines[i];
+}
+
+Msg failure_reason(const std::string& client_error) {
+  // Lower-cased once; every needle below is already lower case.
+  std::string e;
+  e.reserve(client_error.size());
+  for (char c : client_error)
+    e += (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+  auto has = [&e](const char* needle) { return e.find(needle) != std::string::npos; };
+
+  // Order matters where two needles can both be present. "HTTP 429" is a
+  // limit before it is a network error; "claude exited during startup" is a
+  // start that failed before it is a process that exited.
+  if (has("already running")) return Msg::FailAlreadyRunning;
+  if (has("cancel")) return Msg::FailStoppedByUs;
+  if (has("refusal")) return Msg::FailWouldNotDo;
+  if (has("usage limit") || has("rate limit") || has("429") || has("overloaded"))
+    return Msg::FailAtItsLimit;
+  if (has("during startup") || has("createprocess") || has("createpipe"))
+    return Msg::FailCouldNotStart;
+  if (has("not running")) return Msg::FailNeverStarted;
+  if (has("exited") || has("exit code")) return Msg::FailStopped;
+  if (has("stdin")) return Msg::FailCouldNotSend;
+  if (has("winhttp") || has("http ") || has("timed out") || has("timeout") ||
+      has("connect"))
+    return Msg::FailCouldNotReach;
+  // Unrecognised -- including the CLI's own `is_error` result text, which is
+  // free prose and can be anything. It degrades to the one line that admits it
+  // cannot explain, instead of reading the prose out loud.
+  return Msg::FailUnclear;
 }
 
 const char* pick(const AppLine& line, AppLang lang) {

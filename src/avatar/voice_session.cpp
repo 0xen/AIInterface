@@ -312,6 +312,11 @@ void VoiceSession::load() {
       take_scheduled_worker(name, nullptr);
       return;
     }
+    // The spoken line no longer carries the client's own words, so the raw
+    // reason has to be somewhere a person can go and look. It is on the
+    // transcript line (`shown`) and on the pool's snapshot; this puts it in
+    // the log too, which is the one of the three that outlives the session.
+    if (state == WorkerPool::State::Failed) log("[worker] " + shown);
     bool phrased = true;
     if (!take_scheduled_worker(name, &phrased)) {
       announce(shown, spoken);
@@ -332,7 +337,12 @@ void VoiceSession::load() {
   // time for its lazy half. Cheap (a few small files), and it keeps the
   // injector honest about *when* it sees the store: the global prompts left
   // this process at launch, and these have not been sent at all yet.
-  if (std::string perr; !prompts_.load(&perr) && !perr.empty()) log("[prompts] " + perr);
+  // The return value and the problems are two different questions, and asking
+  // only the first is what let a declared prompt go missing in silence: a body
+  // that cannot be read leaves `load()` returning true. Both are logged.
+  if (std::string perr; !prompts_.load(&perr))
+    log("[prompts] " + (perr.empty() ? std::string("the prompt store could not be read") : perr));
+  for (const std::string& p : prompts_.problems()) log("[prompts] " + p);
   injector_.reset(prompts_);
   // M5.2. First publication: the store has just been read, so the inspector
   // can stop saying "still loading" and start naming the global prompts. It
@@ -1820,7 +1830,11 @@ void VoiceSession::run_commands(const std::string& reply_text) {
       if (workers_->spawn(c.name, c.cwd, c.task, &err)) {
         log("[worker] spawned " + c.name + " in " + (c.cwd.empty()? std::string("(app dir)") : c.cwd));
       } else {
-        announce(app_text(Msg::SpawnFailed, c.name, err));
+        // `err` is a client error string ("CreateProcess failed (2): claude
+        // --flags ...") and is spoken, so it goes through the same mapping the
+        // failure report uses rather than being read out as it stands.
+        log("[worker] could not spawn " + c.name + ": " + err);
+        announce(app_text(Msg::SpawnFailed, c.name, app_text(failure_reason(err))));
       }
     } else if (c.verb == "pause") {
       if (!workers_->pause(c.name)) announce(app_text(Msg::NoRunningWorker, c.name));
