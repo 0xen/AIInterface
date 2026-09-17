@@ -13,8 +13,7 @@ namespace {
 using json = nlohmann::json;
 
 std::string clip_string(std::string s) {
-  if (s.size() > kBusStringMax) s.resize(kBusStringMax);
-  return s;
+  return clip_utf8(std::move(s), kBusStringMax);
 }
 
 std::string json_escape(const std::string& s) {

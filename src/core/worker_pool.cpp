@@ -39,8 +39,11 @@ std::string first_sentence(const std::string& text, size_t limit = 220) {
   const size_t para = t.rfind("\n\n");
   if (para != std::string::npos && t.size() - para > 12) t = trim(t.substr(para + 2));
   if (t.size() > limit) {
+    // Cut on a word boundary where there is one. Japanese has no spaces, so
+    // that fallback is the *normal* path for half this app's output, and a bare
+    // byte cut there lands mid-sequence -- hence clip_utf8 rather than substr.
     const size_t cut = t.rfind(' ', limit);
-    t = t.substr(0, cut == std::string::npos ? limit : cut) + "...";
+    t = (cut == std::string::npos ? clip_utf8(t, limit) : t.substr(0, cut)) + "...";
   }
   return t;
 }

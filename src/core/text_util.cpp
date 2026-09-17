@@ -117,6 +117,22 @@ std::string trim(const std::string& s) {
   return s.substr(a, b - a);
 }
 
+std::string clip_utf8(std::string s, std::size_t max_bytes) {
+  if (s.size() <= max_bytes) return s;
+  // s[max_bytes] is the first byte that will be dropped. If it is a lead byte
+  // (or plain ASCII) the cap already falls on a code point boundary; if it is a
+  // continuation byte, a sequence straddles the cap and must go entirely.
+  std::size_t cut = max_bytes;
+  // A code point is at most 4 bytes, so a valid straddling sequence starts no
+  // more than 3 bytes back. Anything further is malformed input, and for that
+  // the honest answer is the byte cap itself.
+  const std::size_t floor = max_bytes >= 3 ? max_bytes - 3 : 0;
+  while (cut > floor && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) --cut;
+  if ((static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) cut = max_bytes;
+  s.resize(cut);
+  return s;
+}
+
 std::string strip_markdown(const std::string& in) {
   std::string s = trim(in);
   // Leading heading marks / bullets.

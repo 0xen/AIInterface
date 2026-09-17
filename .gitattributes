@@ -1,0 +1,72 @@
+# Line endings, settled once.
+#
+# Git was warning on every commit ("LF will be replaced by CRLF the next time
+# Git touches it") because core.autocrlf=true was left to guess, while the
+# index is already 100% LF and the working tree had drifted almost entirely to
+# LF as well (130 of 131 tracked text files). The warning was noise about a
+# conversion nobody wanted.
+#
+# `eol=lf` is what stops it: it pins the *checkout* to LF, so there is no
+# CRLF round-trip left to warn about. It is safe here precisely because the
+# index is already LF -- `text=auto` normalises the working tree the same way
+# autocrlf already did, so nothing is renormalised and no file changes content.
+# MSVC, CMake and PowerShell all read LF without complaint.
+* text=auto eol=lf
+
+# The exception, for when one turns up: a batch file with LF endings can be
+# mis-parsed by cmd.exe mid-script. Nothing tracked matches this today; the
+# rule is here so that adding one does not quietly break.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# ---- Binary: never converted, never diffed as text --------------------------
+# Marked by *type*, not by directory. `assets/` is mostly text -- the avatar
+# sprite sheets under assets/avatars are commented ASCII art whose columns are
+# the drawing, and assets/prompts holds Markdown -- so a blanket `assets/** -text`
+# would hide the diffs most worth reading. Likewise third_party/ is vendored
+# *source* (json.hpp, miniaudio.h). So the binary list is by extension, which
+# covers those directories and everywhere else at the same time.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.bmp  binary
+*.ico  binary
+*.psd  binary
+*.webp binary
+*.mp3  binary
+*.wav  binary
+*.ogg  binary
+*.flac binary
+*.ttf  binary
+*.otf  binary
+*.woff  binary
+*.woff2 binary
+*.zip  binary
+*.7z   binary
+*.gz   binary
+*.bz2  binary
+*.tar  binary
+*.pdf  binary
+*.exe  binary
+*.dll  binary
+*.lib  binary
+*.pdb  binary
+*.obj  binary
+*.spv  binary
+
+# Model weights and the engines' data files. models/ is gitignored today, but
+# these turn up under spikes/ and would be catastrophic to line-ending-convert.
+*.onnx binary
+*.gguf binary
+*.vvm  binary
+*.bin  binary
+*.fst  binary
+*.dic  binary
+*.safetensors binary
+
+# ---- Diff hints ------------------------------------------------------------
+*.h   diff=cpp
+*.hpp diff=cpp
+*.cpp diff=cpp
+*.md  diff=markdown

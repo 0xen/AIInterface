@@ -83,12 +83,27 @@ aii_copy_runtime_dlls(voiceloop)
 # nothing but the standard library, and a test that dragged in sherpa-onnx and
 # VOICEVOX would need their DLLs beside it to start — a timing harness should
 # not be able to fail for a reason that has nothing to do with timing.
-add_executable(schedule_test tests/schedule_test.cpp src/core/schedule.cpp)
+# text_util.cpp comes along because schedule.cpp now clips its strings with the
+# shared clip_utf8; it is standard-library-only too, so the rule above holds.
+add_executable(schedule_test tests/schedule_test.cpp src/core/schedule.cpp
+                             src/core/text_util.cpp)
 target_include_directories(schedule_test PRIVATE src)
 target_link_libraries(schedule_test PRIVATE winmm)
 target_compile_definitions(schedule_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 if(MSVC)
   target_compile_options(schedule_test PRIVATE /utf-8 /W4)
+endif()
+
+# ---- clip_utf8_test: the shared byte cap that must not split a character ----
+# Same rule as schedule_test: text_util.cpp is standard-library-only, so this
+# builds and runs without an engine DLL anywhere near it. It reads the two caps
+# out of app_bus.h and schedule.h (both header-only constants) so the test
+# fails if either one drifts.
+add_executable(clip_utf8_test tests/clip_utf8_test.cpp src/core/text_util.cpp)
+target_include_directories(clip_utf8_test PRIVATE src)
+target_compile_definitions(clip_utf8_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+if(MSVC)
+  target_compile_options(clip_utf8_test PRIVATE /utf-8 /W4)
 endif()
 
 # ---- worker_report_test: what a finished worker hands to the speech path ----

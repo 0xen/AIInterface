@@ -2,15 +2,20 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <utility>
+
+#include "core/text_util.h"
 
 namespace aii {
 namespace {
 
 // The bus's rule, applied here: bound an untrusted string rather than reject
 // the message carrying it. A script or a model that sends a 4 KB label gets a
-// truncated label, not a refused timer.
+// truncated label, not a refused timer. Shared with the bus down to the helper
+// so the two caps cannot drift apart again -- see clip_utf8 for why the cap is
+// in bytes but the cut is not.
 void clamp(std::string& s) {
-  if (s.size() > kScheduleStringMax) s.resize(kScheduleStringMax);
+  s = clip_utf8(std::move(s), kScheduleStringMax);
 }
 
 }  // namespace
