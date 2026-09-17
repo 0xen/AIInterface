@@ -944,17 +944,263 @@ const char* refusal_reason(const VoiceSession::Snapshot& snap, bool voice_enable
 //
 // `text` must not point into the widget's own buffer: DeleteChars empties that
 // before InsertChars reads anything.
+//
+// ------------------------------------------------------------- the wrapping
+//
+// **InputTextMultiline does not wrap, and nothing in ImGui makes it.** Measured
+// against the vendored v1.91.8 rather than assumed: `InputTextEx` builds a
+// multiline field's layout by counting '\n' and nothing else (`text_size =
+// ImVec2(inner_size.x, line_count * g.FontSize)`), and the one thing
+// `ImGuiInputTextFlags_NoHorizontalScroll` does is pin `state->Scroll.x` to
+// zero. So the flag does not make text flow; it removes the sideways view of
+// the text that has run off the edge. The field then sized itself from
+// `CalcTextSize(..., wrap_w)` — a *wrapped* measurement of text that was
+// rendered unwrapped — so a long sentence produced a four-line-tall box with
+// one line in it and the rest invisible past the right border. That is the
+// user's bug, and the height and the content disagreeing is the same defect
+// seen from the other side.
+//
+// The panel therefore wraps the text itself, and keeps what the user typed out
+// of it: `state.message` is the message and never holds a soft break;
+// `state.message_view` is what the widget edits and is the message with breaks
+// inserted. Everything downstream — the send, the refusal test, dictation —
+// still reads `state.message` and is unchanged.
+//
+// The alternative was drawing the field by hand, i.e. writing a text editor
+// with a caret, a selection, IME and a clipboard. This is the smaller thing.
+// What it costs is listed where the reconciliation happens below.
+
+// Wraps `text` at `wrap_w`, returning the wrapped string and, in `soft`, the
+// byte offset within it of every '\n' this function inserted.
+//
+// The break points come from `ImFont::CalcWordWrapPositionA` — the same
+// function `CalcTextSize` wraps with — so the field is as tall as the text it
+// is actually showing by construction, instead of by two calculations that are
+// meant to agree and did not. It is also why **Japanese wraps**: with no blanks
+// to break at, a Japanese sentence is one "word" that cannot fit on a line, and
+// that function cuts such a run wherever it must. A word-boundary wrap written
+// here by hand would have put the user's second language on one endless line
+// and reproduced the bug for them specifically.
+//
+// The break goes *after* any blanks that end the line rather than in place of
+// them, so unwrapping is the removal of a '\n' and nothing else. A space the
+// wrap had swallowed would have to be put back on the way out — and for
+// Japanese, where the cut falls between two characters with no space involved,
+// putting one back would corrupt the sentence.
+std::string wrap_for_field(const char* text, float wrap_w, std::vector<int>& soft) {
+  soft.clear();
+  const char* const end = text + std::strlen(text);
+  std::string out;
+  if (wrap_w <= 1.0f) {
+    out.assign(text, end);
+    return out;
+  }
+  out.reserve(static_cast<size_t>(end - text) + 16);
+  ImFont* font = ImGui::GetFont();
+  const float scale = ImGui::GetFontSize() / font->FontSize;
+  const char* s = text;
+  while (s < end) {
+    // One of the user's own lines at a time. CalcWordWrapPositionA walks
+    // straight through a '\n' (it resets its width and carries on), so handed
+    // the whole text it reports a break position past the newline.
+    const char* line_end =
+        static_cast<const char*>(std::memchr(s, '\n', static_cast<size_t>(end - s)));
+    if (!line_end) line_end = end;
+    while (s < line_end) {
+      const char* eol = font->CalcWordWrapPositionA(scale, s, line_end, wrap_w);
+      if (eol >= line_end) break;  // what is left fits
+      while (eol < line_end && (*eol == ' ' || *eol == '\t')) ++eol;
+      if (eol >= line_end) break;  // ... and what is left is blanks
+      out.append(s, eol);
+      soft.push_back(static_cast<int>(out.size()));
+      out.push_back('\n');
+      s = eol;
+    }
+    out.append(s, line_end);
+    if (line_end < end) out.push_back('\n');  // the user's own, kept as it is
+    s = (line_end < end) ? line_end + 1 : line_end;
+  }
+  return out;
+}
+
+int count_lines(const char* s) {
+  int n = 1;
+  for (; *s; ++s)
+    if (*s == '\n') ++n;
+  return n;
+}
+
+// The width the text is laid out in is not quite the width of the field.
+// `InputTextEx` gives the multiline child a vertical scrollbar the moment its
+// content is taller than the box and then does `inner_size.x -=
+// draw_window->ScrollbarSizes.x` — so a view wrapped at the full width has its
+// longest lines clipped by the scrollbar that view itself brought into
+// existence. It shows up only past the line cap, which is the only place the
+// field ever scrolls, and it is why the first cut of this fix still lost the
+// end of a line in exactly one of the four cases.
+//
+// Wrapping narrower can only ever produce *more* lines, so a view that was over
+// the cap is still over it after the second pass: this is a correction, not the
+// first step of an oscillation.
+std::string wrap_field_view(const char* text, float wrap_w, std::vector<int>& soft) {
+  std::string view = wrap_for_field(text, wrap_w, soft);
+  if (count_lines(view.c_str()) > kMessageLinesMax)
+    view = wrap_for_field(text, wrap_w - ImGui::GetStyle().ScrollbarSize, soft);
+  return view;
+}
+
+// The view with the soft breaks taken back out: the message as typed.
+std::string unwrap_field(const std::string& view, const std::vector<int>& soft) {
+  std::string out;
+  out.reserve(view.size());
+  size_t k = 0;
+  for (size_t i = 0; i < view.size(); ++i) {
+    if (k < soft.size() && static_cast<size_t>(soft[k]) == i) {
+      ++k;
+      continue;
+    }
+    out.push_back(view[i]);
+  }
+  return out;
+}
+
+// The two index maps between the view and the message. `soft` is sorted, so
+// both are a walk over it. A caret sitting exactly on a break maps to the start
+// of the next line rather than the end of the previous one, which is where
+// typing that caused the break leaves it.
+int canon_index(const std::vector<int>& soft, int view_index) {
+  int c = view_index;
+  for (int k : soft) {
+    if (k >= view_index) break;
+    --c;
+  }
+  return c;
+}
+
+int view_index(const std::vector<int>& soft, int canon) {
+  int v = canon;
+  for (int k : soft) {
+    if (k <= v) ++v;
+  }
+  return v;
+}
+
+// Back up / forward over one whole UTF-8 code point. Deleting a byte would
+// leave a half character behind, and half of a Japanese character is not a
+// character at all.
+size_t step_back(const std::string& s, size_t i) {
+  if (i == 0) return 0;
+  --i;
+  while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) --i;
+  return i;
+}
+
+size_t step_forward(const std::string& s, size_t i) {
+  if (i >= s.size()) return s.size();
+  ++i;
+  while (i < s.size() && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) ++i;
+  return i;
+}
+
 struct FieldEdit {
+  AvatarUiState* st = nullptr;
   const char* text = nullptr;  // non-null: replace the field's contents with this
+  float wrap_w = 0.0f;
 };
 
-int replace_contents(ImGuiInputTextCallbackData* data) {
+// Runs every frame the field is focused (CallbackAlways), and is the only place
+// the widget's buffer may be written: while an InputText is active its own copy
+// of the text takes priority and the user buffer is simply overwritten from it
+// again next frame. It is also the only place the caret may be moved, which a
+// re-wrap has to do.
+//
+// What this costs, honestly:
+//  - ImGui's undo stack sees the re-wrap as an edit of its own, so Ctrl+Z in a
+//    wrapped field can step through a break. That was already true of every
+//    dictation frame, which has replaced the whole buffer since M1b.4.
+//  - Backspace at the start of a wrapped line is handled by reading the key
+//    (below), because stb's backspace and its forward delete leave the caret in
+//    the same place and the edit alone cannot say which was meant.
+//  - A re-wrap only happens when the message or the width actually changed, so
+//    nothing moves under a selection drag or a caret walk.
+int wrap_and_replace(ImGuiInputTextCallbackData* data) {
   auto* edit = static_cast<FieldEdit*>(data->UserData);
+  AvatarUiState& st = *edit->st;
+
   if (edit->text) {
+    // Forced from outside: a dictation frame, the clear after a send, or a
+    // re-wrap the panel asked for. `text` is already the wrapped view and
+    // `st.message_soft` already describes it.
     data->DeleteChars(0, data->BufTextLen);
     if (*edit->text) data->InsertChars(0, edit->text);
     edit->text = nullptr;
+    st.message_view_last.assign(data->Buf, static_cast<size_t>(data->BufTextLen));
+    return 0;
   }
+
+  const std::string cur(data->Buf, static_cast<size_t>(data->BufTextLen));
+  if (cur == st.message_view_last) return 0;  // a caret walk, a selection, nothing
+
+  // The user's edit is one contiguous replacement — a keystroke, a paste, a
+  // delete, a selection typed over — so it is recovered by matching the ends.
+  // That is what carries the soft-break offsets across it: a break inside what
+  // was replaced is gone with it, and everything after it moves by the change
+  // in length.
+  const std::string& prev = st.message_view_last;
+  size_t pre = 0;
+  while (pre < prev.size() && pre < cur.size() && prev[pre] == cur[pre]) ++pre;
+  size_t suf = 0;
+  while (suf < prev.size() - pre && suf < cur.size() - pre &&
+         prev[prev.size() - 1 - suf] == cur[cur.size() - 1 - suf])
+    ++suf;
+  const size_t cut_begin = pre;
+  const size_t cut_end = prev.size() - suf;
+  const long long shift =
+      static_cast<long long>(cur.size()) - static_cast<long long>(prev.size());
+
+  std::vector<int> soft;
+  soft.reserve(st.message_soft.size());
+  for (int k : st.message_soft) {
+    const size_t p = static_cast<size_t>(k);
+    if (p < cut_begin)
+      soft.push_back(k);
+    else if (p >= cut_end)
+      soft.push_back(static_cast<int>(static_cast<long long>(p) + shift));
+  }
+
+  std::string canonical = unwrap_field(cur, soft);
+
+  // A soft break is not in the message, so deleting one changes nothing and the
+  // re-wrap puts it straight back: Backspace at the start of a wrapped line
+  // would appear to do nothing at all. The key that was pressed is the only
+  // thing that can say what was meant.
+  if (cur.size() < prev.size() && canonical == st.message) {
+    size_t ci = static_cast<size_t>(canon_index(soft, static_cast<int>(cut_begin)));
+    if (ci > canonical.size()) ci = canonical.size();
+    if (ImGui::IsKeyPressed(ImGuiKey_Backspace, true) && ci > 0) {
+      const size_t b = step_back(canonical, ci);
+      canonical.erase(b, ci - b);
+    } else if (ImGui::IsKeyPressed(ImGuiKey_Delete, true) && ci < canonical.size()) {
+      canonical.erase(ci, step_forward(canonical, ci) - ci);
+    }
+  }
+
+  // `message` is still the cap on what can be typed, enforced here because the
+  // view is the bigger buffer and is what ImGui filled.
+  if (canonical.size() >= sizeof(st.message))
+    canonical.resize(step_back(canonical, sizeof(st.message) - 1));
+
+  const int caret = canon_index(soft, data->CursorPos);
+  std::snprintf(st.message, sizeof(st.message), "%s", canonical.c_str());
+  const std::string view = wrap_field_view(st.message, edit->wrap_w, st.message_soft);
+  if (view != cur) {
+    const int at = std::clamp(view_index(st.message_soft, caret), 0, static_cast<int>(view.size()));
+    data->DeleteChars(0, data->BufTextLen);
+    if (!view.empty()) data->InsertChars(0, view.c_str());
+    data->CursorPos = at;
+    data->SelectionStart = data->SelectionEnd = at;
+  }
+  st.message_view_last = view;
   return 0;
 }
 
@@ -1042,10 +1288,8 @@ void message_field(AvatarUiState& state, const VoiceSession::Snapshot& snap, boo
   // separate storage the callback needs, since it wipes state.message first.
   std::string pending;
   FieldEdit edit;
-  if (dictate_into_field(state, snap)) {
-    pending = state.message;
-    edit.text = pending.c_str();
-  }
+  edit.st = &state;
+  bool rebuild = dictate_into_field(state, snap);
   if (submit && !loading) {
     if (const char* why = refusal_reason(snap, voice_enabled, state.message)) {
       // Refused, never queued and never dropped: the text is left in the field
@@ -1055,8 +1299,7 @@ void message_field(AvatarUiState& state, const VoiceSession::Snapshot& snap, boo
     } else {
       out.send_text = state.message;
       state.message[0] = '\0';
-      pending.clear();
-      edit.text = pending.c_str();
+      rebuild = true;
       // A typed send ends any dictation that was feeding the field, so the
       // prefix does not come back on the next microphone close.
       state.dictation = AvatarUiState::Dictation::Idle;
@@ -1083,18 +1326,34 @@ void message_field(AvatarUiState& state, const VoiceSession::Snapshot& snap, boo
     }
   }
 
-  // Sized from the *wrapped* height, not from the newlines in the text. A
-  // dictation arrives as one long unpunctuated line and the field wraps it
-  // (NoHorizontalScroll), so counting '\n' would leave a one-line field with
-  // the speech scrolled out of sight — and nobody has to press a key to get
-  // there. Capped at four lines so a long utterance cannot push the transport
-  // row down the window.
+  // The field is sized from the lines of the view — the text that will
+  // actually be drawn — rather than from a wrapped measurement of text that was
+  // drawn unwrapped. The two are now the same count by construction, because
+  // the same function decides both. Capped at four lines so a long utterance
+  // cannot push the transport row down the window; past the cap the field
+  // scrolls instead of growing.
+  //
+  // A dictation is why this cannot count the newlines the *user* typed: speech
+  // arrives as one long unpunctuated run with no '\n' anywhere in it, and a
+  // one-line field would leave it scrolled out of sight with nobody having
+  // touched a key.
   const ImGuiStyle& style = ImGui::GetStyle();
   const float line_h = ImGui::GetTextLineHeight();
   const float wrap_w = ImGui::GetContentRegionAvail().x - 2.0f * style.FramePadding.x;
-  const float text_h =
-      ImGui::CalcTextSize(state.message, nullptr, false, wrap_w).y;
-  const int lines = std::clamp(static_cast<int>(text_h / line_h + 0.5f), 1, kMessageLinesMax);
+  edit.wrap_w = wrap_w;
+  // The width is part of the wrap, so a change to it rebuilds the view exactly
+  // as a change to the text does.
+  if (rebuild || wrap_w != state.message_wrap_w) {
+    state.message_wrap_w = wrap_w;
+    pending = wrap_field_view(state.message, wrap_w, state.message_soft);
+    // Written both ways on purpose. ImGui only runs the callback while the
+    // field is focused; when it is not, the widget reads this buffer directly
+    // and the callback would never fire at all.
+    std::snprintf(state.message_view, sizeof(state.message_view), "%s", pending.c_str());
+    state.message_view_last = pending;
+    edit.text = pending.c_str();
+  }
+  const int lines = std::clamp(count_lines(state.message_view), 1, kMessageLinesMax);
   const float h = lines * line_h + 2.0f * style.FramePadding.y;
 
   ImGui::PushStyleColor(ImGuiCol_FrameBg, ui_color(0.071f, 0.078f, 0.098f));
@@ -1109,11 +1368,15 @@ void message_field(AvatarUiState& state, const VoiceSession::Snapshot& snap, boo
     state.refocus_field = false;
     ImGui::SetKeyboardFocusHere();
   }
-  ImGui::InputTextMultiline("##message", state.message, sizeof(state.message),
+  // The widget owns the *view*, never the message. NoHorizontalScroll stays:
+  // with the text wrapped there is nothing to the right to scroll to, and the
+  // flag is what keeps a caret at the end of a long line from sliding the whole
+  // field sideways.
+  ImGui::InputTextMultiline("##message", state.message_view, sizeof(state.message_view),
                             ImVec2(-FLT_MIN, h),
                             ImGuiInputTextFlags_NoHorizontalScroll |
                                 ImGuiInputTextFlags_CallbackAlways,
-                            replace_contents, &edit);
+                            wrap_and_replace, &edit);
   ImGui::EndDisabled();
   // InputTextWithHint is single-line only, so the placeholder is drawn by hand
   // over the empty field. Not while it is focused: a caret sitting on top of

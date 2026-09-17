@@ -276,6 +276,18 @@ int main(int /*argc*/, char** /*argv*/) {
     bool scriptsEnabled = true;
     // M2b.1.
     std::vector<std::string> scheduleArgs;
+    // The message field's own escape hatch, and the reason this bug survived
+    // three rounds of testing. Everything the panel draws could be put on
+    // screen from the command line except the one thing the user actually
+    // looks at while typing: text *sitting in the field*. A harness could type
+    // into it with real WM_CHAR and could watch the message that came out the
+    // other end, but nothing could ask for "a screenshot of the field holding
+    // this sentence" — so nobody ever took one, and the field rendered its
+    // contents off the right-hand edge in every run without a single assertion
+    // noticing. `--message` is the same hatch --clip, --sprite and --buttons
+    // are, for the same stated reason: a state that cannot be posed cannot be
+    // looked at.
+    std::string messageArg;
     {
         // Wide command line so Japanese survives (argv is ANSI-mangled).
         int wargc = 0;
@@ -318,6 +330,8 @@ int main(int /*argc*/, char** /*argv*/) {
             // of the *real* app and not only of a harness.
             else if (a == L"--schedule" && i + 1 < wargc)
                 scheduleArgs.push_back(utf8FromWide(wargv[++i]));
+            else if (a == L"--message" && i + 1 < wargc)
+                messageArg = utf8FromWide(wargv[++i]);
         }
         if (wargv) LocalFree(wargv);
     }
@@ -673,6 +687,11 @@ int main(int /*argc*/, char** /*argv*/) {
     // possibly disagreeing with the engines that are already loading.
     uiState.lang_english = voiceCfg.langs.english;
     uiState.lang_japanese = voiceCfg.langs.japanese;
+    // --message: put text in the field before the first frame, exactly as if it
+    // had been typed. It goes through the same buffer a keystroke lands in, so
+    // what is captured is the field doing its own job and not a special case.
+    if (!messageArg.empty())
+        std::snprintf(uiState.message, sizeof(uiState.message), "%s", messageArg.c_str());
     // M1c.5. The picker's own value, and the last value this side pushed into
     // it. The pair is what keeps a drag one-way: while the user is moving the
     // control the panel is the authority and the source follows, and on every
@@ -1339,7 +1358,16 @@ int main(int /*argc*/, char** /*argv*/) {
                 session->set_languages({uiState.lang_english, uiState.lang_japanese});
                 // Only reaches here once the panel has satisfied itself the
                 // session can take it; say() refuses the rest anyway.
-                if (!r.send_text.empty()) session->say(r.send_text);
+                if (!r.send_text.empty()) {
+                    // What the field actually sent, which is now a question a
+                    // screenshot cannot answer: the panel wraps the text it
+                    // shows, and the message must leave without those breaks
+                    // in it. A capture shows a field of wrapped lines whether
+                    // the wrap is the panel's or the user's; this line is the
+                    // only place the difference is visible.
+                    log::info("send: {}", r.send_text);
+                    session->say(r.send_text);
+                }
             }
             // Mirrored out of the panel state every frame rather than from the
             // buttons that write it: the setters are no-ops when the value

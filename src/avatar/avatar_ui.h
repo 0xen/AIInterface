@@ -176,6 +176,35 @@ struct AvatarUiState {
   // std::string because imgui_stdlib is not in this build, and a corner
   // window's typed message has no business being longer than this anyway.
   char message[2048] = {};
+  // The wrapped view of `message`, and the only buffer InputTextMultiline is
+  // ever given. ImGui does not word-wrap a multiline field at all — it counts
+  // '\n' and nothing else — so a long sentence ran off the right-hand edge
+  // while the field's height, computed from a *wrapped* measurement, grew as
+  // though it had flowed. The panel therefore does the wrapping itself: the
+  // view is `message` with a soft '\n' inserted at every position ImGui's own
+  // ImFont::CalcWordWrapPositionA would have broken a line at, and `message`
+  // stays exactly what the user typed or dictated.
+  //
+  // The split is what keeps the soft breaks out of the message: everything
+  // that matters — what is sent to Claude, what a refusal is tested against,
+  // what dictation appends to and compares itself with — reads `message` and
+  // has no idea the view exists. Nothing downstream changed.
+  //
+  // Bigger than `message` because the breaks are extra bytes; `message` is
+  // still the cap on what can be typed, enforced when the view is unwrapped.
+  char message_view[4096] = {};
+  // The view as this panel last left it, and where the breaks it inserted
+  // are. The pair is what makes unwrapping exact rather than a guess: a '\n'
+  // the user typed with Shift+Enter and a '\n' the wrapper inserted are the
+  // same byte, and only a record of which is which can tell them apart. The
+  // offsets are carried across the user's edit rather than re-derived, so a
+  // deliberate line break is never silently swallowed.
+  std::string message_view_last;
+  std::vector<int> message_soft;
+  // The width `message_view` was wrapped at. A change re-wraps, which is what
+  // makes the field correct after a font or a layout change rather than only
+  // after the next keystroke.
+  float message_wrap_w = -1.0f;
   // Seconds left on the "why that Enter did nothing" line under the field.
   // Counted down here so the refusal is visible for a moment without the row
   // itself appearing and disappearing, which would resize the window.
