@@ -106,6 +106,53 @@ class AvatarController {
 
   AvatarPose update(const VoiceSession::Snapshot& snap, float dt);
 
+  // M2.5. A script asks for a clip, for a while.
+  //
+  // **The override goes through the policy rather than around it.** The note
+  // at the top of this file guessed the bus would take the avatar by simply
+  // not calling update() for a frame; that would give the animation two
+  // writers, and every invariant here — the dwell floors, the sprite slide,
+  // blink suppression, the one-shot yield rules — would hold for one of them
+  // and not the other. So a script request is a *lease on a clip* inside the
+  // same state machine, and there is still exactly one thing deciding what is
+  // on screen.
+  //
+  // Precedence, highest first:
+  //
+  //   1. the user taking the microphone (State::Listening)
+  //   2. a script's lease
+  //   3. the built-in reactions (wake, happy, confused, frustrated)
+  //   4. the ambient state -> clip policy
+  //
+  // A script beats a reaction because a reaction is automatic and a lease is
+  // somebody deliberately asking. It loses to the microphone because the one
+  // failure that must be impossible is a script wedging the avatar while the
+  // user is trying to talk to it — and that is the same rule, and the same
+  // code, as `Yield::ToMic`, which `happy` and `confused` already use.
+  //
+  // **The lease is a duration, not a mode**, which is what stops "play bounce"
+  // being overwritten on the next frame *and* stops it lasting forever:
+  //
+  //   * `seconds <= 0` leases the clip for its own authored length, taken from
+  //     the definition, so `avatar.play` with nothing else said is one play of
+  //     the animation and then the policy has it back.
+  //   * `seconds > 0` leases it for that long, clamped to
+  //     `kScriptLeaseMax`. A script that wants longer re-leases, which is one
+  //     line in a loop and means a script that dies stops holding the avatar
+  //     within half a minute rather than until the app is restarted.
+  //   * `release_clip()` hands it back immediately.
+  //
+  // Returns false if the definition does not declare the clip (the lease is
+  // then not taken and `error` says so): the alternative is a lease that
+  // believes it is playing art the source refused.
+  bool request_clip(const std::string& clip, float seconds, std::string* error);
+  void release_clip();
+  bool script_holds() const { return script_left_ > 0.0f; }
+
+  // The longest a single lease may run. Half a minute is long enough for a
+  // scripted performance and short enough that a crashed script is a hiccup.
+  static constexpr float kScriptLeaseMax = 30.0f;
+
   // The current clip and a word for why, for a trace line. Not for display.
   const std::string& clip() const { return current_; }
   const char* reason() const { return reason_; }
@@ -152,6 +199,10 @@ class AvatarController {
   std::string oneshot_;
   float oneshot_left_ = 0.0f;
   Yield oneshot_yield_ = Yield::ToMic;
+
+  // The script's lease: which clip and how much of it is left.
+  std::string script_;
+  float script_left_ = 0.0f;
 
   bool seeded_ = false;  // first update() records the world without reacting to it
   bool woke_ = false;

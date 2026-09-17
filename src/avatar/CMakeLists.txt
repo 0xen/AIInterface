@@ -11,6 +11,8 @@ add_executable(avatar
   avatar_def.h
   avatar_renderer.cpp
   avatar_renderer.h
+  bus_bindings.cpp
+  bus_bindings.h
   avatar_ui.cpp
   avatar_ui.h
   imgui_layer.cpp

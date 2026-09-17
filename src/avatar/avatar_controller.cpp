@@ -73,6 +73,32 @@ void AvatarController::start_oneshot(const char* clip, Yield yield) {
   oneshot_yield_ = yield;
 }
 
+bool AvatarController::request_clip(const std::string& clip, float seconds,
+                                    std::string* error) {
+  if (clip.empty()) {
+    if (error) *error = "no clip";
+    return false;
+  }
+  // Before any definition has loaded there is nothing to check against, and
+  // refusing then would make a script's first message depend on how fast the
+  // disk was. Once one has loaded, an unknown clip is refused outright.
+  if (!timing_.empty() && timing_.find(clip) == timing_.end()) {
+    if (error) *error = "no such clip: " + clip;
+    return false;
+  }
+  float lease = seconds;
+  if (lease <= 0.0f) lease = clip_length(clip.c_str(), 1.0f);
+  if (lease <= 0.0f) lease = 1.0f;
+  script_ = clip;
+  script_left_ = std::min(lease, kScriptLeaseMax);
+  return true;
+}
+
+void AvatarController::release_clip() {
+  script_.clear();
+  script_left_ = 0.0f;
+}
+
 AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt) {
   // A stall — a hot reload, a resize, the debugger — must not fast-forward
   // the policy through a blink and half a one-shot on the frame it resumes.
@@ -208,6 +234,25 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
     }
   }
 
+  // ---- a script's lease outranks the reactions, and loses to the mic ----
+  // Placed after the one-shots deliberately: a script asking for a clip is
+  // somebody's deliberate act and a reaction is the app's reflex, so the act
+  // wins. The microphone still beats both, through the same test `Yield::ToMic`
+  // uses, because a script must never be able to hold the avatar through the
+  // user trying to speak to it.
+  if (script_left_ > 0.0f) {
+    script_left_ -= dt;
+    // Released outright rather than parked: a lease that resumed after the
+    // reply would put a scripted clip back on screen tens of seconds after the
+    // moment it was describing.
+    if (snap.state == VoiceSession::State::Listening || script_left_ <= 0.0f) {
+      release_clip();
+    } else {
+      want = script_.c_str();
+      why = "script";
+    }
+  }
+
   // ---- blink, woven into idle ----
   if (want && std::strcmp(want, "idle") == 0) {
     if (blink_left_ > 0.0f) {
@@ -255,8 +300,15 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
     // bypass unconditional that flutter put the thought bubble up and pulled
     // it down again in 0.48 s. With it, the 0.80 s floor swallows the whole
     // flutter and the avatar goes think → talk, which is what happened.
+    //
+    // A script's lease is urgent for the same reason listening is: somebody is
+    // waiting to see whether the message landed, and a third of a second of
+    // nothing is indistinguishable from the message being dropped. It is held
+    // to the same exception — an accessory that is up has already cost a body
+    // slide and is not torn down early for anybody.
     const bool urgent =
-        std::strcmp(want, "listen") == 0 && avatar_clip_sprite(current_) == nullptr;
+        (std::strcmp(want, "listen") == 0 || std::strcmp(why, "script") == 0) &&
+        avatar_clip_sprite(current_) == nullptr;
     // Blink is exempt at both ends. It is shorter than the floor by design,
     // so a floor would strand the lid shut.
     const bool blinking = current_ == "blink" || std::strcmp(want, "blink") == 0;

@@ -30,6 +30,11 @@
 //                 policy quietly overwriting the thing you asked to look at
 //                 is worse than no policy at all.
 //     --sprite    force an accessory on, repeatable, "all" for every one.
+//     --bus-in    a file tailed for JSON-line bus commands (M2.5): how the bus
+//                 is driven with no Python. See bus_bindings.h.
+//     --bus-out   a file every published bus event is appended to.
+//     --bus-text  also publish turn text. Opt-in on purpose: the transcript
+//                 does not leave the process because something connected.
 //
 //   SPACE / Talk    click (or tap) toggles the mic: conversation mode. While
 //                   the mic is on, a pause in speech sends that utterance and
@@ -73,6 +78,8 @@
 #include "avatar_def.h"
 #include "avatar_renderer.h"
 #include "avatar_ui.h"
+#include "bus_bindings.h"
+#include "core/app_bus.h"
 #include "core/button_registry.h"
 #include "core/config.h"
 #include "core/worker_pool.h"
@@ -249,6 +256,9 @@ int main(int /*argc*/, char** /*argv*/) {
     std::string clipName;
     std::vector<std::string> spriteNames;
     std::string buttonsFile;
+    // M2.5's escape hatch, in the spirit of --buttons.
+    std::string busIn, busOut;
+    bool busText = false;
     {
         // Wide command line so Japanese survives (argv is ANSI-mangled).
         int wargc = 0;
@@ -277,6 +287,9 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (a == L"--sprite" && i + 1 < wargc)
                 spriteNames.push_back(utf8FromWide(wargv[++i]));
             else if (a == L"--buttons" && i + 1 < wargc) buttonsFile = utf8FromWide(wargv[++i]);
+            else if (a == L"--bus-in" && i + 1 < wargc) busIn = utf8FromWide(wargv[++i]);
+            else if (a == L"--bus-out" && i + 1 < wargc) busOut = utf8FromWide(wargv[++i]);
+            else if (a == L"--bus-text") busText = true;
         }
         if (wargv) LocalFree(wargv);
     }
@@ -648,6 +661,28 @@ int main(int /*argc*/, char** /*argv*/) {
     std::vector<std::string> avatarNames = aii::avatar_definition_names();
     bool settingsWasOpen = false;
 
+    // ---- M2.5: the app bus ----
+    // Installed here, after uiState exists, because the inbound families write
+    // their wishes into it: `avatar.load` and `theme.set` go through the same
+    // fields the settings pickers write, so a scripted change and a clicked one
+    // are one code path, persist alike, and correct themselves alike when the
+    // art does not have what was asked for.
+    aii::BusBindings bus;
+    {
+        aii::BusBindings::Context bc;
+        bc.source = &avatarSource;
+        bc.controller = &controller;
+        bc.ui = &uiState;
+        bc.avatar_pinned = !controllerOwnsAvatar;
+        bc.dir_override = !avatarDirOverride.empty();
+        bc.publish_text = busText;
+        bus.install(bc);
+    }
+    aii::BusFileHatch busFiles;
+    if (std::string err; !busFiles.open(busIn, busOut, &err)) log::warn("[bus] {}", err);
+    if (!busIn.empty()) log::info("[bus] tailing {}", busIn);
+    if (!busOut.empty()) log::info("[bus] publishing to {}", busOut);
+
     log::info("avatar live: {}x{} {} {}", extent.width, extent.height,
               transparent ? "transparent" : "opaque", gpu::apiName(api));
 
@@ -888,6 +923,24 @@ int main(int /*argc*/, char** /*argv*/) {
         for (const std::string& note : aii::ButtonRegistry::instance().take_status())
             log::warn("[button] {}", note);
 
+        // ---- M2.5: the bus, applied at one point in the frame ----
+        // **This is the defined point.** Inbound messages arrive from any
+        // thread and are queued; they are applied here, after the session tick
+        // and before the avatar policy, the theme reconciliation and compose()
+        // below — so a command lands at a frame boundary with everything else
+        // that decides what this frame looks like, and a `avatar.cells` cannot
+        // land halfway through a composed frame.
+        busFiles.poll(dt);
+        aii::AppBus::instance().apply_pending();
+        bus.tick(dt);
+        for (const std::string& note : aii::AppBus::instance().take_status())
+            log::warn("[bus] {}", note);
+        // Published from the snapshot the frame loop already took, rather than
+        // from inside the session: the turn thread and the worker poll keep
+        // queueing and the frame loop keeps acting, which is announce()'s rule
+        // and the reason M2.5 changes no line of voice_session.cpp.
+        bus.publish(snap, dt);
+
         // Clip playback and the hot-reload poll, then the policy, then the
         // composition — in that order, and after the session tick and the
         // resize above, because all three feed it: the reload is what the
@@ -967,8 +1020,15 @@ int main(int /*argc*/, char** /*argv*/) {
             // in the corner is a 360 px strip a user is not looking at, and
             // the point of the bubble is that the avatar carries the news. It
             // outranks the clip's own accessory (see avatar_apply).
-            const char* statusSprite =
-                (uiState.muted && !uiState.chat_open) ? "muted" : nullptr;
+            //
+            // M2.5 puts a second producer on this channel: a script's sprite.
+            // The muted bubble still wins — it is the only sign of a condition
+            // the user cannot otherwise see with the chat shut, and a script's
+            // accessory is a decoration. Below it, a script's sprite outranks
+            // the clip's own for the same reason a status sprite always has.
+            const char* statusSprite = (uiState.muted && !uiState.chat_open)
+                                           ? "muted"
+                                           : bus.script_sprite();
             aii::avatar_apply(controller.update(snap, dt), avatarSource, statusSprite);
             if (controller.clip() != lastClipLogged) {
                 lastClipLogged = controller.clip();
@@ -977,6 +1037,12 @@ int main(int /*argc*/, char** /*argv*/) {
             }
         }
         avatarSource.compose(grid, width, kAvatarH);
+        // M2.5's direct cell control, stamped over the composed frame and
+        // before it is written to the GPU below. After compose() rather than
+        // inside AvatarSource because a script's cells are not part of what the
+        // avatar *is*: they are an overlay with a lease, they survive no reload
+        // and they cannot corrupt the art.
+        bus.stamp_cells(grid);
 
         // ---- the loading overlay, and the handoff out of it ----
         // With --no-voice there is no session and the snapshot stays Loading,

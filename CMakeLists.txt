@@ -30,6 +30,7 @@ add_library(aii_core STATIC
   src/llm/claude_code_client.cpp
   src/tts/kokoro_tts.cpp
   src/tts/voicevox_tts.cpp
+  src/core/app_bus.cpp
   src/core/button_registry.cpp
   src/core/config.cpp
   src/core/engines.cpp
