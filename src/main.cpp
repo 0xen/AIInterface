@@ -50,6 +50,7 @@
 #include "core/config.h"
 #include "core/engines.h"
 #include "core/prompt_store.h"
+#include "core/schedule.h"
 #include "core/sentence_splitter.h"
 #include "core/speech_queue.h"
 #include "core/worker_pool.h"
@@ -198,9 +199,27 @@ int main(int argc, char** argv) {
     // M3.4: the model may have asked for a prompt itself. It lands on the next
     // turn, not this one — see PromptInjector.
     for (const aii::Command& c : aii::parse_commands(r.text)) {
-      if (c.verb != "load") continue;
-      std::printf("[prompts] load name=%s -> %s\n", c.name.c_str(),
-                  injector.request(c.name) ? "queued" : "refused (not in the store)");
+      if (c.verb == "load") {
+        std::printf("[prompts] load name=%s -> %s\n", c.name.c_str(),
+                    injector.request(c.name) ? "queued" : "refused (not in the store)");
+        continue;
+      }
+      // M2b.3. voiceloop has no frame loop, so it cannot fire a schedule and
+      // deliberately does not create one. It prints what it parsed instead,
+      // which is what makes it the harness for the prompt wording: the thing
+      // under test is whether the model writes a readable `in=` and picks the
+      // right shape, and that is decided here, not at fire time.
+      if (c.verb == "schedule") {
+        double secs = 0.0;
+        const bool ok = aii::parse_delay(c.in, &secs);
+        std::printf("[schedule] parsed in=\"%s\" -> %s | shape=%s | grade=%s | label=\"%s\" "
+                    "| say=\"%s\" | name=%s cwd=\"%s\" task=\"%s\"\n",
+                    c.in.c_str(), ok ? (std::to_string(secs) + "s").c_str() : "UNREADABLE",
+                    c.task.empty() ? "say" : "task",
+                    !c.grade.empty() ? c.grade.c_str() : (c.task.empty() ? "fixed" : "phrased"),
+                    c.label.c_str(), c.say.c_str(), c.name.c_str(), c.cwd.c_str(),
+                    c.task.c_str());
+      }
     }
 
     // Let the reply finish playing, but allow S / SPACE to cut it off.

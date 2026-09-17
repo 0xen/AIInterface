@@ -5,10 +5,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 
 #include "rend/core/log.h"
 
 #include "core/language.h"
+#include "core/schedule.h"
 #include "core/sentence_splitter.h"
 #include "core/text_util.h"
 
@@ -810,6 +812,87 @@ bool VoiceSession::flush_announcements() {
   return true;
 }
 
+namespace {
+
+// M2b.3. Turns one `schedule` line into a pending schedule, or into a sentence
+// the user hears.
+//
+// A refusal here is unlike `button`'s and `load`'s, which are the model's own
+// housekeeping and are logged rather than spoken. A schedule is something the
+// user asked for out loud and is then waiting on, and the model has *already*
+// said "I'll tell you in ten minutes" by the time this runs — a block is the
+// end of a reply. So a refusal that only reached the log would leave the user
+// believing a timer exists, which is precisely the failure the plan names. It
+// is spoken, in the register the user asked for: no ids, no field names, no
+// "schedule refused".
+//
+// Returns an empty string on success, or the sentence to say.
+std::string create_schedule(const Command& c, std::string* detail) {
+  double seconds = 0.0;
+  if (!parse_delay(c.in, &seconds)) {
+    *detail = c.in.empty() ? "no in= given" : ("could not read in=\"" + c.in + "\"");
+    return "Sorry, I have not set that up. I need to know how long, and under a day.";
+  }
+
+  ScheduleAction action;
+  action.label = c.label;
+  // The shape *is* the grade. A line carrying words to say is a fixed report
+  // — instant, no usage, cannot race a live turn. A line carrying work is a
+  // phrased one, because a sentence written ten minutes early cannot report a
+  // result nobody had yet. `grade=` overrides only if something set it
+  // deliberately, which today is the bus (M2b.2), not the model.
+  if (!c.task.empty()) {
+    action.kind = "worker";
+    action.task = c.task;
+    action.name = c.name.empty() ? std::string("task") : c.name;
+    // Captured now and never re-resolved: the deferred worker runs with
+    // permissions bypassed in the folder it was promised, possibly while the
+    // user is away from the desk. Refused rather than defaulted — the process
+    // working directory is almost never the one that was meant, and a worker
+    // that ran there would be a surprise ten minutes after the conversation
+    // that could have caught it.
+    if (c.cwd.empty()) {
+      *detail = "no cwd= on a scheduled worker";
+      return "Sorry, I have not set that up. I need to know which folder to do it in.";
+    }
+    if (!std::filesystem::path(c.cwd).is_absolute()) {
+      *detail = "cwd=\"" + c.cwd + "\" is not an absolute path";
+      return "Sorry, I have not set that up. I need the full path of the folder.";
+    }
+    if (action.label.empty()) action.label = action.name;
+    if (action.report.empty()) action.report = c.say.empty() ? action.label : c.say;
+  } else if (!c.say.empty()) {
+    action.kind = "timer";
+    action.report = c.say;
+    if (action.label.empty()) action.label = c.say;
+  } else {
+    *detail = "neither say= nor task= given";
+    return "Sorry, I have not set that up. I am not sure what you wanted me to do then.";
+  }
+  action.cwd = c.cwd.empty() ? std::filesystem::current_path().string() : c.cwd;
+
+  ReportGrade grade = action.kind == "worker" ? ReportGrade::Phrased : ReportGrade::Fixed;
+  if (!c.grade.empty()) grade = grade_from_string(c.grade);
+
+  std::string err;
+  const std::uint64_t id = ScheduleBook::instance().create(
+      std::chrono::duration<double>(seconds), action, grade, &err);
+  if (id == 0) {
+    *detail = err;
+    // The one refusal the book itself makes is "full" (64 pending). Said
+    // without the number, because the user did not ask for a number.
+    return "Sorry, I have not set that up. I am already keeping track of too many things.";
+  }
+  char buf[160];
+  std::snprintf(buf, sizeof buf, "created id=%llu kind=%s grade=%s in %.1fs",
+                static_cast<unsigned long long>(id), action.kind.c_str(), to_string(grade),
+                seconds);
+  *detail = buf;
+  return {};
+}
+
+}  // namespace
+
 void VoiceSession::run_commands(const std::string& reply_text) {
   for (const Command& c : parse_commands(reply_text)) {
     // M3.4. Not a worker verb, so it is handled before the `workers_` guard
@@ -825,6 +908,15 @@ void VoiceSession::run_commands(const std::string& reply_text) {
     if (c.verb == "load") {
       if (injector_.request(c.name)) log("[prompts] queued " + c.name + " for the next turn");
       else log("[prompts] refused load name=" + c.name + " (no such prompt in the store)");
+      continue;
+    }
+    // M2b.3. Not a worker verb either, so it needs no pool — a scheduled
+    // worker only wants one when it fires, which is M2b.4's problem.
+    if (c.verb == "schedule") {
+      std::string detail;
+      const std::string refusal = create_schedule(c, &detail);
+      log("[schedule] " + std::string(refusal.empty() ? "" : "refused: ") + detail);
+      if (!refusal.empty()) announce(refusal);
       continue;
     }
     if (!workers_) continue;

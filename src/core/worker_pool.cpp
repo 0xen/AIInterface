@@ -280,7 +280,7 @@ std::vector<Command> parse_commands(const std::string& text) {
           const size_t quote = rest.find('"', eq + 2);
           value = rest.substr(eq + 2, quote == std::string::npos ? std::string::npos : quote - eq - 2);
           rest = quote == std::string::npos ? "" : trim(rest.substr(quote + 1));
-        } else if (key == "task" || key == "path") {
+        } else if (key == "task" || key == "path" || key == "say") {
           value = trim(rest.substr(eq + 1));
           rest.clear();
         } else {
@@ -295,6 +295,9 @@ std::vector<Command> parse_commands(const std::string& text) {
         else if (key == "label") c.label = value;
         else if (key == "tip") c.tip = value;
         else if (key == "path") c.path = value;
+        else if (key == "in") c.in = value;
+        else if (key == "say") c.say = value;
+        else if (key == "grade") c.grade = value;
       }
       if (c.verb.empty()) continue;
       // App-owned verbs are applied here and dropped: see the header. A
@@ -306,7 +309,11 @@ std::vector<Command> parse_commands(const std::string& text) {
         ButtonRegistry::instance().add_path_button(c.id, c.label, c.tip, c.path, nullptr);
         continue;
       }
-      if (!c.name.empty()) out.push_back(std::move(c));
+      // The `name` guard is a worker-verb guard: `spawn`, `pause` and `stop`
+      // all address a worker by name and a nameless one is unrunnable. A bare
+      // timer has nothing to name, so `schedule` is let through and validated
+      // by its own handler, which can tell the user *why* it was refused.
+      if (c.verb == "schedule" || !c.name.empty()) out.push_back(std::move(c));
     }
   }
   return out;

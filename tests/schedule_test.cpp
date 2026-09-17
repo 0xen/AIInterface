@@ -363,6 +363,45 @@ int main(int argc, char** argv) {
     std::printf("case 8  shutdown: %zu schedules handed back for reporting\n\n", dropped.size());
   }
 
+  // ---- 9. M2b.3: the delay the model writes, and the block it writes it in -
+  // The prompt asks for `in=10m`, not for seconds, because "in ten minutes" is
+  // what the user said. So the reading of that string is part of the feature
+  // and not a convenience: an `in=` this cannot read is a timer the user
+  // believes exists.
+  {
+    struct { const char* text; double want; } good[] = {
+        {"600", 600.0},   {"90s", 90.0},     {"10m", 600.0},   {"10min", 600.0},
+        {"10 min", 600.0},{"2h", 7200.0},    {"3H", 10800.0},  {"1h30m", 5400.0},
+        {"1m30s", 90.0},  {"0.5m", 30.0},    {"1d", 86400.0},
+    };
+    for (const auto& g : good) {
+      double s = -1.0;
+      const bool ok = parse_delay(g.text, &s);
+      check(ok && std::abs(s - g.want) < 1e-6,
+            std::string("parse_delay(\"") + g.text + "\") == " + std::to_string(g.want));
+    }
+    const char* bad[] = {"", "soon", "ten minutes", "m", "-5m", "0", "0s", "2d", "10x", "1h30"};
+    for (const char* b : bad) {
+      double s = -1.0;
+      // "1h30" is deliberately in this list: a trailing bare number after a
+      // unit is read as seconds, so it parses -- 3630. It is here to record
+      // that, not to assert a refusal.
+      const bool ok = parse_delay(b, &s);
+      if (std::string(b) == "1h30") check(ok && std::abs(s - 3630.0) < 1e-6,
+                                          "\"1h30\" reads as 1h plus 30 seconds");
+      else check(!ok, std::string("parse_delay refuses \"") + b + "\"");
+    }
+    // The block parser itself is deliberately *not* exercised here.
+    // `parse_commands` lives in `worker_pool.cpp`, which drags in
+    // ClaudeCodeClient and ButtonRegistry, and linking those would cost this
+    // target the one property it exists to have: no engine DLLs beside it, so
+    // a timing harness cannot fail for a reason that is not timing. The block
+    // shapes are verified against a live model instead (`voiceloop --say`
+    // prints every `schedule` line it parsed), which is better evidence than
+    // a literal a human typed.
+    std::printf("case 9  M2b.3: every delay string the prompt teaches parses\n\n");
+  }
+
   timeEndPeriod(1);
   std::printf(g_failures == 0 ? "ALL PASS\n" : "%d FAILURES\n", g_failures);
   return g_failures == 0 ? 0 : 1;

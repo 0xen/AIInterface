@@ -95,10 +95,19 @@ const char* worker_state_name(WorkerPool::State s);
 // M1c.2's toolbar buttons are a verb here rather than a second mechanism, and
 // M2.5's bus is specced to reuse the same registry behind it.
 struct Command {
-  std::string verb;  // spawn | pause | stop  (worker verbs, for the session)
+  std::string verb;  // spawn | pause | stop | schedule (for the session)
   std::string name;
   std::string cwd;
   std::string task;
+  // The `schedule` verb's fields (M2b.3). `in` is a spoken-shaped delay
+  // ("10m", "90s") parsed by `aii::parse_delay`; `say` is the exact sentence a
+  // bare timer speaks when it fires. `grade` is normally left empty and
+  // derived from the shape — a line with `say=` is a fixed report, a line with
+  // `task=` is a phrased one — and exists as a key so the bus (M2b.2) can be
+  // explicit where a script has no shape to signal with.
+  std::string in;
+  std::string say;
+  std::string grade;
   // The `button` verb's fields (M1c.2). Kept in the same struct rather than a
   // variant because the block is line-oriented key=value either way and one
   // parser is what makes a new verb a few lines instead of a format.

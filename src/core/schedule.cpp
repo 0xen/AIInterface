@@ -1,6 +1,7 @@
 #include "core/schedule.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace aii {
 namespace {
@@ -13,6 +14,50 @@ void clamp(std::string& s) {
 }
 
 }  // namespace
+
+bool parse_delay(const std::string& text, double* seconds) {
+  // Strip spaces and lowercase, so "10 Min" and "10min" are one case.
+  std::string t;
+  t.reserve(text.size());
+  for (char ch : text) {
+    if (ch == ' ' || ch == '\t') continue;
+    t.push_back(static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch));
+  }
+  if (t.empty()) return false;
+
+  double total = 0.0;
+  bool any = false;
+  size_t i = 0;
+  while (i < t.size()) {
+    // number
+    const size_t num_start = i;
+    while (i < t.size() && ((t[i] >= '0' && t[i] <= '9') || t[i] == '.')) ++i;
+    if (i == num_start) return false;  // a unit with no number, or junk
+    const double value = atof(t.substr(num_start, i - num_start).c_str());
+    // unit: the first letter is enough ("m", "min", "minutes" all agree), and
+    // a bare number is seconds because that is what every other duration in
+    // this codebase is.
+    double mult = 1.0;
+    const size_t unit_start = i;
+    while (i < t.size() && t[i] >= 'a' && t[i] <= 'z') ++i;
+    if (i > unit_start) {
+      switch (t[unit_start]) {
+        case 's': mult = 1.0; break;
+        case 'm': mult = 60.0; break;
+        case 'h': mult = 3600.0; break;
+        case 'd': mult = 86400.0; break;
+        default: return false;
+      }
+    }
+    total += value * mult;
+    any = true;
+  }
+  if (!any) return false;
+  if (!(total > 0.0)) return false;  // also catches NaN
+  if (total > kScheduleMaxDelaySeconds) return false;
+  if (seconds) *seconds = total;
+  return true;
+}
 
 const char* to_string(ReportGrade grade) {
   return grade == ReportGrade::Phrased ? "phrased" : "fixed";

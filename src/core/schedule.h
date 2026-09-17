@@ -102,6 +102,21 @@ enum class ReportGrade {
   Phrased,  // inject a turn and let Claude say it in its own words (M2b.4)
 };
 
+// M2b.3. Parses a delay written the way a person says one, which is how the
+// ```aii``` block asks the model to write it: a number with an optional unit
+// suffix -- "90s", "10m", "2h", "10min", or a bare number read as seconds --
+// and the two-part forms "1h30m" and "1m30s". Case-insensitive; internal
+// spaces are ignored. Returns false and leaves `*seconds` untouched for
+// anything it cannot read, for a delay of zero or less, and for one longer
+// than `kScheduleMaxDelaySeconds`.
+//
+// The cap is not tidiness. A schedule lives only as long as the session, and
+// the plan is explicit that the AI must not promise one it cannot keep — so
+// past a day the promise is itself the failure, and a refusal the user hears
+// beats a timer they are still waiting for tomorrow.
+constexpr double kScheduleMaxDelaySeconds = 24.0 * 60.0 * 60.0;
+bool parse_delay(const std::string& text, double* seconds);
+
 const char* to_string(ReportGrade grade);
 // Parses "fixed"/"phrased"; anything else is `Fixed`, because a bare timer is
 // the cheap, unspendable answer and an unparseable grade must not silently
