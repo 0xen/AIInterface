@@ -38,7 +38,10 @@
 //     --schedule  create a one-shot timer S seconds from startup (M2b.1),
 //                 repeatable, `S` or `S:label`; the fire is logged with the
 //                 thread it arrived on and how late it was
-//     --script    run this Python file (M2.6), repeatable, ahead of the user's
+//     --schedule-report  the same at the Phrased grade (M2b.4): `S:<what
+//                 happened>`, which is injected as a turn and reported in
+//                 Claude's own words rather than spoken verbatim
+//     --script   run this Python file (M2.6), repeatable, ahead of the user's
 //                 own. The viewer's flag, and for the same use: a harness has
 //                 to be up before a script that never returns starts. With no
 //                 --script and an empty %APPDATA%\AIInterface\scripts, no
@@ -276,6 +279,9 @@ int main(int /*argc*/, char** /*argv*/) {
     bool scriptsEnabled = true;
     // M2b.1.
     std::vector<std::string> scheduleArgs;
+    std::vector<std::string> schedulePhrasedArgs;
+    std::vector<std::string> scheduleWorkerArgs;
+    bool micLatch = false;
     // The message field's own escape hatch, and the reason this bug survived
     // three rounds of testing. Everything the panel draws could be put on
     // screen from the command line except the one thing the user actually
@@ -330,6 +336,29 @@ int main(int /*argc*/, char** /*argv*/) {
             // of the *real* app and not only of a harness.
             else if (a == L"--schedule" && i + 1 < wargc)
                 scheduleArgs.push_back(utf8FromWide(wargv[++i]));
+            // M2b.4. `--schedule-report S:<what happened>`: the same, at the
+            // Phrased grade. It exists for the same reason --schedule does —
+            // the only other door to the phrased path is a live turn that then
+            // has to run a real worker for minutes, which makes the one thing
+            // here that is a race (taking the floor for an injected turn)
+            // unrepeatable. Everything after the first colon is the text, so a
+            // Windows path inside it is safe.
+            else if (a == L"--schedule-report" && i + 1 < wargc)
+                schedulePhrasedArgs.push_back(utf8FromWide(wargv[++i]));
+            // M2b.4. `--schedule-worker S|name|cwd|task`: a deferred worker
+            // without a live turn to create it. Pipe-separated because a cwd
+            // has a colon in it on this platform. The case it exists for is
+            // the one that cannot be arranged any other way — a deferred
+            // worker whose spawn *fails*, ten minutes after the user was
+            // promised it, which is the failure this milestone had to decide
+            // the wording for.
+            else if (a == L"--schedule-worker" && i + 1 < wargc)
+                scheduleWorkerArgs.push_back(utf8FromWide(wargv[++i]));
+            // M2b.4. Latch the microphone on as soon as the session is idle,
+            // as a short Talk click does. The harness cannot hold a button,
+            // and "a schedule fires with the microphone open" is one of the
+            // two interleavings this task had to get right.
+            else if (a == L"--mic-latch") micLatch = true;
             else if (a == L"--message" && i + 1 < wargc)
                 messageArg = utf8FromWide(wargv[++i]);
         }
@@ -793,6 +822,53 @@ int main(int /*argc*/, char** /*argv*/) {
             log::info("[schedule] created id={} kind=timer in {:.3f}s grade=fixed label=\"{}\"", id,
                       secs, action.label);
     }
+    for (const std::string& spec : schedulePhrasedArgs) {
+        const std::size_t colon = spec.find(':');
+        const double secs = atof(spec.substr(0, colon).c_str());
+        aii::ScheduleAction action;
+        action.kind = "timer";
+        action.report = colon == std::string::npos ? std::string("that thing you asked about")
+                                                   : spec.substr(colon + 1);
+        action.label = action.report;
+        action.cwd = std::filesystem::current_path().string();
+        std::string err;
+        const std::uint64_t id = aii::ScheduleBook::instance().create(
+            std::chrono::duration<double>(secs), action, aii::ReportGrade::Phrased, &err);
+        if (id == 0)
+            log::warn("[schedule] refused: {}", err);
+        else
+            log::info("[schedule] created id={} kind=timer in {:.3f}s grade=phrased report=\"{}\"",
+                      id, secs, action.report);
+    }
+    for (const std::string& spec : scheduleWorkerArgs) {
+        std::vector<std::string> f;
+        for (std::size_t b = 0;;) {
+            const std::size_t p = spec.find('|', b);
+            f.push_back(spec.substr(b, p == std::string::npos ? p : p - b));
+            if (p == std::string::npos) break;
+            b = p + 1;
+        }
+        if (f.size() < 4) {
+            log::warn("[schedule] --schedule-worker wants S|name|cwd|task");
+            continue;
+        }
+        aii::ScheduleAction action;
+        action.kind = "worker";
+        action.name = f[1];
+        action.cwd = f[2];
+        action.task = f[3];
+        action.label = f[1];
+        action.report = f[1];
+        std::string err;
+        const std::uint64_t id = aii::ScheduleBook::instance().create(
+            std::chrono::duration<double>(atof(f[0].c_str())), action, aii::ReportGrade::Phrased,
+            &err);
+        if (id == 0)
+            log::warn("[schedule] refused: {}", err);
+        else
+            log::info("[schedule] created id={} kind=worker in {}s grade=phrased name={} cwd=\"{}\"",
+                      id, f[0], f[1], f[2]);
+    }
     double lastT = 0.0;
     std::uint32_t windowH = kWindowH;  // what the OS window was last set to
     // Resizing the window from inside the frame does not come back as a
@@ -1057,6 +1133,13 @@ int main(int /*argc*/, char** /*argv*/) {
                 saidOnce = true;
                 session->say(sayText);
             }
+            // M2b.4's harness: the same call a short Talk click makes, once,
+            // as soon as there is a session to make it on.
+            if (micLatch && snap.state == aii::VoiceSession::State::Idle && !session->mic_open()) {
+                micLatch = false;
+                session->toggle_mic();
+                log::info("[harness] microphone latched");
+            }
         }
 
         // The settings debounce runs on the same frame clock. A failed write
@@ -1087,10 +1170,13 @@ int main(int /*argc*/, char** /*argv*/) {
         // would add a join, a kernel object and a cancel/callback race and buy
         // no promptness the loop does not already have at 60 Hz.
         //
-        // M2b.4 replaces the log line below with the two report grades (a fixed
-        // line through announce(), an injected turn for the phrased one) and
-        // M2b.2/M2b.3 add the doors that create these. The delivery point does
-        // not move when they do.
+        // M2b.4: the fired schedule is handed to the session, which is what
+        // owns the floor — announce()'s queue for a fixed line, an injected
+        // turn for a phrased one, and neither ever speaks from here. The log
+        // line stays: it is the evidence that a schedule fired *on this
+        // thread*, which is the property the whole design rests on, and a
+        // report that is correctly waiting for a gap looks exactly like one
+        // that never arrived without it.
         {
             const auto fireNow = std::chrono::steady_clock::now();
             for (const aii::Schedule& s : aii::ScheduleBook::instance().tick(fireNow)) {
@@ -1101,6 +1187,8 @@ int main(int /*argc*/, char** /*argv*/) {
                     s.id, s.action.kind, aii::to_string(s.grade),
                     std::chrono::duration<double, std::milli>(fireNow - s.due).count(),
                     onLoop ? "yes" : "NO", s.action.cwd, s.action.report);
+                if (session) session->deliver_schedule(s);
+                else log::warn("[schedule] no voice session: nothing to report through");
             }
             for (const std::string& note : aii::ScheduleBook::instance().take_status())
                 log::warn("[schedule] {}", note);
@@ -1449,12 +1537,14 @@ int main(int /*argc*/, char** /*argv*/) {
     // must not vanish *silently*, which the plan calls out as a thing to
     // design rather than accept. The book hands back exactly what is being
     // dropped, with enough of each payload to describe it. Today that is a log
-    // line; M2b.3/M2b.4 own the wording that reaches the user, and this is what
-    // it will read.
+    // line; M2b.4 adds one transcript line beside it and deliberately no
+    // speech — see VoiceSession::drop_schedules() for why speaking here is
+    // impossible rather than merely unwanted.
     {
         const auto dropped = aii::ScheduleBook::instance().take_pending();
         if (!dropped.empty()) {
             const auto now = std::chrono::steady_clock::now();
+            if (session) session->drop_schedules(dropped);
             log::warn("[schedule] {} pending schedule{} dropped at shutdown (not persistent):",
                       dropped.size(), dropped.size() == 1 ? "" : "s");
             for (const aii::Schedule& s : dropped)

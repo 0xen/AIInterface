@@ -245,8 +245,28 @@ void VoiceSession::load() {
   speech_ = std::make_unique<SpeechQueue>(eng_.kokoro.get(), eng_.voicevox.get(), speaker_.get());
   speech_->set_on_status([this](const std::string& s) { log("[tts] " + s); });
   workers_ = std::make_unique<WorkerPool>(cfg_.claude_exe, cfg_.worker_bypass);
-  workers_->set_on_report([this](const std::string&, WorkerPool::State, const std::string& shown,
-                                 const std::string& spoken) { announce(shown, spoken); });
+  workers_->set_on_report([this](const std::string& name, WorkerPool::State state,
+                                 const std::string& shown, const std::string& spoken) {
+    // M2b.4. A worker the user started in conversation reports the way 517c241
+    // settled: its sentence is spoken as it stands, with the name shown and
+    // not heard.
+    //
+    // A worker a *schedule* started does not, and the difference is the whole
+    // of the Phrased grade. The user asked for this ten minutes ago and may
+    // have asked in Japanese; the worker's task and its closing sentence are
+    // English, because that is what the model wrote for a fresh instance to
+    // carry out. Speaking that sentence would answer a Japanese request in
+    // English. So the transcript gets it verbatim — that part was already
+    // right — and the *voice* gets nothing yet: the sentence goes to the
+    // conversational instance instead, which is holding this conversation in
+    // whatever language it is being held in, and it says what happened.
+    if (!take_scheduled_worker(name)) {
+      announce(shown, spoken);
+      return;
+    }
+    announce(shown, "");
+    queue_injected_turn(scheduled_report_prompt(state, shown));
+  });
   // M3.3. The same store the system prompt was composed from, read a second
   // time for its lazy half. Cheap (a few small files), and it keeps the
   // injector honest about *when* it sees the store: the global prompts left
@@ -339,7 +359,13 @@ void VoiceSession::update() {
         // hold: the user has a button down, and taking the microphone out from
         // under them would end the dictation they are in the middle of. The
         // report waits the second or two the gesture lasts.
-        flush_announcements();
+        //
+        // M2b.4: a scheduled report takes the same gap and under the same
+        // three conditions, because the risk it runs is the same one — the
+        // app's voice arriving in a room with the microphone listening. The
+        // canned line goes first when both are waiting: it is instant and
+        // already written, where a turn spends seconds and usage.
+        if (!flush_announcements()) flush_injected_turns();
       }
     }
   } else if (s == State::Speaking) {
@@ -372,7 +398,12 @@ void VoiceSession::update() {
     // Anything a worker reported goes out before the mic reopens; otherwise
     // begin_listening() would put us back to listening with the report still
     // queued, and it would be spoken into an open microphone.
-    if (!flush_announcements() && mic_open_) {
+    // M2b.4 adds the injected turn to the same chain, and its position in the
+    // chain is the design: an announcement first (instant, already written),
+    // a scheduled report next, and only then the microphone. Reopening the mic
+    // before either would put the app's own voice into an open microphone,
+    // which is the defect announce() exists to avoid.
+    if (!flush_announcements() && !flush_injected_turns() && mic_open_) {
       // Still unmuted after a reply finished: reopen the mic for the next
       // turn. It stays shut while Claude speaks, so the speakers are never
       // transcribed back in as the user.
@@ -683,13 +714,40 @@ void VoiceSession::start_turn(std::string text) {
   const unsigned gen = ++turn_generation_;
   turn_running_ = true;
   turn_ = std::thread([this, text = std::move(text), gen] {
-    run_turn(text);
+    run_turn(text, false);
     (void)gen;
     turn_running_ = false;
   });
 }
 
-void VoiceSession::run_turn(std::string text) {
+void VoiceSession::start_injected_turn(std::string sent) {
+  // No user line: nobody said this. The transcript already carries what the
+  // worker reported (announce(shown, "") put it there the moment it arrived),
+  // so the only thing missing from the record is Claude's answer, and that is
+  // the empty line below filling up. A `{true, ...}` line here would put words
+  // in the user's mouth that they never spoke.
+  //
+  // Deliberately **not** cancelling a turn in flight, which is the one thing
+  // start_turn() does that this must not: the caller has already established
+  // that the floor is free, and a report ten minutes late must never be the
+  // reason a live reply is cut off.
+  if (turn_.joinable()) turn_.join();
+  cancel_ = false;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    lines_.push_back({false, ""});
+    if (lines_.size() > kMaxLines) lines_.erase(lines_.begin(), lines_.begin() + (lines_.size() - kMaxLines));
+    set_state_locked(State::Thinking);
+    status_ = "thinking...";
+  }
+  turn_running_ = true;
+  turn_ = std::thread([this, sent = std::move(sent)] {
+    run_turn(sent, true);
+    turn_running_ = false;
+  });
+}
+
+void VoiceSession::run_turn(std::string text, bool is_injected) {
   speech_->mark_new_reply();
   // The one place a reply becomes sound, and therefore the only place mute can
   // honestly be applied. Clearing the queue alone (what silence() used to do)
@@ -706,6 +764,10 @@ void VoiceSession::run_turn(std::string text) {
       rend::log::trace("mute: dropped {} chars of speech", s.size());
       return;
     }
+    // Same record as flush_announcements()' — a reply's chunks as the splitter
+    // hands them over, which for an injected turn is the only place the AI's
+    // own words for a scheduled report can be read back.
+    rend::log::info("[speak] {}", s);
     speech_->enqueue(s);
   }, cfg_.early_words);
   bool first = true;
@@ -743,6 +805,7 @@ void VoiceSession::run_turn(std::string text) {
   if (cancel_) return;  // the caller already moved the state on
   splitter.flush();
   const std::string usage = eng_.llm->status_line();
+  bool injected_turn_failed = false;
   {
     std::lock_guard<std::mutex> l(mutex_);
     if (!usage.empty()) usage_ = usage;
@@ -753,11 +816,28 @@ void VoiceSession::run_turn(std::string text) {
       status_ = "error: " + r.error;
       set_state_locked(State::Idle);
       ++turn_failed_seq_;
-      return;
+      // M2b.4. A failed *user* turn is visible — they are at the keyboard,
+      // they just spoke, the status line says error. A failed **injected**
+      // turn is silence where a report was promised ten minutes ago, with
+      // nobody at the desk to see the status line, and silence is this app's
+      // worst failure. So the promise is kept with a canned line instead.
+      injected_turn_failed = is_injected;
+    } else {
+      set_state_locked(State::Speaking);  // update() returns to Idle once the audio drains
+      status_ = "speaking...";
     }
-    set_state_locked(State::Speaking);  // update() returns to Idle once the audio drains
-    status_ = "speaking...";
   }
+  if (injected_turn_failed) {
+    // Says nothing about what failed, on purpose: the user is being told that
+    // a promise was not kept, and a client error string is jargon they cannot
+    // act on. The status line and the log have the reason. Named nothing —
+    // no worker, no folder, no error code — the same rule the worker report
+    // and every other canned line in this app follow.
+    log("[schedule] the report turn failed: " + r.error);
+    announce("Something I set aside for you has finished, but I could not tell you how it went.");
+    return;
+  }
+  if (!r.ok) return;
   // Worker commands ride in a fenced block, which is shown but never spoken.
   run_commands(r.text);
 }
@@ -792,6 +872,12 @@ bool VoiceSession::flush_announcements() {
     // returning true here would shut the microphone and push the state to
     // Speaking for a reply that is never going to make a sound.
     if (muted_) {
+      // Traced for the same reason the splitter's drop is: "the app said
+      // nothing" and "the app was muted" look identical from outside, and a
+      // fired schedule that is never heard because mute was left on is
+      // otherwise indistinguishable from a timer that never fired at all.
+      rend::log::info("[mute] {} report(s) shown in the chat but not spoken",
+                      pending_announce_.size());
       pending_announce_.clear();
       return false;
     }
@@ -808,8 +894,227 @@ bool VoiceSession::flush_announcements() {
   mic_->drain(chunk_);
   chunk_.clear();
   speech_->mark_new_reply();
-  for (const std::string& s : say_now) speech_->enqueue(s);
+  for (const std::string& s : say_now) {
+    // The one record of what the app's own voice actually said. HANDOFF lists
+    // "the avatar logs no spoken text" as a harness blindness, and it is the
+    // reason a scheduled report cannot otherwise be verified at all: the
+    // transcript shows the *shown* string, which is deliberately not the
+    // spoken one, and a screenshot of a Japanese sentence cannot say which
+    // voice read it. Info rather than trace, so a scripted run captures it.
+    rend::log::info("[speak] {}", s);
+    speech_->enqueue(s);
+  }
   return true;
+}
+
+// ---------------------------------------------------------------- M2b.4
+//
+// ## Floor-taking, which is the hard part of this task and not the plumbing
+//
+// Four things can be happening when a schedule comes due, and the loop checks
+// a sorted list every frame, so all four are ordinary rather than exotic:
+//
+//   * **Claude is mid-reply.** Neither grade may make a sound. The canned one
+//     goes through announce(), which never speaks from the call — it queues,
+//     and flush_announcements() is reached only from Idle or from a verified
+//     gap in Listening, so Thinking and Speaking simply are not flush points.
+//     The phrased one queues here and start_injected_turn() refuses to run
+//     while `turn_running_`; it also, unlike start_turn(), never sets
+//     `cancel_`, so a report ten minutes late can never be the reason a live
+//     reply is truncated.
+//   * **The microphone is open.** Same two queues, and the Listening flush
+//     point already carries the three conditions this needs: nothing said this
+//     utterance, the room quiet for kAnnounceGapSec, and no Talk button held.
+//     Both flushes then close the microphone before making a sound — the
+//     phrased one through start_injected_turn()'s caller here, for exactly the
+//     reason written on announce().
+//   * **Another schedule is firing on the same frame.** main.cpp calls
+//     deliver_schedule() once per fired schedule and both land in a queue, so
+//     two canned lines are spoken in one floor-take, in due order, and two
+//     phrased ones run as consecutive turns. Nothing races, because neither
+//     queue is drained anywhere but the frame loop.
+//   * **The user has muted.** Handled where mute is already handled, and
+//     deliberately not specially: flush_announcements() drops the spoken copy
+//     and the transcript keeps the line announce() wrote at fire time. So a
+//     fired schedule still *lands*, in the chat, which is the answer to a
+//     promise that cannot be kept aloud. See deliver_schedule() for the one
+//     case where mute changes what is worth spending.
+//
+// The ordering between the two queues is also a decision: announcements are
+// flushed first everywhere. A canned line is already written and costs
+// nothing, where a turn costs seconds and subscription usage, so the thing
+// that can be said now is said now.
+
+void VoiceSession::queue_injected_turn(std::string sent) {
+  if (sent.empty()) return;
+  std::lock_guard<std::mutex> l(mutex_);
+  pending_turns_.push_back(std::move(sent));
+}
+
+bool VoiceSession::flush_injected_turns() {
+  // Not while a turn is running. This is checked outside the lock and then
+  // again by the queue being drained on this one thread: `turn_running_` is
+  // only ever cleared by the turn thread itself and only ever set here and in
+  // start_turn(), which is also frame loop only.
+  if (turn_running_) return false;
+  std::string sent;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    if (pending_turns_.empty()) return false;
+    // One at a time. Two reports that came due together are two turns, not one
+    // turn describing both: the second is started from the Idle the first one
+    // returns to, so the user hears them as two things because they were two
+    // things.
+    sent = std::move(pending_turns_.front());
+    pending_turns_.erase(pending_turns_.begin());
+    partial_.clear();
+  }
+  // The microphone closes before the turn starts, not when the reply begins
+  // to arrive. A turn takes a few seconds to say anything, and a microphone
+  // left open across that gap is one that hears the room, decodes it as the
+  // user and sends it — which is the same defect announce() was written to
+  // avoid, just with a longer fuse.
+  mic_->stop();
+  chunk_.clear();
+  mic_->drain(chunk_);
+  chunk_.clear();
+  speech_->clear();
+  log("[schedule] reporting back through Claude");
+  start_injected_turn(std::move(sent));
+  return true;
+}
+
+bool VoiceSession::take_scheduled_worker(const std::string& name) {
+  std::lock_guard<std::mutex> l(mutex_);
+  for (auto it = scheduled_workers_.begin(); it != scheduled_workers_.end(); ++it) {
+    if (*it == name) {
+      scheduled_workers_.erase(it);
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string VoiceSession::scheduled_report_prompt(WorkerPool::State state,
+                                                  const std::string& shown) {
+  // Machine traffic, in the same wrapper PromptInjector and the language
+  // directive use, so from the model's side this is a kind of message it
+  // already knows how to read.
+  //
+  // What it must not do is decide the wording. The user's rules about how the
+  // app sounds — short, heard and not read, no jargon — reach the
+  // conversational instance through the composed prompt already, and the whole
+  // reason this is a turn rather than a string is that the model applies them,
+  // in the language the conversation is being held in, to a result nobody had
+  // when the schedule was created.
+  const bool failed = state == WorkerPool::State::Failed;
+  std::string body =
+      "Something the user asked you to do later has just finished. They are not "
+      "waiting at the keyboard and they have not said anything; this is the app "
+      "telling you the outcome so that you can tell them.\n\n"
+      "What came back:\n";
+  body += shown;
+  body += "\n\n";
+  body += failed ? "It did not succeed. Say so plainly, in one short sentence, and say what "
+                   "little is worth saying about why.\n"
+                 : "Tell them how it went, in one or two short sentences.\n";
+  body +=
+      "Speak as if picking the conversation back up after a gap, because that is what this "
+      "is. Do not mention this message, the app, the worker, its name, or any file path.";
+  return "<context name=\"Deferred task\" kind=\"report\">\n" + body + "\n</context>\n\n" +
+         "Tell me how that went.";
+}
+
+void VoiceSession::deliver_schedule(const Schedule& s) {
+  const ScheduleAction& a = s.action;
+  // A kind that carries work. Starting it takes no floor at all — a worker is
+  // its own process — so this happens the moment it comes due even if Claude
+  // is mid-reply or the user is mid-sentence. Only the *report* has to wait,
+  // and that is what the queues above are for.
+  if (a.kind == "worker") {
+    std::string err;
+    const std::string name = a.name.empty() ? std::string("task") : a.name;
+    // `cwd` exactly as it was captured at creation and never re-resolved: a
+    // deferred worker runs with permissions bypassed, ten minutes after the
+    // conversation that could have caught a wrong folder, quite possibly with
+    // nobody at the desk. The directory it was promised is the only safe one.
+    if (workers_ && workers_->spawn(name, a.cwd, a.task, &err)) {
+      log("[schedule] started deferred worker " + name + " in " + a.cwd);
+      // Fixed on a worker is reachable only through the bus (M2b.2), which can
+      // set `grade=` where the model cannot. It means "do the work, report it
+      // the ordinary way", so the worker is simply not registered here and
+      // 517c241's canned sentence is what comes back.
+      if (s.grade == ReportGrade::Phrased) {
+        std::lock_guard<std::mutex> l(mutex_);
+        scheduled_workers_.push_back(name);
+      }
+      return;
+    }
+    // **The promise is now broken and the user is owed a sentence.** Ten
+    // minutes ago they were told this would happen; the worst outcome here is
+    // silence, so this is canned and immediate rather than another turn that
+    // could fail the same way. It names nothing — not the worker, not the
+    // folder, not the reason, which is a CLI error string and is jargon. The
+    // transcript line and the log carry all three.
+    log("[schedule] deferred worker " + name + " in " + a.cwd + " could not start: " + err);
+    // The reason stays in the log and out of the chat on purpose: a spawn
+    // failure's `error` is the whole command line, system prompt included, and
+    // a transcript is a place the user reads, not a place to dump 900
+    // characters of argv. What the chat needs is which one and where.
+    announce("Scheduled worker " + name + " could not start in " + a.cwd + ".",
+             "I could not start the thing I put aside for you, and it has not run.");
+    return;
+  }
+
+  // A bare timer. `report` is a finished spoken sentence, written at creation
+  // by the model, **in the user's own language** — a Japanese request produces
+  // a Japanese say=. So it is spoken exactly as it stands: a prefix here would
+  // be an English word in front of a Japanese sentence, and a decoration would
+  // be the app talking over the words the user was promised.
+  std::string report = a.report.empty() ? a.label : a.report;
+  if (report.empty()) report = "That is the time you asked me to tell you about.";
+  if (s.grade == ReportGrade::Fixed) {
+    announce(report, report);
+    return;
+  }
+  // Phrased with no work to do: the bus again, or a schedule that wants the
+  // AI's own words about something it already knows. Same floor rules.
+  queue_injected_turn("<context name=\"Reminder\" kind=\"report\">\n"
+                      "A reminder the user set earlier has just come due. What they asked to be "
+                      "reminded of:\n" + report +
+                      "\nTell them, in one short sentence, in the language you have been "
+                      "speaking. Do not mention this message or the app.\n</context>\n\n"
+                      "It is time.");
+}
+
+void VoiceSession::drop_schedules(const std::vector<Schedule>& dropped) {
+  if (dropped.empty()) return;
+  // **One line, and it is not spoken — which is a fact here, not a policy.**
+  // This runs during teardown: the frame loop has stopped, so nothing will
+  // ever call flush_announcements() again, and the speech queue and its audio
+  // device are being pulled down in the next few statements. A sentence per
+  // dropped schedule would be a sentence per schedule that nobody can hear.
+  //
+  // The honest place for this promise is therefore *before* it is broken, and
+  // M2b.3 already put it there: the prompt makes the model say the lifetime
+  // out loud when it accepts ("as long as this is still running"), and
+  // parse_delay() refuses anything past a day outright, because past a day the
+  // promise is itself the failure. This is the record that it was broken, for
+  // the chat and the log, and it names what is being dropped because a shown
+  // form may.
+  std::string shown = "Closing with " + std::to_string(dropped.size()) +
+                      (dropped.size() == 1 ? " thing" : " things") + " still to do: ";
+  for (size_t i = 0; i < dropped.size(); ++i) {
+    const std::string& label = dropped[i].action.label.empty() ? dropped[i].action.name
+                                                               : dropped[i].action.label;
+    shown += (i ? "; " : "") + (label.empty() ? std::string("(unnamed)") : label);
+  }
+  shown += ".";
+  // The log as well as the transcript, and the log is the half that survives:
+  // the window is a second from being torn down, so the chat line is real but
+  // nobody will read it. main.cpp keeps the per-schedule detail beside this.
+  log("[schedule] " + shown);
+  announce(shown, "");
 }
 
 namespace {

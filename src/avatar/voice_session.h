@@ -17,6 +17,7 @@
 #include "core/engines.h"
 #include "core/language.h"
 #include "core/prompt_store.h"
+#include "core/schedule.h"
 #include "core/speech_queue.h"
 #include "core/worker_pool.h"
 #include "llm/llm_client.h"
@@ -149,6 +150,19 @@ class VoiceSession {
   void say(const std::string& text);   // send typed/scripted text as the user turn
   bool quitting_ok() const;            // true once no worker is mid-turn
 
+  // M2b.4. A schedule that has come due. Called from the frame loop's tick
+  // point in main.cpp, once per fired schedule, and it **never speaks from
+  // here** — see the comment on the definition. `Fixed` queues the sentence
+  // the schedule was created with; `Phrased` starts the work and arranges for
+  // the conversational instance to describe the outcome in its own words.
+  void deliver_schedule(const Schedule& s);
+  // M2b.4. What the app says about schedules it is dropping at shutdown.
+  // **One line for all of them**, not one per schedule: this runs during
+  // teardown, where the frame loop has already stopped and nothing can be
+  // spoken at all. See the definition for why that is a fact rather than a
+  // policy, and where the honest place for this promise actually is.
+  void drop_schedules(const std::vector<Schedule>& dropped);
+
   Snapshot snapshot() const;
   static const char* state_name(State s);
 
@@ -190,7 +204,13 @@ class VoiceSession {
   // message field instead of a turn (M1b.3).
   void end_listening_unsent();
   void start_turn(std::string text);
-  void run_turn(std::string text);
+  // M2b.4. A turn nobody typed: the app telling Claude that something it
+  // deferred has finished, so the report comes back in the AI's own words and
+  // in the language this conversation is being held in. Same client, same
+  // session id, so it is the same conversation rather than a fresh one.
+  // Frame loop only, and only with the floor already taken.
+  void start_injected_turn(std::string sent);
+  void run_turn(std::string text, bool is_injected);
   void run_commands(const std::string& reply_text);
   // Speak a line from the app itself (worker reports) and show it.
   void announce(const std::string& text);
@@ -200,6 +220,18 @@ class VoiceSession {
   // Speaks anything announce() left queued, closing the microphone first.
   // True if it took the floor. Frame loop only.
   bool flush_announcements();
+  // M2b.4. The same, for a report that wants Claude's own words: starts one
+  // queued injected turn if the floor is genuinely free. True if it took it.
+  // Frame loop only, and deliberately tried *after* flush_announcements(), so
+  // a canned line already waiting is heard before a turn is spent.
+  bool flush_injected_turns();
+  // M2b.4. Queue one report for the conversational instance. Any thread — a
+  // worker thread is where a scheduled worker's report arrives.
+  void queue_injected_turn(std::string sent);
+  // M2b.4. True if `name` was a worker a schedule started, and forgets it.
+  bool take_scheduled_worker(const std::string& name);
+  // M2b.4. The text handed to Claude when a scheduled worker finishes.
+  static std::string scheduled_report_prompt(WorkerPool::State state, const std::string& shown);
   void set_state(State s);
   // The same, for callers that already hold mutex_ because they are publishing
   // a state change together with the text that goes with it. Both overloads
@@ -283,6 +315,17 @@ class VoiceSession {
   std::vector<Line> lines_;
   // Worker reports waiting for a gap in which to be spoken.
   std::vector<std::string> pending_announce_;
+  // M2b.4. Reports waiting for a gap in which a *turn* can be run. One string
+  // each: the text handed to the conversational instance. Kept separate from
+  // pending_announce_ because the two cost different things and take the floor
+  // differently — an announcement is instant, a turn spends usage and seconds.
+  std::vector<std::string> pending_turns_;
+  // M2b.4. Workers this session started *from a schedule*, by name. Their
+  // completion is reported by an injected turn instead of the canned sentence
+  // a live worker gets, which is what makes a Japanese conversation hear
+  // Japanese even though the worker's own task and reply were English. Erased
+  // when it reports, so a later worker reusing the name is a live one again.
+  std::vector<std::string> scheduled_workers_;
   std::vector<float> chunk_;
 };
 
