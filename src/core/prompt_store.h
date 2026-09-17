@@ -113,4 +113,69 @@ class PromptStore {
 // is built on.
 const std::string& system_prompt();
 
+// M3.3 / M3.4: the lazy half of the store.
+//
+// `global` prompts are composed into the system prompt at launch. `project` and
+// `skill` prompts are not — they are injected into **one user turn**, the first
+// turn that mentions them, and never sent again for the life of the session.
+//
+// **Why the user turn and not the system prompt.** The system prompt is a
+// launch argument: the CLI receives it once, when the child process is created,
+// and prompt caching is keyed on it being byte-stable. Appending a project
+// prompt to it mid-session would therefore mean killing the child, restarting
+// it and throwing the cache away — for a paragraph of text. Prepending a
+// `<context>` block to the next user message costs one turn's worth of tokens,
+// once, and the model treats it exactly the same.
+//
+// **Why substrings and not word boundaries.** Prompt bodies here are English,
+// but the transcript is not. The user may name an English project inside a
+// Japanese sentence, and Japanese is written without spaces, so there is no
+// word boundary to anchor to — `「プロスパーのビルドを…」` has no break either
+// side of the name. Matching is therefore a case-insensitive substring search
+// over the raw UTF-8, and a node may carry katakana aliases beside its English
+// name. The cost of that choice is false positives from very short triggers, so
+// a trigger has to be at least three characters when it is pure ASCII (two
+// otherwise, since a two-character Japanese word is a real word and a
+// two-letter English one usually is not).
+class PromptInjector {
+ public:
+  // Collect every `project`/`skill` node in the store. Nodes are taken by
+  // `kind`, not by which graph they sit in, so the grouping M6 chooses later
+  // cannot silently change what is injectable.
+  void reset(const PromptStore& store);
+
+  // What the model is actually sent for this turn: `user_text` with a
+  // `<context …>` block prepended for each prompt this turn newly pulls in.
+  // Mutates the loaded set, so call it exactly once per turn, on the thread
+  // that runs the turn.
+  std::string decorate(const std::string& user_text);
+
+  // M3.4's `load name=`. Queues a prompt for the next `decorate()`.
+  //
+  // **This is the model's own channel into the app, so it resolves by name in
+  // the store and does nothing else.** `name` is matched against node ids,
+  // titles and triggers; anything that does not resolve is refused. It is
+  // never a path and never a body — a `load` line cannot name a file, read one,
+  // or introduce a byte of text the store does not already contain.
+  bool request(const std::string& name);
+
+  bool is_loaded(const std::string& id) const;
+  // Ids in the order they were injected; M5's inspector wants this.
+  std::vector<std::string> loaded() const { return loaded_; }
+  // Forget everything: M3.6 restarts the child, and a fresh session has a
+  // fresh context window, so the loaded set has to go with it.
+  void clear_session() { loaded_.clear(); pending_.clear(); }
+
+ private:
+  struct Lazy {
+    std::string id, title, kind, body;
+    std::vector<std::string> match;  // lowercased id + title + triggers
+  };
+  const Lazy* resolve(const std::string& name) const;
+
+  std::vector<Lazy> lazy_;
+  std::vector<std::string> loaded_;
+  std::vector<std::string> pending_;  // ids queued by `load name=`
+};
+
 }  // namespace aii

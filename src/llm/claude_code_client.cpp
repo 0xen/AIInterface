@@ -87,6 +87,10 @@ bool ClaudeCodeClient::start(std::string* error) {
   if (!opt_.tools) cmd += " --tools \"\"";
   if (opt_.tools && opt_.bypass_permissions) cmd += " --permission-mode bypassPermissions";
   if (!opt_.system_prompt.empty()) cmd += " --system-prompt " + quote_arg(opt_.system_prompt);
+  // See Options::suppress_cli_context. Two flags because they suppress two
+  // different things: --safe-mode takes the project CLAUDE.md and the user's
+  // own auto-memory, --disable-slash-commands takes the skills.
+  if (opt_.suppress_cli_context) cmd += " --safe-mode --disable-slash-commands";
   std::wstring wcmd = widen(cmd);
 
   STARTUPINFOW si{};

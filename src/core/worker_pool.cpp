@@ -83,6 +83,10 @@ bool WorkerPool::spawn(const std::string& name, const std::string& cwd, const st
   o.tools = true;
   o.cwd = cwd;
   o.bypass_permissions = bypass_;  // nothing here can answer a permission prompt
+  // Deliberately NOT suppress_cli_context (M3.5): a worker is a coding agent
+  // running inside a repo the user pointed it at, so that repo's `CLAUDE.md`,
+  // their skills, MCP servers, hooks, plugins and custom agents are all
+  // capability it should have. Only the conversational instance is stripped.
   w->client = std::make_unique<ClaudeCodeClient>(o);
   if (!w->client->start(error)) return false;
 

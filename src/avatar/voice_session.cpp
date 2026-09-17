@@ -187,6 +187,12 @@ void VoiceSession::load() {
   workers_->set_on_report([this](const std::string&, WorkerPool::State, const std::string& summary) {
     announce(summary);
   });
+  // M3.3. The same store the system prompt was composed from, read a second
+  // time for its lazy half. Cheap (a few small files), and it keeps the
+  // injector honest about *when* it sees the store: the global prompts left
+  // this process at launch, and these have not been sent at all yet.
+  if (std::string perr; !prompts_.load(&perr) && !perr.empty()) log("[prompts] " + perr);
+  injector_.reset(prompts_);
   log("speaker: " + speaker_->device_name());
   log("mic:     " + mic_->device_name());
   set_status("ready. click the mic or press SPACE to speak.");
@@ -554,7 +560,17 @@ void VoiceSession::run_turn(std::string text) {
     speech_->enqueue(s);
   }, cfg_.early_words);
   bool first = true;
-  ChatResult r = eng_.llm->turn(text, [&](const std::string& delta) {
+  // M3.3. `sent` is what Claude receives; `text` stays what the user said.
+  // The transcript, the avatar and the mute path all work off the latter, so a
+  // `<context>` block is never shown and never spoken — it is machine traffic
+  // in the same sense the `aii` block is, just travelling the other way.
+  const std::string sent = injector_.decorate(text);
+  if (sent.size() != text.size()) {
+    std::string names;
+    for (const std::string& id : injector_.loaded()) names += (names.empty() ? "" : ", ") + id;
+    log("[prompts] injected context; loaded this session: " + names);
+  }
+  ChatResult r = eng_.llm->turn(sent, [&](const std::string& delta) {
     {
       std::lock_guard<std::mutex> l(mutex_);
       if (!lines_.empty() && !lines_.back().user) lines_.back().text += delta;
@@ -637,8 +653,23 @@ bool VoiceSession::flush_announcements() {
 }
 
 void VoiceSession::run_commands(const std::string& reply_text) {
-  if (!workers_) return;
   for (const Command& c : parse_commands(reply_text)) {
+    // M3.4. Not a worker verb, so it is handled before the `workers_` guard
+    // and does not need a pool. It only ever queues: the prompt arrives
+    // prepended to the next user turn, because that is the whole point of
+    // M3.3 — the system prompt is a launch argument and cannot be appended to
+    // without restarting Claude and losing the prompt cache.
+    //
+    // A name that is not in the store is refused and logged, not announced.
+    // The model reaching for a prompt that does not exist is its own
+    // housekeeping; reading "I could not load that" aloud would spend a spoken
+    // sentence on something the user never asked for, exactly as `button` does.
+    if (c.verb == "load") {
+      if (injector_.request(c.name)) log("[prompts] queued " + c.name + " for the next turn");
+      else log("[prompts] refused load name=" + c.name + " (no such prompt in the store)");
+      continue;
+    }
+    if (!workers_) continue;
     std::string err;
     if (c.verb == "spawn") {
       if (workers_->spawn(c.name, c.cwd, c.task, &err)) {

@@ -28,6 +28,27 @@ class ClaudeCodeClient final : public LlmClient {
     // nothing can answer from this app. Leave false for anything that touches
     // a directory the user has not agreed to hand over.
     bool bypass_permissions = false;
+    // M3.5. `--system-prompt` replaces the CLI's *default* prompt and suppresses
+    // nothing the CLI discovers for itself: measured against 2.1.273, the
+    // project's `CLAUDE.md`, the user's own Claude Code auto-memory and all of
+    // their skills still reach the model. `--safe-mode` removes the first two;
+    // `--disable-slash-commands` removes the third. This flag passes both.
+    //
+    // It is an option and not the default because the two kinds of instance
+    // want opposite things. The conversational one must run on *our* prompts
+    // alone and loses nothing by it — it has no tools, so the MCP servers,
+    // hooks, plugins and custom agents `--safe-mode` also disables were never
+    // reachable from it. A worker wants all of those, and wants the
+    // `CLAUDE.md` of the repo it was pointed at, which is exactly the file
+    // that belongs in a coding agent's context. So: conversational on,
+    // workers off.
+    //
+    // `--setting-sources user,local` looks like it does this and is a trap: it
+    // drops the project `CLAUDE.md` and still leaks the auto-memory. `--bare`
+    // suppresses more but authenticates strictly through `ANTHROPIC_API_KEY` /
+    // `apiKeyHelper`, so it cannot be used on the subscription this app runs
+    // on.
+    bool suppress_cli_context = false;
   };
 
   // What a tool-enabled instance is doing, as it happens: "read main.cpp",

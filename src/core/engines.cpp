@@ -42,6 +42,10 @@ bool build_llm(const Config& cfg, Engines& out, const LogFn& log, std::string* e
   o.model = cfg.model_override;
   o.effort = cfg.effort;
   o.tools = false;
+  // The conversational instance runs on this app's prompts and nothing the CLI
+  // found for itself (M3.5). Workers deliberately keep everything — see
+  // WorkerPool::spawn, which does not set this.
+  o.suppress_cli_context = true;
   auto cc = std::make_unique<ClaudeCodeClient>(o);
   std::string err;
   if (!cc->start(&err)) {

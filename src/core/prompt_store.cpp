@@ -289,6 +289,157 @@ std::string PromptStore::compose(const std::string& name) const {
   return composed;
 }
 
+// ------------------------------------------------------- M3.3 / M3.4
+namespace {
+
+// ASCII-only lowering, applied to raw UTF-8. Safe by construction: every byte
+// of a multi-byte UTF-8 sequence is >= 0x80 and is left exactly as it is, so
+// Japanese passes through untouched (it has no case anyway) and only the Latin
+// half of a mixed string is folded.
+std::string ascii_lower(std::string s) {
+  for (char& c : s)
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  return s;
+}
+
+// UTF-8 code points, not bytes: the minimum-length rule below is about how
+// specific a word is, and "プロ" is two characters and six bytes.
+std::size_t code_points(const std::string& s) {
+  std::size_t n = 0;
+  for (unsigned char c : s)
+    if ((c & 0xC0) != 0x80) ++n;
+  return n;
+}
+
+bool is_ascii(const std::string& s) {
+  for (unsigned char c : s)
+    if (c >= 0x80) return false;
+  return true;
+}
+
+// A trigger short enough to appear inside unrelated words is worse than no
+// trigger, because the prompt it pulls in is then wrong *and* unrepeatable —
+// the loaded set means it can never be un-sent. Three characters for ASCII,
+// two for anything else. See the class comment.
+bool usable_trigger(const std::string& s) {
+  if (s.empty()) return false;
+  const std::size_t n = code_points(s);
+  return n >= (is_ascii(s) ? 3u : 2u);
+}
+
+void add_trigger(std::vector<std::string>* out, const std::string& s) {
+  const std::string t = ascii_lower(trim_end(s));
+  if (!usable_trigger(t)) return;
+  if (std::find(out->begin(), out->end(), t) == out->end()) out->push_back(t);
+}
+
+// Attribute values come from the store, not from the transcript, but they are
+// still spliced into markup the model reads as structure — so escape them
+// rather than trusting that no prompt will ever be titled `a "b" & c`.
+std::string xml_attr(const std::string& s) {
+  std::string out;
+  for (char c : s) {
+    switch (c) {
+      case '&': out += "&amp;"; break;
+      case '<': out += "&lt;"; break;
+      case '>': out += "&gt;"; break;
+      case '"': out += "&quot;"; break;
+      default: out.push_back(c);
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+void PromptInjector::reset(const PromptStore& store) {
+  lazy_.clear();
+  for (const PromptGraph& g : store.graphs()) {
+    for (const PromptNode& n : g.nodes) {
+      if (n.kind == PromptKind::Global || !n.enabled) continue;
+      Lazy z;
+      z.id = n.id;
+      z.title = n.title.empty() ? n.id : n.title;
+      z.kind = n.kind == PromptKind::Project ? "project" : "skill";
+      z.body = trim_end(n.body);
+      if (z.body.empty()) continue;  // nothing to inject
+      add_trigger(&z.match, n.id);
+      add_trigger(&z.match, n.title);
+      for (const std::string& t : n.triggers) add_trigger(&z.match, t);
+      if (z.match.empty()) continue;  // unreachable by mention; `load` still finds it by id
+      lazy_.push_back(std::move(z));
+    }
+  }
+  // Store order, so two prompts mentioned in one sentence are always injected
+  // in the same order — the same byte-stability argument as composition, one
+  // level down.
+  std::sort(lazy_.begin(), lazy_.end(), [](const Lazy& a, const Lazy& b) { return a.id < b.id; });
+}
+
+bool PromptInjector::is_loaded(const std::string& id) const {
+  return std::find(loaded_.begin(), loaded_.end(), id) != loaded_.end();
+}
+
+const PromptInjector::Lazy* PromptInjector::resolve(const std::string& name) const {
+  const std::string want = ascii_lower(trim_end(name));
+  if (want.empty()) return nullptr;
+  for (const Lazy& z : lazy_)
+    if (ascii_lower(z.id) == want) return &z;
+  for (const Lazy& z : lazy_)
+    if (ascii_lower(z.title) == want) return &z;
+  for (const Lazy& z : lazy_)
+    for (const std::string& t : z.match)
+      if (t == want) return &z;
+  return nullptr;
+}
+
+bool PromptInjector::request(const std::string& name) {
+  const Lazy* z = resolve(name);
+  if (!z) return false;                                 // not in the store: refused
+  if (is_loaded(z->id)) return true;                    // already in this session's context
+  if (std::find(pending_.begin(), pending_.end(), z->id) == pending_.end())
+    pending_.push_back(z->id);
+  return true;
+}
+
+std::string PromptInjector::decorate(const std::string& user_text) {
+  if (lazy_.empty()) return user_text;
+  const std::string hay = ascii_lower(user_text);
+
+  std::vector<const Lazy*> take;
+  const auto queue = [&](const Lazy* z) {
+    if (!z || is_loaded(z->id)) return;
+    if (std::find(take.begin(), take.end(), z) == take.end()) take.push_back(z);
+  };
+  // `load name=` first: the model asked for it explicitly on the previous turn,
+  // so it leads even when this turn also mentions something.
+  for (const std::string& id : pending_)
+    for (const Lazy& z : lazy_)
+      if (z.id == id) queue(&z);
+  pending_.clear();
+
+  for (const Lazy& z : lazy_) {
+    if (is_loaded(z.id)) continue;
+    for (const std::string& t : z.match) {
+      if (hay.find(t) != std::string::npos) {  // substring, deliberately
+        queue(&z);
+        break;
+      }
+    }
+  }
+  if (take.empty()) return user_text;
+
+  std::string out;
+  for (const Lazy* z : take) {
+    out += "<context name=\"" + xml_attr(z->title) + "\" kind=\"" + xml_attr(z->kind) + "\">\n";
+    out += z->body;
+    out += "\n</context>\n\n";
+    loaded_.push_back(z->id);
+  }
+  out += user_text;
+  return out;
+}
+
 const std::string& system_prompt() {
   static const std::string kComposed = [] {
     PromptStore store;

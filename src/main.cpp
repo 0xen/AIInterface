@@ -18,7 +18,11 @@
 //
 //        AII_PROMPTS_DIR    prompt store location (default %APPDATA%\AIInterface\prompts)
 //
-// Modes: --say "<text>"    one typed turn through Claude, spoken, then exit
+// Modes: --say "<text>"    one typed turn through Claude, spoken, then exit.
+//                          Repeatable: several --say run as consecutive turns
+//                          in one session, which is the only scripted way to
+//                          see a per-session behaviour such as M3.3's promise
+//                          that a lazy prompt is injected exactly once.
 //        --speak "<text>"  no Claude; speak the text and exit
 //        --dump-system-prompt <file>
 //                          write the composed system prompt and exit; nothing
@@ -44,6 +48,7 @@
 #include "core/prompt_store.h"
 #include "core/sentence_splitter.h"
 #include "core/speech_queue.h"
+#include "core/worker_pool.h"
 #include "core/text_util.h"
 #include "llm/llm_client.h"
 #include "stt/recognizer.h"
@@ -81,13 +86,14 @@ int main(int argc, char** argv) {
 
   // Arguments come from the wide command line so Japanese survives (argv is ANSI-mangled).
   (void)argc; (void)argv;
-  std::string say_text, speak_text, dump_prompt;
+  std::vector<std::string> say_texts;
+  std::string speak_text, dump_prompt;
   {
     int wargc = 0;
     wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
     for (int i = 1; wargv && i + 1 < wargc; ++i) {
       std::wstring a = wargv[i];
-      if (a == L"--say") say_text = utf8_from_wide(wargv[i + 1]);
+      if (a == L"--say") say_texts.push_back(utf8_from_wide(wargv[i + 1]));
       if (a == L"--speak") speak_text = utf8_from_wide(wargv[i + 1]);
       if (a == L"--dump-system-prompt") dump_prompt = utf8_from_wide(wargv[i + 1]);
     }
@@ -110,7 +116,7 @@ int main(int argc, char** argv) {
     std::printf("wrote %zu bytes to %s\n", composed.size(), dump_prompt.c_str());
     return 0;
   }
-  const bool scripted = !say_text.empty() || !speak_text.empty();
+  const bool scripted = !say_texts.empty() || !speak_text.empty();
 
   const aii::Config cfg = aii::Config::from_env();
   const int early_words = cfg.early_words;  // 0 = wait for full sentences
@@ -144,6 +150,17 @@ int main(int argc, char** argv) {
 
   if (!scripted) std::printf("\nSPACE talk/stop   T type   S silence   Q quit\n");
 
+  // M3.3 / M3.4, the same lazy injection the window does — voiceloop is the
+  // headless twin of this loop and the place a prompt change is checked
+  // without a window on the user's desktop.
+  aii::PromptStore prompts;
+  aii::PromptInjector injector;
+  if (speak_text.empty()) {
+    std::string perr;
+    if (!prompts.load(&perr) && !perr.empty()) std::fprintf(stderr, "[prompts] %s\n", perr.c_str());
+    injector.reset(prompts);
+  }
+
   // ---- one turn: text in, spoken reply out ----
   auto handle_turn = [&](const std::string& user_text, clk::time_point t_input_done) {
     clk::time_point t_first_token{}, t_first_audio{};
@@ -156,7 +173,9 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
     auto t_send = clk::now();
     std::atomic<bool> cancel{false};
-    aii::ChatResult r = llm->turn(user_text, [&](const std::string& delta) {
+    const std::string sent = injector.decorate(user_text);
+    if (sent.size() != user_text.size()) std::printf("[prompts] context injected\n");
+    aii::ChatResult r = llm->turn(sent, [&](const std::string& delta) {
       if (!got_token) { got_token = true; t_first_token = clk::now(); }
       std::fputs(delta.c_str(), stdout);
       std::fflush(stdout);
@@ -169,6 +188,13 @@ int main(int argc, char** argv) {
     if (!r.ok) {
       std::printf("  [error] %s\n", r.error.c_str());
       return;
+    }
+    // M3.4: the model may have asked for a prompt itself. It lands on the next
+    // turn, not this one — see PromptInjector.
+    for (const aii::Command& c : aii::parse_commands(r.text)) {
+      if (c.verb != "load") continue;
+      std::printf("[prompts] load name=%s -> %s\n", c.name.c_str(),
+                  injector.request(c.name) ? "queued" : "refused (not in the store)");
     }
 
     // Let the reply finish playing, but allow S / SPACE to cut it off.
@@ -218,10 +244,17 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  if (!say_text.empty()) {
-    std::printf("\n[you] %s\n", say_text.c_str());
-    handle_turn(say_text, clk::now());
-    speech.wait_idle();
+  if (!say_texts.empty()) {
+    // Several `--say` arguments run as consecutive turns in one session, which
+    // is the only scripted way to see anything that is *per session* rather
+    // than per turn: M3.3's loaded set, whose whole claim is that a prompt is
+    // injected on one turn and never again, is invisible to a run that can
+    // only take one turn and then exits.
+    for (const std::string& t : say_texts) {
+      std::printf("\n[you] %s\n", t.c_str());
+      handle_turn(t, clk::now());
+      speech.wait_idle();
+    }
     return 0;
   }
 

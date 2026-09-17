@@ -15,6 +15,7 @@
 #include "audio/mic_in.h"
 #include "core/config.h"
 #include "core/engines.h"
+#include "core/prompt_store.h"
 #include "core/speech_queue.h"
 #include "core/worker_pool.h"
 #include "llm/llm_client.h"
@@ -163,6 +164,13 @@ class VoiceSession {
   std::unique_ptr<MicIn> mic_;
   std::unique_ptr<SpeechQueue> speech_;
   std::unique_ptr<WorkerPool> workers_;
+
+  // M3.3 / M3.4. The store is kept because the injector holds only what it
+  // needs; `injector_` is touched from the turn thread (decorate, and the
+  // `load` verb that run_commands applies at the end of the same turn) and
+  // from nowhere else, which is why neither is behind `mutex_`.
+  PromptStore prompts_;
+  PromptInjector injector_;
 
   // Frame-loop state: touched only from update()/set_mic_open().
   bool mic_open_ = false;
