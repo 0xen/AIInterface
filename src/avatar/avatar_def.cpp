@@ -8,6 +8,7 @@
 #include <system_error>
 
 #include "core/config.h"
+#include "rend/core/log.h"
 #include "core/user_paths.h"
 #include "json.hpp"
 
@@ -137,6 +138,13 @@ bool apply_palette(const nlohmann::json& obj, const std::string& what, Palette& 
 const AvatarClip* AvatarDefinition::find_clip(const std::string& clip_name) const {
   for (const auto& c : clips) {
     if (c.name == clip_name) return &c;
+  }
+  return nullptr;
+}
+
+const AvatarTrigger* AvatarDefinition::find_trigger(const std::string& trigger_name) const {
+  for (const auto& t : triggers) {
+    if (t.name == trigger_name) return &t;
   }
   return nullptr;
 }
@@ -326,9 +334,21 @@ bool parse_clip_file(const fs::path& path, const Palette& pal, std::uint32_t wid
 // default file name from colliding with a character clip of the same name.
 bool parse_clips(const json& clips, const fs::path& dir, const Palette& pal, std::uint32_t width,
                  std::uint32_t height, bool allow_overlay, const std::string& owner,
-                 const std::string& file_prefix, std::vector<AvatarClip>& out, std::string* error) {
+                 const std::string& file_prefix, bool allow_trigger, std::vector<AvatarClip>& out,
+                 std::vector<std::string>* warnings, std::string* error) {
   auto fail = [&](const std::string& what) {
     if (error) *error = "avatar.json: " + owner + what;
+    return false;
+  };
+  // M7.1. True when this clip is an *extra* variant: something already parsed
+  // answers to the same trigger, so losing this one costs variety and not the
+  // animation. That is the whole of the degrade rule — the first clip behind
+  // a trigger is load-bearing and a bad one is still a hard error.
+  const auto has_sibling = [&out](const AvatarClip& clip) {
+    if (clip.trigger.empty()) return false;
+    for (const auto& seen : out) {
+      if (seen.trigger == clip.trigger || seen.name == clip.trigger) return true;
+    }
     return false;
   };
   if (!clips.is_array() || clips.empty()) return fail("\"clips\" must be a non-empty array");
@@ -349,6 +369,28 @@ bool parse_clips(const json& clips, const fs::path& dir, const Palette& pal, std
     const json& loop = member(entry, "loop");
     clip.loop = loop.is_boolean() ? loop.get<bool>() : true;
 
+    // M7.1. Two optional fields, and both are inert on a clip that does not
+    // write them: no `trigger` means the clip answers to its own name, which
+    // is the only thing that was ever true, and `weight` is only ever read
+    // when a trigger has more than one clip behind it.
+    if (const json& trig = member(entry, "trigger"); !trig.is_null()) {
+      if (!allow_trigger) {
+        return fail("clip \"" + clip.name +
+                    "\" declares a \"trigger\"; variants are a character-clip feature and a "
+                    "sprite's clips are chosen by the sprite, not by a trigger");
+      }
+      if (!trig.is_string() || trig.get<std::string>().empty()) {
+        return fail("clip \"" + clip.name + "\" trigger must be a non-empty string");
+      }
+      clip.trigger = trig.get<std::string>();
+    }
+    if (const json& w = member(entry, "weight"); !w.is_null()) {
+      if (!w.is_number() || !(w.get<float>() > 0.0f) || w.get<float>() > 1000.0f) {
+        return fail("clip \"" + clip.name + "\" weight must be a number in 0..1000");
+      }
+      clip.weight = w.get<float>();
+    }
+
     const json& file_name = member(entry, "file");
     const std::string file = file_name.is_string() ? file_name.get<std::string>()
                                                    : file_prefix + clip.name + ".txt";
@@ -357,8 +399,20 @@ bool parse_clips(const json& clips, const fs::path& dir, const Palette& pal, std
     if (file.find('/') != std::string::npos || file.find('\\') != std::string::npos) {
       return fail("clip \"" + clip.name + "\" file must be a plain name");
     }
-    if (!parse_clip_file(dir / file, pal, width, height, allow_overlay, clip.frames, error)) {
-      return false;
+    if (std::string why; !parse_clip_file(dir / file, pal, width, height, allow_overlay,
+                                          clip.frames, &why)) {
+      // A variant with a sibling degrades to the sibling rather than to no
+      // animation: dropping one drawing costs variety, and failing the load
+      // would cost the whole avatar over art nothing has asked for yet.
+      if (!has_sibling(clip)) {
+        if (error) *error = why;
+        return false;
+      }
+      if (warnings) {
+        warnings->push_back("variant \"" + clip.name + "\" of trigger \"" + clip.trigger +
+                            "\" dropped - " + why);
+      }
+      continue;
     }
     out.push_back(std::move(clip));
   }
@@ -586,15 +640,50 @@ bool load_avatar_definition(const fs::path& dir, const std::string& theme,
     }
   }
 
-  if (!parse_clips(member(root, "clips"), dir, pal, def.width, def.height, true, "", "", def.clips,
-                   error)) {
+  if (!parse_clips(member(root, "clips"), dir, pal, def.width, def.height, true, "", "", true,
+                   def.clips, &def.warnings, error)) {
     return false;
+  }
+
+  // M7.1. The trigger table, built once here so nothing downstream has to
+  // walk the clip list asking what answers to what.
+  //
+  // Order matters and is the author's: a clip's own name is registered first
+  // (so `--clip wake_slide` is always exactly that drawing), and a clip that
+  // names a trigger joins that group as well. A clip whose name *is* the
+  // group's name — the common case of a base clip plus variants that point at
+  // it — ends up as the first member of its own group rather than as a second
+  // entry, which is why the group is looked up before the name is added.
+  const auto group_for = [&def](const std::string& name) -> AvatarTrigger& {
+    for (auto& t : def.triggers) {
+      if (t.name == name) return t;
+    }
+    def.triggers.push_back(AvatarTrigger{name, {}});
+    return def.triggers.back();
+  };
+  for (std::size_t i = 0; i < def.clips.size(); ++i) {
+    const AvatarClip& clip = def.clips[i];
+    const AvatarVariant variant{i, clip.weight};
+    if (!clip.trigger.empty()) group_for(clip.trigger).variants.push_back(variant);
+    // The clip's own name is a group of one unless it *is* a trigger name, in
+    // which case this clip is already in that group (either because it
+    // declared the trigger itself, or because a variant pointed at it) and
+    // must not be listed twice. Membership is tested by index rather than by
+    // emptiness so that declaring the variant *above* the clip it points at
+    // still leaves both in the group.
+    AvatarTrigger& own = group_for(clip.name);
+    bool listed = false;
+    for (const auto& v : own.variants) listed = listed || v.clip_index == i;
+    if (!listed) own.variants.push_back(variant);
   }
 
   const json& dflt = member(root, "default_clip");
   def.default_clip = dflt.is_string() ? dflt.get<std::string>() : def.clips.front().name;
-  if (!def.find_clip(def.default_clip)) {
-    return fail("avatar.json: default_clip \"" + def.default_clip + "\" is not a declared clip");
+  // M7.1: a trigger is as good a default as a clip. find_trigger() answers for
+  // every clip name too, so this is the old test plus the new vocabulary.
+  if (!def.find_trigger(def.default_clip)) {
+    return fail("avatar.json: default_clip \"" + def.default_clip +
+                "\" is not a declared clip or trigger");
   }
 
   // Sprites: accessories with their own grid, their own clips and a placement
@@ -646,7 +735,7 @@ bool load_avatar_definition(const fs::path& dir, const std::string& theme,
       }
 
       if (!parse_clips(member(entry, "clips"), dir, pal, sprite.width, sprite.height, false, owner,
-                       sprite.name + "_", sprite.clips, error)) {
+                       sprite.name + "_", false, sprite.clips, nullptr, error)) {
         return false;
       }
       const json& sdflt = member(entry, "default_clip");
@@ -1053,13 +1142,18 @@ void AvatarSource::reload(bool initial) {
     // the edit they just made removed it, fall back rather than freeze.
     const std::string want = !wanted_clip_.empty() ? wanted_clip_ : def_.default_clip;
     clip_index_ = 0;
-    bool found = false;
-    for (std::size_t i = 0; i < def_.clips.size(); ++i) {
-      if (def_.clips[i].name != want) continue;
-      clip_index_ = i;
-      found = true;
-    }
+    // M7.1. The clips were renumbered by this load, so what each trigger
+    // played last is about the old numbering and is thrown away. The cost is
+    // one possible repeat across a hot edit of the art, which is the moment
+    // the user is least likely to be watching for one.
+    last_variant_.clear();
+    const AvatarTrigger* want_group = def_.find_trigger(want);
+    const bool found = want_group != nullptr && !want_group->variants.empty();
+    if (found) clip_index_ = choose_variant(*want_group);
     std::string missing = found ? std::string() : " (no clip \"" + want + "\")";
+    // Survivable load complaints — a variant whose art would not parse — are
+    // reported at the volume of a problem without having cost the load.
+    for (const std::string& warning : def_.warnings) missing += " (" + warning + ")";
     frame_index_ = 0;
     frame_time_ = 0.0f;
 
@@ -1118,8 +1212,18 @@ void AvatarSource::reload(bool initial) {
 
     if (!wanted_theme_.empty() && wanted_theme_ != theme_)
       missing += " (no theme \"" + wanted_theme_ + "\")";
+    // M7.1. Counted rather than always printed: an avatar that declares no
+    // variants writes the same status line it has always written, which is
+    // the cheapest possible check that nothing changed for it.
+    std::size_t variant_triggers = 0;
+    for (const auto& t : def_.triggers) {
+      if (t.variants.size() > 1) ++variant_triggers;
+    }
+    const std::string variants =
+        variant_triggers ? ", " + std::to_string(variant_triggers) + " variant triggers"
+                         : std::string();
     status_ = (initial ? "avatar " : "avatar reloaded ") + def_.name + " [" + theme_ + "]: " +
-              std::to_string(def_.clips.size()) + " clips, playing \"" +
+              std::to_string(def_.clips.size()) + " clips" + variants + ", playing \"" +
               def_.clips[clip_index_].name + "\", " + std::to_string(def_.sprites.size()) +
               " sprites (" + std::to_string(shown) + " shown)" + missing;
     status_ok_ = missing.empty();
@@ -1136,21 +1240,73 @@ void AvatarSource::reload(bool initial) {
   status_new_ = true;
 }
 
+std::size_t AvatarSource::choose_variant(const AvatarTrigger& trigger) {
+  // The single-member path is the one every existing avatar takes, on every
+  // clip, forever. It draws nothing and decides nothing.
+  if (trigger.variants.size() == 1) return trigger.variants.front().clip_index;
+
+  const auto last = last_variant_.find(trigger.name);
+  const std::size_t forbidden =
+      last != last_variant_.end() ? last->second : static_cast<std::size_t>(-1);
+
+  // Sum the weights of everything that is not what just played. With two
+  // variants this leaves exactly one, which is why two variants alternate
+  // strictly: any no-immediate-repeat rule does that, a shuffle bag included.
+  // Three is where a chooser starts being a chooser.
+  float total = 0.0f;
+  for (const auto& v : trigger.variants) {
+    if (v.clip_index != forbidden) total += std::max(0.0f, v.weight);
+  }
+  // Every alternative weighed nothing (or there are no alternatives, which a
+  // group of one already returned above): repeat rather than play nothing.
+  if (!(total > 0.0f)) return forbidden != static_cast<std::size_t>(-1)
+                                  ? forbidden
+                                  : trigger.variants.front().clip_index;
+
+  std::uniform_real_distribution<float> pick(0.0f, total);
+  float roll = pick(rng_);
+  std::size_t chosen = trigger.variants.front().clip_index;
+  for (const auto& v : trigger.variants) {
+    if (v.clip_index == forbidden) continue;
+    chosen = v.clip_index;
+    roll -= std::max(0.0f, v.weight);
+    if (roll <= 0.0f) break;
+  }
+  last_variant_[trigger.name] = chosen;
+  return chosen;
+}
+
+const std::string& AvatarSource::playing() const {
+  static const std::string kNone;
+  if (!loaded_ || clip_index_ >= def_.clips.size()) return kNone;
+  return def_.clips[clip_index_].name;
+}
+
 bool AvatarSource::play(const std::string& clip, std::size_t start_frame) {
   if (!loaded_) return false;
-  for (std::size_t i = 0; i < def_.clips.size(); ++i) {
-    if (def_.clips[i].name != clip) continue;
-    // Asking for the clip that is already running is a no-op, not a restart:
-    // M2.4's policy states its wish every frame, and restarting on each of
-    // them would freeze every clip on its first drawing.
-    if (i != clip_index_) {
-      clip_index_ = i;
-      frame_index_ = start_frame < def_.clips[i].frames.size() ? start_frame : 0;
-      frame_time_ = 0.0f;
-    }
-    return true;
+  const AvatarTrigger* trigger = def_.find_trigger(clip);
+  if (!trigger || trigger->variants.empty()) return false;
+
+  // Asking for the clip that is already running is a no-op, not a restart:
+  // M2.4's policy states its wish every frame, and restarting on each of them
+  // would freeze every clip on its first drawing. M7.1 widens "already
+  // running" to "already running *a member of this group*", which is the
+  // same sentence for a group of one and is what stops the chooser firing
+  // sixty times a second on a trigger the policy is holding.
+  for (const auto& v : trigger->variants) {
+    if (v.clip_index == clip_index_) return true;
   }
-  return false;
+
+  const std::size_t i = choose_variant(*trigger);
+  if (i >= def_.clips.size()) return false;
+  if (trigger->variants.size() > 1) {
+    rend::log::info("avatar variant: trigger \"{}\" ({} variants) chose \"{}\"", trigger->name,
+              trigger->variants.size(), def_.clips[i].name);
+  }
+  clip_index_ = i;
+  frame_index_ = start_frame < def_.clips[i].frames.size() ? start_frame : 0;
+  frame_time_ = 0.0f;
+  return true;
 }
 
 namespace {

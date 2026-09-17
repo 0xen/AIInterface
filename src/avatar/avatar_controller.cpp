@@ -47,6 +47,27 @@ void AvatarController::note_definition(const AvatarDefinition& def) {
     }
     timing_[c.name] = t;
   }
+  // M7.1. A trigger is as askable as a clip — `request_clip("wake")` has to
+  // mean "any entrance" for a script the same way it does for the policy
+  // below — so the trigger names go in too, at the length of their *longest*
+  // variant. Longest rather than the one that will actually be chosen because
+  // the choice has not been made yet when the lease is measured, and a lease
+  // shorter than the clip it covers cuts the animation off; too long merely
+  // holds the last drawing a moment, which is what a one-shot does anyway.
+  //
+  // Single-member triggers are the whole of a no-variant definition and write
+  // back the value the loop above already put there, so this cannot change
+  // what such a definition does.
+  for (const AvatarTrigger& trigger : def.triggers) {
+    Timing longest;
+    for (const AvatarVariant& v : trigger.variants) {
+      if (v.clip_index >= def.clips.size()) continue;
+      const auto it = timing_.find(def.clips[v.clip_index].name);
+      if (it == timing_.end()) continue;
+      if (it->second.total > longest.total) longest = it->second;
+    }
+    if (longest.total > 0.0f) timing_[trigger.name] = longest;
+  }
 }
 
 float AvatarController::clip_length(const char* clip, float fallback) const {

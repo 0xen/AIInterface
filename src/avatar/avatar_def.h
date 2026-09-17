@@ -35,6 +35,19 @@
 // never mentions it simply leaves that layer empty, so authoring a body-only
 // clip costs nothing.
 //
+// A clip entry may name a `trigger` (M7.1), and clips sharing one are
+// variants of it: asking to play that name plays one of them, chosen so that
+// the same one does not come up twice running, with an optional per-clip
+// `weight` to make one of them the usual and another a surprise. A clip is
+// always still reachable by its own name, so a script can ask for one
+// particular drawing as well as for "any entrance". Neither field is required
+// and neither exists in any avatar written before them: a definition that
+// mentions no trigger has one single-member set per clip, which is the same
+// arrangement as having no sets at all, and plays exactly what it played
+// before. Variants of one trigger must share the grid and — being usually
+// one-shots — end on the drawing whatever follows them begins on, or the
+// handover is a jump.
+//
 // Definitions are seeded into %APPDATA%\AIInterface\avatars\<name>\ from the
 // repo's assets/avatars/<name>\ on first run, and only when the destination
 // is absent: a rebuild must never reach in and overwrite art the user has
@@ -42,6 +55,8 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <map>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -89,6 +104,41 @@ struct AvatarClip {
   float fps = 8.0f;
   bool loop = true;
   std::vector<AvatarFrame> frames;
+
+  // M7.1. The trigger this clip answers to, from avatar.json's optional
+  // `trigger` on the clip entry. Empty means the clip's own name, which is
+  // what every clip written before this existed gets — so a definition that
+  // declares no triggers has one single-member group per clip and behaves
+  // exactly as it did before there were groups at all.
+  std::string trigger;
+  // Relative likelihood inside that group, from the optional `weight`.
+  // Uniform unless somebody says otherwise; only consulted when a group has
+  // more than one member, so this number cannot change a no-variant
+  // definition even if it is written down.
+  float weight = 1.0f;
+};
+
+// M7.1. One member of a trigger group.
+struct AvatarVariant {
+  std::size_t clip_index = 0;
+  float weight = 1.0f;
+};
+
+// M7.1. A name something can ask to play, and the clips that answer to it.
+//
+// Every clip is reachable by its own name — that is what keeps `--clip`, the
+// bus's `play` and a script asking for one particular drawing working — and a
+// clip that declares a `trigger` is *also* a member of that group. So
+// `wake_slide` plays exactly that clip and `wake` picks between the clips
+// that carry the trigger `wake`.
+//
+// A group of one is the overwhelmingly common case and is deliberately not a
+// special case anywhere except in the chooser, which returns its single member
+// without touching the random engine. That is the backward-compatibility
+// guarantee expressed as code rather than as a promise.
+struct AvatarTrigger {
+  std::string name;
+  std::vector<AvatarVariant> variants;
 };
 
 // A cell the overlay system hangs accessories off, named so the art and the
@@ -135,6 +185,19 @@ struct AvatarDefinition {
   std::vector<AvatarSprite> sprites;
   std::string default_clip;
 
+  // M7.1. The trigger table, derived from `clips` at load time: one entry per
+  // distinct name anything may ask for, in declaration order. Derived rather
+  // than authored so there is no second list in avatar.json to keep in step
+  // with the first.
+  std::vector<AvatarTrigger> triggers;
+
+  // Load-time complaints that were survivable — today, a variant whose art
+  // would not parse while a sibling of the same trigger did. The definition
+  // still loads and the trigger still plays; the note is what stops that
+  // being silent. A complaint that is *not* survivable is still an error and
+  // still costs the whole load, exactly as before.
+  std::vector<std::string> warnings;
+
   // M1c.4: the named palette variants this definition declares, in the order
   // they are declared — which is the order the settings picker shows them in,
   // so the author decides what comes first. Always non-empty: a definition
@@ -175,6 +238,10 @@ struct AvatarDefinition {
   bool has_theme(const std::string& theme_name) const;
 
   const AvatarClip* find_clip(const std::string& clip_name) const;
+  // M7.1. The group `name` asks for, or nullptr. Every clip name is a group,
+  // so this answers for everything find_clip() answers for and for trigger
+  // names besides.
+  const AvatarTrigger* find_trigger(const std::string& trigger_name) const;
   const AvatarAnchor* find_anchor(const std::string& anchor_name) const;
   const AvatarSprite* find_sprite(const std::string& sprite_name) const;
 };
@@ -405,7 +472,19 @@ class AvatarSource {
   // (randomised, so it does not look mechanical), so it enters the clip at
   // the lid instead. Out of range is clamped to 0, which is also what every
   // other caller wants.
+  //
+  // M7.1: `clip` may name a trigger with several clips behind it, in which
+  // case one of them is chosen here. Asking again for a trigger whose chosen
+  // variant is already running is the same no-op it has always been for a
+  // plain clip name — the chooser runs when the trigger is *entered*, not on
+  // every frame the policy restates its wish, or the clip would restart sixty
+  // times a second.
   bool play(const std::string& clip, std::size_t start_frame = 0);
+
+  // M7.1, for the log line that makes the chooser visible and for anything
+  // that wants to know which variant it got: the clip actually on screen.
+  // Empty when there is no definition loaded.
+  const std::string& playing() const;
 
   // Multiplies the character clip's clock. The frames are fixed art, so the
   // only continuous lever a policy has over a clip is how fast it runs
@@ -433,6 +512,20 @@ class AvatarSource {
 
  private:
   void reload(bool initial);
+
+  // M7.1. Which clip of a trigger group plays next.
+  //
+  // The rule is a *weighted draw that cannot repeat the last pick*, not a
+  // shuffle bag. The bag was the tempting answer and it is the wrong one
+  // here: with weights it has to quantise them into copies, which turns "this
+  // one is rare" into "this one is guaranteed once every N", and a surprise
+  // on a schedule is not a surprise. Rejection-free — the last pick is
+  // excluded by leaving it out of the sum, not by re-rolling — so there is no
+  // loop to spin when a group has one member.
+  //
+  // A group of one returns its member and never touches rng_. That is what
+  // makes a definition declaring no variants bit-for-bit what it was.
+  std::size_t choose_variant(const AvatarTrigger& trigger);
   std::filesystem::file_time_type directory_stamp() const;
 
   // The slide's position right now, rounded to a whole cell. Everything that
@@ -472,6 +565,16 @@ class AvatarSource {
   // the derived theme becomes visible; called from set_custom_colour, from
   // set_theme and from the tail of every reload.
   void apply_custom();
+
+  // M7.1. What each multi-member trigger played last, by trigger name, so the
+  // no-immediate-repeat rule survives a clip being left and come back to.
+  // Keyed by name rather than by index because a hot reload renumbers the
+  // clips but not what the user just watched; cleared on reload all the same
+  // when the group it refers to is gone.
+  std::map<std::string, std::size_t> last_variant_;
+  // Seeded from random_device, and *only ever consumed by a group of two or
+  // more*: a definition with no variants draws no numbers from it.
+  std::mt19937 rng_{std::random_device{}()};
 
   std::size_t clip_index_ = 0;
   std::size_t frame_index_ = 0;
