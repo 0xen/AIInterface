@@ -46,6 +46,34 @@ inline constexpr const char* kAvatarVisibilityNames[kAvatarVisibilityCount] = {
 // no speech is lost while the meaning is still undecided.
 constexpr float kTalkHoldSeconds = 0.40f;
 
+// M1f.2. The bounds of the auto-listen timeout *control*, in whole seconds.
+//
+// The floor is the user-facing one and is not the mechanism's: VoiceSession
+// enforces a 1 s sanity floor so a harness can measure the clock without
+// sitting through a minute, and so a hand-edited 0.001 cannot make the latch
+// close the frame it opens. This one is the lowest value a person is allowed
+// to *choose*, and it is 15 s because below that the timeout stops reading as
+// a timeout and starts reading as a bug: M1f.1 measured 5 s as already abrupt
+// on the harness, endpointing alone spends 1 s of every pause, and a person
+// composing a sentence aloud leaves gaps of several seconds without having
+// left the room. 15 s is comfortably past the longest of those and still far
+// short of the walked-away case the feature exists for.
+//
+// **The control cannot express anything between "never" and the floor.** The
+// tick box is the whole of "never" and the number below it starts at the
+// floor, so there is no gesture that produces 7 s and is then silently
+// rewritten to 15 — a setting that lies about itself is worse than one that
+// refuses.
+//
+// The ceiling is ten minutes: past that the latch is effectively open, which
+// is what the tick box is for. Neither bound is applied to a value that
+// arrives from AII_LISTEN_TIMEOUT or from a hand-edited file — those are shown
+// as they are and honoured as they are, because a control that corrected the
+// number it was given would hide what is actually in force. They bind the
+// moment the user touches the control.
+constexpr int kListenTimeoutUserFloorSec = 15;
+constexpr int kListenTimeoutMaxSec = 600;
+
 // Whether the avatar belongs on screen for this mode in this state. The rule
 // lives next to the button that sets the mode rather than being restated in
 // the frame loop, which only turns the answer into a fade.
@@ -172,6 +200,26 @@ struct AvatarUiState {
   // app rather than as a rule about the setting.
   bool lang_english = true;
   bool lang_japanese = true;
+  // M1f.2. The auto-listen timeout, as the control holds it: on/off and a
+  // whole number of seconds. Same contract as `muted` — the panel is the owner
+  // of record, main.cpp pushes the level into the session every frame and
+  // mirrors it into settings.json — with one difference worth stating: there
+  // is no default here.
+  //
+  // Both fields are seeded by main.cpp before the first frame from
+  // `Config::listen_timeout` (the default, AII_LISTEN_TIMEOUT, then
+  // settings.json over it), and `config.h` says that nothing below it should
+  // ever spell "60" again. A default in this struct would be exactly that
+  // second spelling, and the two would drift apart the first time one of them
+  // changed. So they start at values that are obviously not a setting.
+  //
+  // `listen_timeout_sec` keeps its number while the box is unticked, so
+  // switching the timeout off and back on within a run returns the value the
+  // user chose rather than a default. Across runs it does not: the file stores
+  // 0 and nothing else, because a remembered-but-inactive number is a second
+  // piece of state that can disagree with the one in force.
+  bool listen_timeout_on = false;
+  int listen_timeout_sec = 0;
   // What is in the message field (M1b.2). A fixed buffer rather than a
   // std::string because imgui_stdlib is not in this build, and a corner
   // window's typed message has no business being longer than this anyway.
@@ -238,7 +286,23 @@ struct AvatarUiState {
   // When the Talk button went down, on ImGui's clock. Only meaningful between
   // the press and the release that reads it.
   double talk_pressed_at = 0.0;
+  // M1f.2's pose flag, in the spirit of --clip and --message: keep the
+  // settings surface scrolled to the Timing section. The surface is a fixed
+  // height that scrolls, and Timing is below the fold — so "a screenshot of
+  // the auto-listen control" was a state nothing could ask for, which in this
+  // project is the documented way a widget goes unlooked-at (see --message).
+  // Harness only (`--settings timing`); nothing in the UI sets it.
+  bool settings_scroll_timing = false;
 };
+
+// M1f.2. What the two fields above mean as one number, in the one spelling the
+// rest of the feature uses: seconds, and 0 for never — which is what
+// `Config::listen_timeout` holds, what `VoiceSession::set_listen_timeout()`
+// takes and what settings.json stores. Written once, here, so the level pushed
+// into the session and the value written to the file cannot come to differ.
+inline float listen_timeout_seconds(const AvatarUiState& state) {
+  return state.listen_timeout_on ? static_cast<float>(state.listen_timeout_sec) : 0.0f;
+}
 
 struct AvatarUiResult {
   // The Talk gesture, as press and release rather than as a click (M1b.3).

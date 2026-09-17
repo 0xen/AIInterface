@@ -47,6 +47,13 @@
 //                 --script and an empty %APPDATA%\AIInterface\scripts, no
 //                 Python DLL is loaded at all.
 //     --no-scripts  discover nothing, whatever is in scripts\.
+//     --settings  open the settings surface at startup, and
+//     --settings-timing  the same, held scrolled to the Timing section, which
+//                 is below the fold of a surface that scrolls (M1f.2).
+//     --listen-timeout-at S:V  at S seconds, write V seconds into the
+//                 auto-listen control's own fields, exactly as a hand on it
+//                 would; V of 0 is "never". How "a change reaches a
+//                 microphone that is already latched" is measured.
 //
 //   SPACE / Talk    click (or tap) toggles the mic: conversation mode. While
 //                   the mic is on, a pause in speech sends that utterance and
@@ -294,6 +301,22 @@ int main(int /*argc*/, char** /*argv*/) {
     bool micLatch = false;
     double micHoldSeconds = 0.0;  // M1f.1 harness: --mic-hold S
     std::chrono::steady_clock::time_point micHoldBegan{};
+    // M1f.2's harness, and the pose flags the auto-listen control needs.
+    //
+    // `--settings` / `--settings-timing` exist for the reason --message does,
+    // stated in its own comment above: a state that cannot be posed is a state
+    // nobody looks at, and the settings surface scrolls, so the Timing section
+    // is below the fold and could not be screenshotted at all.
+    //
+    // `--listen-timeout-at S:V` writes V seconds into the *panel's* fields at
+    // S seconds in, which is exactly what a hand on the control writes and
+    // nothing more — the same two fields, pushed down and persisted by the
+    // same frame-loop lines. It is the only way to test the claim that matters
+    // here: that changing the value reaches a microphone that is already
+    // latched. `V` of 0 is never, matching the file and the mechanism.
+    bool settingsOpen = false;
+    bool settingsScrollTiming = false;
+    std::vector<std::pair<double, int>> listenTimeoutAt;
     int cancelRaceReps = 0;
     // M2b.5. Seconds of Idle between one --say and the next. Two is enough to
     // read as a conversation; a longer one is how a harness arranges for a
@@ -384,6 +407,16 @@ int main(int /*argc*/, char** /*argv*/) {
             // could previously drive, and a claim of that shape is worth
             // exactly as much as the test that can fail it.
             else if (a == L"--mic-hold" && i + 1 < wargc) micHoldSeconds = _wtof(wargv[++i]);
+            // M1f.2's pose and drive flags; see the declarations above.
+            else if (a == L"--settings") settingsOpen = true;
+            else if (a == L"--settings-timing") { settingsOpen = true; settingsScrollTiming = true; }
+            else if (a == L"--listen-timeout-at" && i + 1 < wargc) {
+                const std::wstring spec = wargv[++i];
+                const size_t colon = spec.find(L':');
+                if (colon != std::wstring::npos)
+                    listenTimeoutAt.emplace_back(_wtof(spec.substr(0, colon).c_str()),
+                                                 _wtoi(spec.substr(colon + 1).c_str()));
+            }
             // M2b.5. `--cancel-race <reps>`: drive the cancel verb's own path
             // against the tick, from another thread, with the cancel jittered
             // across the frame the schedule is due on. This project has twice
@@ -443,14 +476,27 @@ int main(int /*argc*/, char** /*argv*/) {
     aii::Config voiceCfg = aii::Config::from_env();
     voiceCfg.langs = aii::language_selection_from_spec(
         settings.get_string("language", "enabled", aii::language_spec(voiceCfg.langs)));
-    // M1f.2's seam. The auto-listen timeout arrives here the same way the
-    // language selection does: read out of settings.json over the default in
-    // `voiceCfg.listen_timeout` (Config, AII_LISTEN_TIMEOUT, 60 s, <= 0 means
-    // never), then pushed down as a level from the frame loop with
-    // `session->set_listen_timeout()` beside the set_muted() call, so the
-    // control can change it without a restart. `Settings` has no numeric
-    // accessor yet — a get_float/set_float pair alongside get_bool is the one
-    // piece of plumbing M1f.2 has to add. M1f.1 stops at the mechanism.
+    // M1f.2, taking the seam M1f.1 left here. The auto-listen timeout arrives
+    // exactly the way the language selection above does, and the precedence is
+    // the same as that line's: **settings.json wins over AII_LISTEN_TIMEOUT**,
+    // which is the default used when the key is absent — i.e. on the first run
+    // and after the user deletes the file. That is the right way round because
+    // the file is what the control writes: an environment variable that beat
+    // it would make the control appear to do nothing for whoever set one, and
+    // a setting that cannot be seen to change is the worst failure this
+    // feature has. The variable keeps its whole job of choosing the starting
+    // value, and it is still the only way to ask for a timeout below the
+    // control's floor (the harness's five seconds).
+    //
+    // Read here rather than with the panel's state further down for a weaker
+    // reason than the language line's — the session does not build anything
+    // out of it — but the same one: the value is part of `Config`, `Config` is
+    // what the session is constructed from, and the constructor pushes it
+    // straight into the mechanism. Read later and the first seconds of a run
+    // would use a number the file disagrees with.
+    const float defaultListenTimeout = voiceCfg.listen_timeout;
+    voiceCfg.listen_timeout =
+        settings.get_float("timing", "listen_timeout", voiceCfg.listen_timeout);
 
     // The voice loop loads its engines in the background while the window comes up.
     std::unique_ptr<aii::VoiceSession> session;
@@ -763,6 +809,41 @@ int main(int /*argc*/, char** /*argv*/) {
     // possibly disagreeing with the engines that are already loading.
     uiState.lang_english = voiceCfg.langs.english;
     uiState.lang_japanese = voiceCfg.langs.japanese;
+    // M1f.2. The same idea, and the same reason it is seeded from the value
+    // the session was actually built with rather than re-read from the file:
+    // the control has to show what is in force.
+    //
+    // Not clamped to the control's range. A five-second timeout from
+    // AII_LISTEN_TIMEOUT is a real, running setting and the surface says so in
+    // its own words (see listen_timeout_section); clamping it here would push
+    // 15 back down into the session and the file on the next frame, and the
+    // harness value the user asked for would be gone before the first frame
+    // was drawn.
+    //
+    // The number shown while the box is unticked comes from the default rather
+    // than from the stored 0, so a file that says "never" still offers
+    // something sensible to turn back on. `std::max` covers the case where the
+    // default is itself a "never" (AII_LISTEN_TIMEOUT=0 on a first run): there
+    // is no number to show then, so the floor is the honest starting point.
+    uiState.listen_timeout_on = voiceCfg.listen_timeout > 0.0f;
+    uiState.listen_timeout_sec =
+        uiState.listen_timeout_on
+            // At least one second when the box is on, because the panel holds
+            // whole seconds and a configured 0.4 would round to a zero that
+            // the rest of the feature spells "never" — a ticked box pushing
+            // "never" down is precisely the setting-that-lies this task is
+            // about.
+            ? std::max(1, (int)std::lround(voiceCfg.listen_timeout))
+            : std::max(aii::kListenTimeoutUserFloorSec, (int)std::lround(defaultListenTimeout));
+    // M1f.2's pose flags. `settings_open` is deliberately not persisted (see
+    // AvatarUiState), so this is the only way a scripted run can be looking at
+    // the surface at all.
+    if (settingsOpen) uiState.settings_open = true;
+    uiState.settings_scroll_timing = settingsScrollTiming;
+    log::info("[listen-timeout] setting: {} ({:.1f} s configured, default {:.1f} s)",
+              uiState.listen_timeout_on ? std::to_string(uiState.listen_timeout_sec) + " s"
+                                        : std::string("never"),
+              voiceCfg.listen_timeout, defaultListenTimeout);
     // --message: put text in the field before the first frame, exactly as if it
     // had been typed. It goes through the same buffer a keystroke lands in, so
     // what is captured is the field doing its own job and not a special case.
@@ -1221,6 +1302,19 @@ int main(int /*argc*/, char** /*argv*/) {
         const float dt = static_cast<float>(t - lastT);
         lastT = t;
         if (seconds >= 0.0 && t >= seconds) running = false;
+        // M1f.2's harness: a change to the auto-listen setting, made where a
+        // hand would make it. Erased from the list once applied so it happens
+        // once; the log line is what a run is read back against.
+        for (auto it = listenTimeoutAt.begin(); it != listenTimeoutAt.end();) {
+            if (t < it->first) { ++it; continue; }
+            uiState.listen_timeout_on = it->second > 0;
+            if (uiState.listen_timeout_on) uiState.listen_timeout_sec = it->second;
+            log::info("[harness] listen timeout set to {} at t={:.1f}s",
+                      uiState.listen_timeout_on ? std::to_string(it->second) + " s"
+                                                : std::string("never"),
+                      t);
+            it = listenTimeoutAt.erase(it);
+        }
         if (width == 0 || height == 0) continue;
 
         // ---- voice loop tick ----
@@ -1574,6 +1668,13 @@ int main(int /*argc*/, char** /*argv*/) {
                 // same reason: the panel owns the flags, this pushes them
                 // down, and set_languages() is a no-op unless they changed.
                 session->set_languages({uiState.lang_english, uiState.lang_japanese});
+                // M1f.2, and the whole reason M1f.1 made this a level rather
+                // than an edge. Pushed every frame, from the panel state the
+                // control writes, so a number changed while the microphone is
+                // already latched is honoured by *that* latch — there is no
+                // "takes effect next time you click Talk", and no restart.
+                // set_listen_timeout() is a no-op unless the value changed.
+                session->set_listen_timeout(aii::listen_timeout_seconds(uiState));
                 // Only reaches here once the panel has satisfied itself the
                 // session can take it; say() refuses the rest anyway.
                 if (!r.send_text.empty()) {
@@ -1602,6 +1703,11 @@ int main(int /*argc*/, char** /*argv*/) {
             // answer for, because there is no spelling of "neither".
             settings.set_string("language", "enabled",
                                 aii::language_spec({uiState.lang_english, uiState.lang_japanese}));
+            // M1f.2. One number and no companion flag: 0 is never, which is
+            // the spelling the mechanism, the config and the file all share.
+            // The same expression that was pushed into the session above, so
+            // what is remembered and what is running cannot diverge.
+            settings.set_float("timing", "listen_timeout", aii::listen_timeout_seconds(uiState));
             // The scrim and the caption belong to the loader, not the panel:
             // the loading screen has to look the same whether or not there is
             // anything underneath it. The foreground draw list puts them over

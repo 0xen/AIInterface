@@ -80,6 +80,15 @@ bool Settings::get_bool(const char* section, const char* key, bool def) const {
   return v.is_boolean() ? v.get<bool>() : def;
 }
 
+float Settings::get_float(const char* section, const char* key, float def) const {
+  const json& v = member(member(root_, section), key);
+  // is_number(), not is_number_float(): `60` and `60.0` are the same setting,
+  // and a file a person has edited by hand will have whichever one they typed.
+  // JSON has no NaN or infinity to defend against — nlohmann refuses to parse
+  // either — so a number here is always a usable one.
+  return v.is_number() ? v.get<float>() : def;
+}
+
 int Settings::get_enum(const char* section, const char* key, const char* const* names, int count,
                        int def) const {
   const json& v = member(member(root_, section), key);
@@ -129,6 +138,20 @@ void Settings::set_string(const char* section, const char* key, const std::strin
 void Settings::set_bool(const char* section, const char* key, bool value) {
   const json& cur = member(member(root_, section), key);
   if (cur.is_boolean() && cur.get<bool>() == value) return;
+  if (!root_[section].is_object()) root_[section] = json::object();
+  root_[section][key] = value;
+  dirty_ = true;
+  since_change_ = 0.0f;
+}
+
+void Settings::set_float(const char* section, const char* key, float value) {
+  const json& cur = member(member(root_, section), key);
+  // Compared through float, not double: the stored value is round-tripped
+  // through this type, so comparing the double nlohmann hands back against a
+  // float would report a change on every frame for any value that is not
+  // exactly representable — which is a settings write per frame, the one thing
+  // the no-op contract exists to prevent.
+  if (cur.is_number() && cur.get<float>() == value) return;
   if (!root_[section].is_object()) root_[section] = json::object();
   root_[section][key] = value;
   dirty_ = true;

@@ -13,8 +13,15 @@
 //   {
 //     "version": 1,
 //     "panel": { "chat_open": false, "avatar_mode": "always" },
-//     "language": { "enabled": "en,ja" }
+//     "language": { "enabled": "en,ja" },
+//     "timing": { "listen_timeout": 60.0 }
 //   }
+//
+// `timing.listen_timeout` (M1f.2) is seconds, and **0 means never** — the same
+// spelling the mechanism already uses (`Config::listen_timeout`,
+// `VoiceSession::set_listen_timeout`), so there is one way to say "never" in
+// the whole feature rather than a number and a flag that can contradict
+// each other.
 //
 // `language.enabled` (M8.3) is one string — "en", "ja" or "en,ja" — and not
 // two booleans, because at least one language must always be on and a pair of
@@ -68,6 +75,18 @@ class Settings {
   // sane, because the alternative is one bad hand edit silently resetting
   // everything else the user had set.
   bool get_bool(const char* section, const char* key, bool def) const;
+  // M1f.2. A number, for the settings that are a quantity rather than a state
+  // or a name — the auto-listen timeout is the first, and the milestones name
+  // endpoint timing as the next. Stored as JSON's own number, so the file
+  // stays hand-editable: `"listen_timeout": 60.0` is what a person would
+  // write, and a hand-typed `60` is accepted as the same value.
+  //
+  // Deliberately *not* range-checked here, unlike get_enum. An enum has a set
+  // of legal values this class can see; a quantity's legal range belongs to
+  // the control that owns it — M1f.2's floor is a fact about microphones, not
+  // about the file format — and a clamp in two places is a clamp that can
+  // disagree with itself.
+  float get_float(const char* section, const char* key, float def) const;
   // An enum stored by name. `names` is the spelling of each value in
   // declaration order; the names are the on-disk format and must stay stable,
   // since they are what a user editing the file by hand reads and writes.
@@ -87,6 +106,10 @@ class Settings {
   // frame loop can call them unconditionally every frame and "on change" is
   // decided here rather than duplicated into every button that writes one.
   void set_bool(const char* section, const char* key, bool value);
+  // M1f.2. Same contract as set_bool, no-op-when-unchanged included: the frame
+  // loop mirrors the value out of the panel every frame, and this is what
+  // decides that a control merely being looked at is not a write.
+  void set_float(const char* section, const char* key, float value);
   void set_enum(const char* section, const char* key, const char* const* names, int count,
                 int value);
   // An empty value is ignored rather than written: see the note in the .cpp.

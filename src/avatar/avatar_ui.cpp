@@ -722,6 +722,106 @@ void language_section(AvatarUiState& state, const AvatarOptions& options) {
   ImGui::PopStyleColor();
 }
 
+// ---- M1f.2: the auto-listen timeout ------------------------------------------
+//
+// One setting, two widgets, and the second one is why. A single numeric
+// control would have to hold "never" somewhere in its range, and every way of
+// doing that is worse than a tick box:
+//
+//  - A minimum of zero puts 1-14 s inside the control, and the mechanism then
+//    rewrites anything under its own floor. The setting would lie about
+//    itself, which is the failure this task was told to avoid.
+//  - A minimum at the floor makes "never" unreachable, and the user asked for
+//    it explicitly.
+//  - A sentinel step below the floor displayed as the word "Never" reads well
+//    until someone ctrl+clicks it to type a number, at which point ImGui shows
+//    them the sentinel integer. A control with a value that only means
+//    something to the code behind it is a control that cannot be trusted.
+//
+// The tick box is therefore the whole of "never", and the number beside it
+// starts at the floor and never leaves the legal range. Nothing in between can
+// be expressed. **Both are one value in storage** — seconds, 0 for never
+// (`listen_timeout_seconds()`), the same spelling `Config::listen_timeout` and
+// `VoiceSession::set_listen_timeout()` already use — so the tick box is an
+// affordance and not a second piece of state that can contradict the first.
+//
+// The prose under it is not decoration. This timeout only ever fires when the
+// user is not at the desk, so unlike every other control in this panel it can
+// never teach itself through use: whatever they understand about it, they
+// understand from reading it cold. So the line says what will happen, in
+// seconds, in the tense it will happen in — and the word "Never" appears on
+// screen when it is off rather than being implied by an empty box.
+void listen_timeout_section(AvatarUiState& state) {
+  settings_row("Stop listening");
+  ImGui::Checkbox("##listen_timeout_on", &state.listen_timeout_on);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("On: a microphone you latched by clicking Talk\ncloses itself once it has "
+                      "heard no voice for a\nwhile, and says nothing when it does.\n\nOff: it "
+                      "stays open until you close it, which is\nwhat the app did before this "
+                      "setting existed.");
+
+  settings_row("After");
+  ImGui::BeginDisabled(!state.listen_timeout_on);
+  // DragInt rather than SliderInt: a slider in a 360 px panel is about 200 px
+  // for 585 values, so landing on a round number is luck, and a click anywhere
+  // on a slider's track jumps the value under the pointer. A drag moves only
+  // while the pointer does, ctrl+click types an exact number, and neither
+  // gesture moves the control itself — this project has shipped one bug
+  // already from a widget that moved between the press and the release.
+  //
+  // AlwaysClamp is what makes the floor a property of the control rather than
+  // advice: it binds the typed value as well as the dragged one. It binds only
+  // while the user is in the widget, which is deliberate — a value inherited
+  // from AII_LISTEN_TIMEOUT or a hand edit is shown as it is, and said to be
+  // out of range below, rather than being silently corrected by a control
+  // nobody has touched.
+  ImGui::DragInt("##listen_timeout_sec", &state.listen_timeout_sec, 1.0f,
+                 kListenTimeoutUserFloorSec, kListenTimeoutMaxSec, "%d s",
+                 ImGuiSliderFlags_AlwaysClamp);
+  ImGui::EndDisabled();
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip("Drag to change it; ctrl+click to type a number.\n%d to %d seconds.\n\n"
+                      "It stops no lower than %d s on purpose: shorter\nthan that and a pause for "
+                      "thought closes the\nmicrophone, which reads as the app breaking\nrather "
+                      "than as a timeout. Untick for never.",
+                      kListenTimeoutUserFloorSec, kListenTimeoutMaxSec,
+                      kListenTimeoutUserFloorSec);
+
+  ImGui::PushStyleColor(ImGuiCol_Text, dim());
+  if (state.listen_timeout_on) {
+    ImGui::TextWrapped("The latch closes after %d s with no voice, silently - by then you are not "
+                       "at the desk to be told. Hold-to-talk is never cut off.",
+                       state.listen_timeout_sec);
+  } else {
+    // Trimmed to the same two wrapped lines the ticked variant takes, which is
+    // not a style choice. The surface scrolls, this section is near the bottom
+    // of it, and a reader who has scrolled to the end is sitting at max
+    // scroll: shorten the content under them and ImGui clamps the scroll,
+    // which slides the tick box they are about to click a dozen pixels out
+    // from under the pointer. This project has already shipped one bug from a
+    // control that moved between the press and the release. What the two lines
+    // give up — "this is what the app did before the setting existed" — the
+    // tick box's own tooltip still says.
+    ImGui::TextWrapped("Never: a latched microphone stays open until you close it, however long "
+                       "the room stays quiet. Hold-to-talk is unaffected.");
+  }
+  ImGui::PopStyleColor();
+
+  // A value the control could not have produced: AII_LISTEN_TIMEOUT, or a
+  // hand-edited settings.json. It is in force exactly as it stands — the
+  // mechanism honours anything down to a second — and the honest thing is to
+  // say so rather than to quietly round it up to the floor and leave the user
+  // wondering why their five seconds became fifteen.
+  if (state.listen_timeout_on && state.listen_timeout_sec < kListenTimeoutUserFloorSec) {
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("%d s came from AII_LISTEN_TIMEOUT or a hand edit, and is in force as it "
+                       "stands. The control itself stops at %d s, so touching it will take the "
+                       "value up there and it cannot come back down here.",
+                       state.listen_timeout_sec, kListenTimeoutUserFloorSec);
+    ImGui::PopStyleColor();
+  }
+}
+
 void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ui_color(0.055f, 0.063f, 0.082f));
   ImGui::BeginChild("##settings", ImVec2(0.0f, kChatHeight), ImGuiChildFlags_None, 0);
@@ -803,6 +903,13 @@ void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   settings_heading("Voice");
   ImGui::TextColored(dim(), "Which voice speaks each language: M8.");
   settings_heading("Timing");
+  // M1f.2's pose flag; see AvatarUiState::settings_scroll_timing. Held rather
+  // than applied once, because a run that is being screenshotted is one where
+  // nothing else is going to scroll this surface anyway.
+  if (state.settings_scroll_timing) ImGui::SetScrollHereY(0.0f);
+  listen_timeout_section(state);
+  // Left as it was (eae9061): the rest of Timing is still a stub, and it reads
+  // correctly under a control rather than instead of one.
   ImGui::TextColored(dim(), "Endpointing and early speech: M2.8.");
   settings_heading("Paths");
   ImGui::TextColored(dim(), "Models, avatars and the working directory.");
