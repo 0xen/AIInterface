@@ -14,7 +14,11 @@
 //        AII_KOKORO_SID     (default 3 = af_heart)
 //        AII_VOICEVOX_STYLE (default 2 = 四国めたん normal)
 //        AII_EARLY_WORDS   (default 12; first chunk of a reply is spoken at a comma or after this many words, 0 = off)
-//        AII_STT_LANG       (default auto)
+//        AII_LANGS          which languages are on: en | ja | en,ja (default en,ja).
+//                           One language pins the recogniser to it, tells Claude to
+//                           reply only in it, and — for en — skips loading VOICEVOX.
+//                           In the window this comes from settings.json instead.
+//        AII_STT_LANG       recogniser language override (default: derived from AII_LANGS)
 //
 //        AII_PROMPTS_DIR    prompt store location (default %APPDATA%\AIInterface\prompts)
 //
@@ -137,7 +141,9 @@ int main(int argc, char** argv) {
   std::unique_ptr<aii::LlmClient>& llm = eng.llm;
   aii::Recognizer& stt = *eng.stt;
   aii::KokoroTts& kokoro = *eng.kokoro;
-  aii::VoicevoxTts& voicevox = *eng.voicevox;
+  // A pointer, not a reference: with `AII_LANGS=en` the Japanese voice is
+  // never built (M8.3) and SpeechQueue takes a null here quite happily.
+  aii::VoicevoxTts* voicevox = eng.voicevox.get();
 
   aii::AudioOut speaker;
   if (!speaker.start(kokoro.sample_rate())) { std::fprintf(stderr, "no playback device\n"); return 1; }
@@ -145,7 +151,7 @@ int main(int argc, char** argv) {
   if (!mic.open(16000)) { std::fprintf(stderr, "no capture device\n"); return 1; }
   std::printf("  speaker: %s\n  mic:     %s\n", speaker.device_name().c_str(), mic.device_name().c_str());
 
-  aii::SpeechQueue speech(&kokoro, &voicevox, &speaker);
+  aii::SpeechQueue speech(&kokoro, voicevox, &speaker);
   speech.set_on_status([](const std::string& s) { std::printf("\n  [tts] %s\n", s.c_str()); });
 
   if (!scripted) std::printf("\nSPACE talk/stop   T type   S silence   Q quit\n");
@@ -173,7 +179,7 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
     auto t_send = clk::now();
     std::atomic<bool> cancel{false};
-    const std::string sent = injector.decorate(user_text);
+    const std::string sent = aii::decorate_language(injector.decorate(user_text), cfg.langs);
     if (sent.size() != user_text.size()) std::printf("[prompts] context injected\n");
     aii::ChatResult r = llm->turn(sent, [&](const std::string& delta) {
       if (!got_token) { got_token = true; t_first_token = clk::now(); }

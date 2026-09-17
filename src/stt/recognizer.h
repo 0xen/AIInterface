@@ -22,7 +22,15 @@ class Recognizer {
 
   bool ok() const { return recognizer_ != nullptr; }
 
-  // "auto", "en", "ja", ...  Applies to the next utterance.
+  // "auto", "en", "ja", ...
+  //
+  // Applies to the next utterance *and* to the one in flight. sherpa-onnx
+  // re-reads this option through `GetOption()` on every 560 ms chunk inside
+  // `DecodeStreams()` (measured 16 Sep 2026), so setting it on the live stream
+  // takes effect from the next chunk rather than from the next `begin()`. That
+  // is what makes a settings toggle honest: a user who switches Japanese off
+  // while the microphone is open does not get one more utterance of the old
+  // behaviour. Setting it to the value it already holds is free.
   void set_language(const std::string& lang);
 
   void begin();                                     // start a fresh utterance

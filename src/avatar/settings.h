@@ -12,8 +12,14 @@
 //
 //   {
 //     "version": 1,
-//     "panel": { "chat_open": false, "avatar_mode": "always" }
+//     "panel": { "chat_open": false, "avatar_mode": "always" },
+//     "language": { "enabled": "en,ja" }
 //   }
+//
+// `language.enabled` (M8.3) is one string — "en", "ja" or "en,ja" — and not
+// two booleans, because at least one language must always be on and a pair of
+// booleans has a spelling for "neither". A value naming nothing known is read
+// as the default rather than obeyed.
 //
 // Two fields today, but this is the app's settings file rather than a cache
 // for those two: voices, endpoint timing, the chosen avatar and its theme and

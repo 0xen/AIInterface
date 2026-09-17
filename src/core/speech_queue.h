@@ -19,6 +19,19 @@ class SpeechQueue {
   SpeechQueue(TtsEngine* english, TtsEngine* japanese, AudioOut* out);
   ~SpeechQueue();
 
+  // The Japanese voice arrives late, or not at all (M8.3). With Japanese
+  // switched off in the settings, VOICEVOX is never built and this is
+  // constructed with `japanese == nullptr`; switching Japanese on mid-session
+  // loads it on a background thread and hands it over here when it is ready.
+  //
+  // Atomic rather than mutex-guarded because the worker thread reads it once
+  // per script run and the frame loop writes it at most once a session: a lock
+  // on the read path would cost more than the hand-over it is protecting. A
+  // run that reads the old null simply takes the English fallback below, which
+  // is what it would have done a microsecond earlier anyway.
+  void set_japanese(TtsEngine* japanese) { ja_.store(japanese, std::memory_order_release); }
+  bool has_japanese() const { return ja_.load(std::memory_order_acquire) != nullptr; }
+
   void enqueue(const std::string& sentence);
   void clear();                 // drop queued sentences and any audio not yet played
   bool idle() const;            // nothing queued, nothing synthesising, nothing playing
@@ -32,8 +45,12 @@ class SpeechQueue {
  private:
   void run();
 
+  // English is never swapped and never absent: it is also the fallback the
+  // script splitter routes every Latin run to (names, numbers, code words),
+  // which appear inside Japanese replies too. So Kokoro loads whatever the
+  // language setting says, and VOICEVOX is the only conditional one.
   TtsEngine* en_;
-  TtsEngine* ja_;
+  std::atomic<TtsEngine*> ja_;
   AudioOut* out_;
   std::thread thread_;
   mutable std::mutex mutex_;

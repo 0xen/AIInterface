@@ -33,6 +33,7 @@ add_library(aii_core STATIC
   src/core/button_registry.cpp
   src/core/config.cpp
   src/core/engines.cpp
+  src/core/language.cpp
   src/core/prompt_store.cpp
   src/core/sentence_splitter.cpp
   src/core/speech_queue.cpp

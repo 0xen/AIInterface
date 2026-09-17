@@ -79,6 +79,16 @@ struct AvatarOptions {
   // True when the derived theme is the one in force, i.e. when the picker is
   // worth showing at all.
   bool custom_theme = false;
+
+  // M8.3. What the session is actually doing with the language selection, as
+  // opposed to what the checkboxes say. The two differ for about a second when
+  // Japanese is switched on mid-run and its voice is still loading, and
+  // permanently if that voice fails — the surface says so in both cases rather
+  // than showing a ticked box for something that cannot happen.
+  VoiceSession::VoiceLoad japanese_voice = VoiceSession::VoiceLoad::Absent;
+  std::string japanese_voice_error;
+  // The recogniser's `language` option in force: "auto", "en" or "ja".
+  const char* stt_language = "auto";
 };
 
 struct AvatarUiState {
@@ -141,6 +151,19 @@ struct AvatarUiState {
   // second is the difference between one write and sixty.
   float custom_colour[3] = {0.0f, 0.0f, 0.0f};
   bool custom_colour_changed = false;
+  // M8.3. Which languages are on. Same contract as `muted`: the panel is the
+  // owner of record, main.cpp persists the level and pushes it into the
+  // session every frame, and the default is what the app did before the
+  // setting existed.
+  //
+  // **At least one is always on, and that is enforced by the control rather
+  // than by a check after the fact.** The checkbox for the only enabled
+  // language is drawn disabled, so the invariant is something the user can see
+  // before they click. A box that could be clicked and then sprang back would
+  // be worse than one that cannot be clicked: it would read as a bug in the
+  // app rather than as a rule about the setting.
+  bool lang_english = true;
+  bool lang_japanese = true;
   // What is in the message field (M1b.2). A fixed buffer rather than a
   // std::string because imgui_stdlib is not in this build, and a corner
   // window's typed message has no business being longer than this anyway.

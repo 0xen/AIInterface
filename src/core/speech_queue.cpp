@@ -68,8 +68,9 @@ void SpeechQueue::run() {
     const TtsEngine* spoke_last = nullptr;
     for (const auto& run : split_by_script(sentence)) {
       if (gen != generation_) break;  // a clear() landed mid-sentence
-      TtsEngine* engine = run.japanese ? ja_ : en_;
-      if (!engine || !engine->ok()) engine = (en_ && en_->ok()) ? en_ : ja_;
+      TtsEngine* ja = ja_.load(std::memory_order_acquire);
+      TtsEngine* engine = run.japanese ? ja : en_;
+      if (!engine || !engine->ok()) engine = (en_ && en_->ok()) ? en_ : ja;
       AudioChunk chunk;
       bool okay = engine && engine->synthesize(run.text, chunk);
       if (okay && gen == generation_) {  // discard if a clear() happened meanwhile

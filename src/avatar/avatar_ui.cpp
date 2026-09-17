@@ -617,6 +617,104 @@ void custom_colour_section(AvatarUiState& state, const AvatarOptions& options) {
                             "and this control cannot overwrite each other.");
 }
 
+// ---- M8.3: the language section ---------------------------------------------
+//
+// Two checkboxes with one rule: at least one is always on. The rule is
+// enforced by **disabling the last enabled box**, not by rejecting the click
+// afterwards. A control that can be clicked and then springs back is read as a
+// broken app; a control that cannot be clicked, and says why on hover, is read
+// as a rule. `AllowWhenDisabled` on the hover test is what makes the second
+// half of that possible — ImGui suppresses tooltips on disabled items by
+// default, and the tooltip is the entire explanation.
+//
+// A language that is off stops both halves of the loop, which is the user's
+// own decision and the reason this is one control and not two: the recogniser
+// is pinned away from it and Claude is told not to reply in it.
+
+// One language row. `other` is the other language's flag, which is what decides
+// whether this one is the last one standing.
+void language_row(const char* label, const char* id, bool& value, bool other,
+                  const char* on_tip, const char* off_tip) {
+  const bool locked = value && !other;
+  settings_row(label);
+  ImGui::BeginDisabled(locked);
+  ImGui::Checkbox(id, &value);
+  ImGui::EndDisabled();
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    if (locked)
+      ImGui::SetTooltip("This is the only language left on.\nSwitch the other one on first - the "
+                        "app has to be\nable to hear and speak in something.");
+    else
+      ImGui::SetTooltip("%s", value ? on_tip : off_tip);
+  }
+}
+
+void language_section(AvatarUiState& state, const AvatarOptions& options) {
+  settings_heading("Language");
+  language_row("English", "##lang_en", state.lang_english, state.lang_japanese,
+               "On: heard and spoken.",
+               "Off: Claude replies only in Japanese, and the\nrecogniser is pinned to Japanese.");
+  language_row("Japanese", "##lang_ja", state.lang_japanese, state.lang_english,
+               "On: heard and spoken (VOICEVOX 四国めたん).",
+               "Off: Claude replies only in English, the recogniser\nis pinned to English, and the "
+               "Japanese voice is not\nloaded at all - about a second off every start.");
+
+  // What the choice actually did, in the surface that made it. The recogniser
+  // line is the one with a measured payoff behind it, so it says the value and
+  // the hover says why it matters.
+  ImGui::TextColored(dim(), "Recogniser: %s", options.stt_language);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Both languages on means \"auto\", which is inertial:\nit switches English to "
+                      "Japanese and never back, and a\nshort Japanese phrase inside an English "
+                      "sentence is\nsilently dropped. With one language on it is pinned\nto that "
+                      "language instead, and that failure cannot happen.");
+
+  // The on-demand voice, stated rather than announced. Nothing here is ever
+  // spoken: a voice that introduced itself when it finished loading would be
+  // an announcement the mute button never asked for, and it would arrive
+  // while the user was reading the checkbox they had just ticked.
+  switch (options.japanese_voice) {
+    case VoiceSession::VoiceLoad::Loading:
+      ImGui::TextColored(warn(), "Japanese voice: loading...");
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Loading now, on its own thread. Until it is ready\nthe app stays in "
+                          "English rather than speaking\nJapanese through the English voice.");
+      break;
+    case VoiceSession::VoiceLoad::Failed:
+      ImGui::PushStyleColor(ImGuiCol_Text, warn());
+      ImGui::TextWrapped("Japanese voice failed to load, so Japanese stays off however this box is "
+                         "set: %s", options.japanese_voice_error.c_str());
+      ImGui::PopStyleColor();
+      break;
+    case VoiceSession::VoiceLoad::Absent:
+      if (state.lang_japanese) {
+        ImGui::TextColored(dim(), "Japanese voice: loads when the session is up.");
+      } else {
+        ImGui::TextColored(dim(), "Japanese voice: not loaded.");
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("Skipped at startup, on purpose. Switching Japanese\non loads it then "
+                            "and there - the window keeps\nrunning while it does.");
+      }
+      break;
+    case VoiceSession::VoiceLoad::Ready:
+      ImGui::TextColored(dim(), "Japanese voice: ready.");
+      break;
+  }
+
+  // The honest limit, said once, where the setting is made. Speaking a
+  // switched-off language is not detected and not corrected: the recogniser is
+  // pinned, so the words come back as whatever English the pin can make of
+  // them. Building a detector would mean running `auto` underneath the pin,
+  // which is the failure mode this setting exists to remove.
+  // TextWrapped, not TextColored: the panel is 360 px wide and a sentence this
+  // long is simply cut off at the right edge otherwise, which is how a caveat
+  // turns into a truncated fragment.
+  ImGui::PushStyleColor(ImGuiCol_Text, dim());
+  ImGui::TextWrapped("Speaking a language that is off transcribes as nonsense rather than being "
+                     "detected: the recogniser is pinned, not listening for it.");
+  ImGui::PopStyleColor();
+}
+
 void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ui_color(0.055f, 0.063f, 0.082f));
   ImGui::BeginChild("##settings", ImVec2(0.0f, kChatHeight), ImGuiChildFlags_None, 0);
@@ -632,6 +730,11 @@ void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   ImGui::PushStyleColor(ImGuiCol_Button, ui_color(0.110f, 0.120f, 0.150f));
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui_color(0.150f, 0.163f, 0.205f));
   ImGui::PushStyleColor(ImGuiCol_ButtonActive, ui_color(0.180f, 0.196f, 0.245f));
+  // The tick, toned with the rest. ImGui's default check mark is its accent
+  // blue, which on this palette reads as a lit control in a panel where every
+  // other frame is deliberately dark — the one bright thing in the widget
+  // would be a checkbox.
+  ImGui::PushStyleColor(ImGuiCol_CheckMark, fg());
   ImGui::PushStyleColor(ImGuiCol_Header, ui_color(0.140f, 0.153f, 0.192f));
   ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ui_color(0.170f, 0.185f, 0.232f));
   ImGui::PushStyleColor(ImGuiCol_Border, ui_color(0.16f, 0.17f, 0.21f));
@@ -671,15 +774,17 @@ void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   // endpoint timing, paths); they are listed so that what this surface is for
   // is visible from inside it, and so the next section is an addition to a
   // shape that exists rather than a decision to be taken again.
+  language_section(state, options);
+
   settings_heading("Voice");
-  ImGui::TextColored(dim(), "Speech voices and language: M8.");
+  ImGui::TextColored(dim(), "Which voice speaks each language: M8.");
   settings_heading("Timing");
   ImGui::TextColored(dim(), "Endpointing and early speech: M2.8.");
   settings_heading("Paths");
   ImGui::TextColored(dim(), "Models, avatars and the working directory.");
 
   ImGui::PopStyleVar();
-  ImGui::PopStyleColor(9);
+  ImGui::PopStyleColor(10);
   ImGui::EndChild();
   ImGui::PopStyleColor();
 }

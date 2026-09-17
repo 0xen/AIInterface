@@ -15,6 +15,7 @@
 #include "audio/mic_in.h"
 #include "core/config.h"
 #include "core/engines.h"
+#include "core/language.h"
 #include "core/prompt_store.h"
 #include "core/speech_queue.h"
 #include "core/worker_pool.h"
@@ -25,6 +26,15 @@ namespace aii {
 class VoiceSession {
  public:
   enum class State { Loading, Idle, Listening, Thinking, Speaking, Failed };
+
+  // M8.3. Where the Japanese voice is. `Absent` is the ordinary state when
+  // Japanese has never been switched on this session — VOICEVOX was skipped at
+  // startup on purpose, which is the second of startup the user asked to save,
+  // not a failure. The settings surface reads this to say what is happening,
+  // which is the whole of the on-demand load's user interface: nothing is ever
+  // *spoken* about it, so a voice that arrives while the app is muted cannot
+  // announce itself.
+  enum class VoiceLoad { Absent, Loading, Ready, Failed };
 
   struct Line {
     bool user = false;
@@ -68,6 +78,12 @@ class VoiceSession {
     std::string load_stage;      // display name of the running stage, empty once loaded
     std::vector<Line> lines;
     std::vector<WorkerPool::Snapshot> workers;
+    // M8.3, all three for the settings surface.
+    VoiceLoad japanese_voice = VoiceLoad::Absent;
+    std::string japanese_voice_error;   // empty unless japanese_voice == Failed
+    // What the app is *actually* doing, which is not always what the
+    // checkboxes say: see effective_langs() for the one case where they differ.
+    LanguageSelection effective_langs;
   };
 
   explicit VoiceSession(Config cfg);
@@ -117,6 +133,19 @@ class VoiceSession {
   // 16 Sep 2026; nothing here can resume a paused worker turn, so the name was
   // the only pause-like thing about it. The behaviour is unchanged.
   void stop();
+  // M8.3. Which languages are on, pushed down from the panel every frame the
+  // same way mute is: a level, not an edge, so there is one owner of record
+  // (the settings file) and this is a no-op unless it changed.
+  //
+  // A change does three things immediately, none of which waits for the next
+  // utterance: the recogniser's language option is rewritten (it is re-read
+  // per 560 ms chunk, so this reaches an utterance already in flight), the
+  // per-turn instruction to Claude changes from the next turn, and switching
+  // Japanese on for the first time starts the VOICEVOX load on its own thread.
+  //
+  // The caller guarantees at least one language is on; a selection with none
+  // is repaired to both rather than obeyed.
+  void set_languages(LanguageSelection sel);
   void say(const std::string& text);   // send typed/scripted text as the user turn
   bool quitting_ok() const;            // true once no worker is mid-turn
 
@@ -125,6 +154,25 @@ class VoiceSession {
 
  private:
   void load();
+  // What the user asked for, and what can actually be delivered right now.
+  //
+  // They differ for about a second, once: Japanese switched on mid-session is
+  // requested immediately but VOICEVOX takes ~1.1 s to load, and in that gap
+  // routing a Japanese reply anywhere would mean routing it to the English
+  // voice, which reads it as garbage. So Japanese counts as on only once its
+  // voice is actually ready, and for that second the recogniser stays pinned
+  // and Claude is still told to stay in English. The load then becomes
+  // invisible rather than a window in which the app half-works.
+  //
+  // It is also what a permanently failed VOICEVOX collapses to, correctly: the
+  // checkbox stays on, the settings surface says the voice failed, and nothing
+  // downstream pretends Japanese is available.
+  LanguageSelection requested_langs() const;
+  LanguageSelection effective_langs() const;
+  // Push the effective selection into the recogniser. Cheap and idempotent.
+  void apply_stt_language();
+  // Start the on-demand VOICEVOX load if it is wanted and not already here.
+  void ensure_japanese_voice();
   // Moves the loading screen on to stage `index` of kLoadStages (loader thread
   // only). Progress becomes the weight of everything before it, so it only
   // ever climbs; an index past the end means loaded, 1.0 and no stage name.
@@ -192,7 +240,26 @@ class VoiceSession {
   std::chrono::steady_clock::time_point listen_began_{};
   float noise_floor_ = 0.0f;
 
+  // M8.3. Which stages of the bring-up table this run actually performs, by
+  // index. Built in the constructor from the language selection, because a
+  // skipped Japanese voice must not leave a weighted slice of the progress bar
+  // that nothing ever fills.
+  std::vector<size_t> stage_ids_;
+
+  // The language selection, as two bits in one atomic so that it can never be
+  // read half-updated — two separate atomics have a window in which both look
+  // false, and "no language at all" is the one state nothing here handles.
+  std::atomic<unsigned> langs_bits_{0};
+
   std::thread loader_;
+  // The on-demand Japanese voice (M8.3). Its own thread, for the same reason
+  // the startup load has one: the frame loop must keep running. It is started
+  // at most once per session and joined in the destructor.
+  std::thread ja_loader_;
+  std::atomic<bool> ja_loading_{false};
+  std::atomic<bool> ja_failed_{false};
+  std::atomic<bool> ja_started_{false};
+  std::string ja_error_;  // written by the loader before ja_failed_ is set
   std::thread turn_;
   std::atomic<bool> loaded_{false};
   std::atomic<bool> load_failed_{false};

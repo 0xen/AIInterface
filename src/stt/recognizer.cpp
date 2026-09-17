@@ -42,7 +42,14 @@ Recognizer::~Recognizer() {
   if (recognizer_) SherpaOnnxDestroyOnlineRecognizer(recognizer_);
 }
 
-void Recognizer::set_language(const std::string& lang) { language_ = lang; }
+void Recognizer::set_language(const std::string& lang) {
+  if (lang == language_) return;
+  language_ = lang;
+  // The member *and* the live stream: create_stream() is what applies this to
+  // the next utterance, and this line is what applies it to the one being
+  // decoded right now. See the header for why that works.
+  if (stream_) SherpaOnnxOnlineStreamSetOption(stream_, "language", language_.c_str());
+}
 
 void Recognizer::create_stream() {
   stream_ = SherpaOnnxCreateOnlineStream(recognizer_);

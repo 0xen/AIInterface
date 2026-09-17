@@ -58,6 +58,11 @@ bool build_llm(const Config& cfg, Engines& out, const LogFn& log, std::string* e
   return true;
 }
 
+std::string stt_language(const Config& cfg) {
+  // The hand override first, the derived value otherwise. See Config::stt_lang.
+  return cfg.stt_lang.empty() ? std::string(stt_language_for(cfg.langs)) : cfg.stt_lang;
+}
+
 bool build_stt(const Config& cfg, Engines& out, const LogFn& log, std::string* error) {
   auto t = clk::now();
   out.stt = std::make_unique<Recognizer>(cfg.stt_dir, 8, cfg.endpoint_silence);
@@ -65,8 +70,9 @@ bool build_stt(const Config& cfg, Engines& out, const LogFn& log, std::string* e
     if (error) *error = "recogniser failed to load from " + cfg.stt_dir;
     return false;
   }
-  out.stt->set_language(cfg.stt_lang);
-  say(log, "recogniser ready      " + fmt_secs(t));
+  const std::string lang = stt_language(cfg);
+  out.stt->set_language(lang);
+  say(log, "recogniser ready      " + fmt_secs(t) + "  (language " + lang + ")");
   return true;
 }
 
@@ -94,8 +100,18 @@ bool build_voicevox(const Config& cfg, Engines& out, const LogFn& log, std::stri
 }
 
 bool build_speech(const Config& cfg, Engines& out, const LogFn& log, std::string* error) {
-  return build_stt(cfg, out, log, error) && build_kokoro(cfg, out, log, error) &&
-         build_voicevox(cfg, out, log, error);
+  if (!build_stt(cfg, out, log, error) || !build_kokoro(cfg, out, log, error)) return false;
+  // M8.3. Kokoro is unconditional: it is the voice for every Latin run the
+  // script splitter emits, which a Japanese reply has too (names, code words),
+  // and it is SpeechQueue's fallback when the other engine is missing. So only
+  // VOICEVOX is skippable, and skipping it saves the second it takes to load.
+  // `out.voicevox` stays null, which SpeechQueue already handles — and which
+  // VoiceSession fills in later if the user switches Japanese back on.
+  if (!cfg.langs.japanese) {
+    say(log, "japanese voice        skipped (Japanese is off in settings)");
+    return true;
+  }
+  return build_voicevox(cfg, out, log, error);
 }
 
 }  // namespace aii

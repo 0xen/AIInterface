@@ -20,7 +20,13 @@ Config Config::from_env() {
   c.backend = env_or("AII_BACKEND", "code");
   c.effort = env_or("AII_EFFORT", "low");
   c.model_override = env_or("AII_MODEL", "");
-  c.stt_lang = env_or("AII_STT_LANG", "auto");
+  c.langs = language_selection_from_spec(env_or("AII_LANGS", "en,ja"));
+  // Empty by default now, and that is the change: the recogniser's language is
+  // *derived* from the enabled languages (both -> auto, one -> that one), so
+  // the ordinary case has one source of truth. AII_STT_LANG is kept as a
+  // deliberate override for someone pinning the recogniser by hand, and it
+  // still wins when it is set.
+  c.stt_lang = env_or("AII_STT_LANG", "");
   c.claude_exe = env_or("AII_CLAUDE_EXE", env_or("USERPROFILE", "C:\\Users\\Default") + "\\.local\\bin\\claude.exe");
   c.api_key = env_or("ANTHROPIC_API_KEY", "");
   c.kokoro_sid = std::atoi(env_or("AII_KOKORO_SID", "3").c_str());

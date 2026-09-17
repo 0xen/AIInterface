@@ -8,6 +8,7 @@
 
 #include "rend/core/log.h"
 
+#include "core/language.h"
 #include "core/sentence_splitter.h"
 #include "core/text_util.h"
 
@@ -39,6 +40,23 @@ constexpr LoadStage kLoadStages[] = {
     {"Microphone", 25.0f},
 };
 constexpr size_t kLoadStageCount = sizeof(kLoadStages) / sizeof(kLoadStages[0]);
+// The one stage M8.3 can skip, by index into the table above.
+constexpr size_t kJapaneseVoiceStage = 3;
+
+// The language selection, packed into one word (see langs_bits_).
+constexpr unsigned kBitEn = 1u;
+constexpr unsigned kBitJa = 2u;
+unsigned pack_langs(LanguageSelection s) {
+  return (s.english ? kBitEn : 0u) | (s.japanese ? kBitJa : 0u);
+}
+LanguageSelection unpack_langs(unsigned bits) {
+  LanguageSelection s{(bits & kBitEn) != 0, (bits & kBitJa) != 0};
+  // The invariant, once more at the boundary. Nothing should ever store a
+  // selection with neither bit set, and if something did, every consumer below
+  // would have to have an opinion about it.
+  if (!s.english && !s.japanese) return LanguageSelection{};
+  return s;
+}
 
 // Noise-gate shaping. The floor learns the room, and the gate sits a few times
 // above it; anything louder counts as the user still talking.
@@ -69,6 +87,18 @@ float rms(const std::vector<float>& s) {
 }  // namespace
 
 VoiceSession::VoiceSession(Config cfg) : cfg_(std::move(cfg)) {
+  langs_bits_ = pack_langs(cfg_.langs);
+  // The bring-up plan for *this* run, decided before the thread starts. With
+  // Japanese off the Japanese voice is not in it at all, so its weight never
+  // enters the progress denominator and the bar reaches 100% at the right
+  // moment rather than jumping the last fifth.
+  for (size_t i = 0; i < kLoadStageCount; ++i) {
+    if (i == kJapaneseVoiceStage && !cfg_.langs.japanese) continue;
+    stage_ids_.push_back(i);
+  }
+  // Ready from the start when it was built at startup; otherwise Absent, which
+  // is a deliberate skip rather than a failure.
+  if (cfg_.langs.japanese) ja_started_ = true;
   set_status("loading engines...");
   loader_ = std::thread([this] { load(); });
 }
@@ -78,6 +108,11 @@ VoiceSession::~VoiceSession() {
   if (speech_) speech_->clear();
   if (workers_) workers_->pause_all();
   if (loader_.joinable()) loader_.join();
+  // Before speech_ and the engines go away: it is the thread that writes
+  // eng_.voicevox. There is nothing to cancel it with — VOICEVOX's load is a
+  // single blocking call — so quitting during the one second it takes waits
+  // for it, the same as quitting during the startup load does.
+  if (ja_loader_.joinable()) ja_loader_.join();
   if (turn_.joinable()) turn_.join();
   workers_.reset();  // interrupts and joins every worker
   if (mic_) mic_->close();
@@ -123,15 +158,20 @@ void VoiceSession::set_status(const std::string& s) {
 }
 
 float VoiceSession::begin_load_stage(size_t index) {
+  // `index` walks stage_ids_, not the table: with Japanese off the plan is one
+  // stage shorter and both the numerator and the denominator have to agree
+  // about that.
   float done = 0.0f;
   float total = 0.0f;
-  for (size_t i = 0; i < kLoadStageCount; ++i) {
-    if (i < index) done += kLoadStages[i].weight;
-    total += kLoadStages[i].weight;
+  for (size_t i = 0; i < stage_ids_.size(); ++i) {
+    const float w = kLoadStages[stage_ids_[i]].weight;
+    if (i < index) done += w;
+    total += w;
   }
   std::lock_guard<std::mutex> l(mutex_);
-  load_progress_ = (index >= kLoadStageCount || total <= 0.0f) ? 1.0f : done / total;
-  load_stage_ = index < kLoadStageCount ? kLoadStages[index].name : "";
+  const bool past_end = index >= stage_ids_.size();
+  load_progress_ = (past_end || total <= 0.0f) ? 1.0f : done / total;
+  load_stage_ = past_end ? "" : kLoadStages[stage_ids_[index]].name;
   return load_progress_;
 }
 
@@ -146,18 +186,30 @@ void VoiceSession::load() {
   // Stage bookkeeping is a closure rather than a loop over the table because
   // the steps have no common signature: two of them are device opens, not
   // engine builders, and each has its own failure message.
-  auto enter = [&](size_t index) {
+  size_t step = 0;  // position in stage_ids_, which may be shorter than the table
+  auto enter = [&](size_t table_index) {
+    // A stage that is not in this run's plan is not entered at all, and does
+    // not disturb the timing of the one before it. Called with the table index
+    // so the call sites below read as the fixed sequence they are, rather than
+    // as arithmetic over a list that varies.
+    if (step >= stage_ids_.size() || stage_ids_[step] != table_index) return;
     const auto now = std::chrono::steady_clock::now();
-    if (index > 0) {
+    if (step > 0) {
       // Per-stage timings stay in at trace level: they are what the weights
       // above were measured from, and they are how to re-measure them.
-      rend::log::trace("load: {} took {:.2f} s", kLoadStages[index - 1].name,
+      rend::log::trace("load: {} took {:.2f} s", kLoadStages[stage_ids_[step - 1]].name,
                        std::chrono::duration<double>(now - stage_began).count());
     }
     stage_began = now;
-    const float progress = begin_load_stage(index);
+    const float progress = begin_load_stage(step);
     rend::log::trace("load: {:.0f}%  {}", progress * 100.0f,
-                     index < kLoadStageCount ? kLoadStages[index].name : "done");
+                     step < stage_ids_.size() ? kLoadStages[stage_ids_[step]].name : "done");
+    ++step;
+  };
+  auto finish_stages = [&] {
+    step = stage_ids_.size();
+    begin_load_stage(step);
+    rend::log::trace("load: 100%  done");
   };
   auto fail = [&](const std::string& message) {
     log(message);
@@ -171,8 +223,13 @@ void VoiceSession::load() {
   if (!build_stt(cfg_, eng_, logger, &err)) return fail(err);
   enter(2);
   if (!build_kokoro(cfg_, eng_, logger, &err)) return fail(err);
-  enter(3);
-  if (!build_voicevox(cfg_, eng_, logger, &err)) return fail(err);
+  // M8.3: skipped entirely when Japanese is off, which is the second of
+  // startup the user asked to save. `enter` knows it is not in the plan, so
+  // the loading bar never reserves a slice for it.
+  if (cfg_.langs.japanese) {
+    enter(3);
+    if (!build_voicevox(cfg_, eng_, logger, &err)) return fail(err);
+  }
 
   enter(4);
   speaker_ = std::make_unique<AudioOut>();
@@ -180,7 +237,9 @@ void VoiceSession::load() {
   enter(5);
   mic_ = std::make_unique<MicIn>();
   if (!mic_->open(kMicRate)) return fail("no capture device");
-  enter(kLoadStageCount);
+  finish_stages();
+  // `eng_.voicevox` is null when Japanese is off; SpeechQueue takes that and
+  // set_japanese() is how the on-demand load hands it one later.
   speech_ = std::make_unique<SpeechQueue>(eng_.kokoro.get(), eng_.voicevox.get(), speaker_.get());
   speech_->set_on_status([this](const std::string& s) { log("[tts] " + s); });
   workers_ = std::make_unique<WorkerPool>(cfg_.claude_exe, cfg_.worker_bypass);
@@ -213,6 +272,20 @@ void VoiceSession::update() {
     return;
   }
   if (s == State::Failed) return;
+
+  // M8.3. Cheap (a string compare) and idempotent, and here rather than only
+  // on the settings edge because the effective selection also changes when the
+  // on-demand Japanese voice finishes loading on its own thread — which must
+  // not reach into the recogniser itself while the frame loop is feeding it.
+  apply_stt_language();
+  // And the same for the voice, for a reason that is only a latent hole today:
+  // set_languages() is level-based, so a switch-on that arrived while the
+  // engines were still coming up would be recorded and never acted on. The
+  // settings surface is withheld during loading so it cannot happen from the
+  // panel, but a level that is only ever applied on its own edge is the shape
+  // of a bug waiting for a second way in. Both calls are no-ops in the
+  // ordinary case.
+  ensure_japanese_voice();
 
   // Reap a finished turn thread.
   if (turn_.joinable() && !turn_running_) turn_.join();
@@ -474,6 +547,81 @@ void VoiceSession::say(const std::string& text) {
   start_turn(trim(text));
 }
 
+// ------------------------------------------------------------------ M8.3
+LanguageSelection VoiceSession::requested_langs() const {
+  return unpack_langs(langs_bits_.load(std::memory_order_acquire));
+}
+
+LanguageSelection VoiceSession::effective_langs() const {
+  LanguageSelection sel = requested_langs();
+  // The one place the checkboxes and the behaviour are allowed to differ: see
+  // the header. Japanese counts as on only once there is a voice that can
+  // actually speak it, so the ~1.1 s on-demand load is a second in which
+  // nothing routes Japanese to the English voice, rather than a second in
+  // which the app half-works.
+  if (sel.japanese && !(speech_ && speech_->has_japanese())) sel.japanese = false;
+  // English is never unavailable — Kokoro loads whatever the setting says,
+  // because it is also the splitter's voice for every Latin run — so this can
+  // only fire for a Japanese-only session in the load window, and it is here
+  // so that "no language at all" is unreachable rather than merely unlikely.
+  if (!sel.english && !sel.japanese) sel.english = true;
+  return sel;
+}
+
+void VoiceSession::apply_stt_language() {
+  if (!eng_.stt) return;
+  // The hand override still wins; otherwise both -> auto, one -> that one.
+  // `auto` is the measured failure mode, not the safe default: it deletes a
+  // short Japanese insert inside an English sentence outright. Pinning is what
+  // this setting buys.
+  const std::string lang =
+      cfg_.stt_lang.empty() ? std::string(stt_language_for(effective_langs())) : cfg_.stt_lang;
+  eng_.stt->set_language(lang);
+}
+
+void VoiceSession::ensure_japanese_voice() {
+  if (!loaded_) return;                       // the startup load owns the engines until it is done
+  if (!requested_langs().japanese) return;
+  if (ja_started_.exchange(true)) return;     // built at startup, or already loading, or done
+  ja_loading_ = true;
+  log("[lang] loading the Japanese voice...");
+  ja_loader_ = std::thread([this] {
+    const auto began = std::chrono::steady_clock::now();
+    std::string err;
+    LogFn logger = [this](const std::string& s) { log(s); };
+    if (build_voicevox(cfg_, eng_, logger, &err)) {
+      // Published only after the engine reports ok(), so nothing can be routed
+      // to a half-built voice. Deliberately silent: the settings surface says
+      // it arrived, and speaking a line here would be an announcement the mute
+      // button never asked for.
+      // The recogniser is deliberately *not* touched from this thread — it is
+      // fed from the frame loop and is not thread-safe. update() re-applies
+      // the language every frame, and that call is a no-op unless it changed,
+      // so the pin follows the new voice within one frame.
+      speech_->set_japanese(eng_.voicevox.get());
+      rend::log::info("japanese voice loaded on demand in {:.2f} s",
+                      std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count());
+    } else {
+      ja_error_ = err;
+      ja_failed_ = true;
+      log("[lang] " + err);
+    }
+    ja_loading_ = false;
+  });
+}
+
+void VoiceSession::set_languages(LanguageSelection sel) {
+  if (!sel.english && !sel.japanese) sel = LanguageSelection{};
+  const unsigned bits = pack_langs(sel);
+  if (langs_bits_.exchange(bits) == bits) return;  // a level, not an edge
+  log(std::string("[lang] ") + language_spec(sel));
+  // Japanese first: it is what effective_langs() may still be waiting on, and
+  // starting the load before the recogniser is told anything means the two are
+  // never out of step in the wrong direction.
+  ensure_japanese_voice();
+  apply_stt_language();
+}
+
 void VoiceSession::set_muted(bool muted) {
   if (muted_.exchange(muted) == muted) return;  // a level, not an edge
   // Going on cuts what is already playing. The old silence() stopped here and
@@ -564,12 +712,21 @@ void VoiceSession::run_turn(std::string text) {
   // The transcript, the avatar and the mute path all work off the latter, so a
   // `<context>` block is never shown and never spoken — it is machine traffic
   // in the same sense the `aii` block is, just travelling the other way.
-  const std::string sent = injector_.decorate(text);
-  if (sent.size() != text.size()) {
+  // M8.3 rides on the same rail as M3.3 and is deliberately a separate,
+  // stateless mechanism: the injector's loaded set exists so a prompt is sent
+  // once and never again, and a setting the user can flip back needs the exact
+  // opposite. This emits the block on every turn while a language is off, and
+  // nothing at all when both are on — so the default configuration sends
+  // byte-for-byte what it sent before this existed.
+  const std::string injected = injector_.decorate(text);
+  if (injected.size() != text.size()) {
     std::string names;
     for (const std::string& id : injector_.loaded()) names += (names.empty() ? "" : ", ") + id;
     log("[prompts] injected context; loaded this session: " + names);
   }
+  const LanguageSelection eff = effective_langs();
+  const std::string sent = decorate_language(injected, eff);
+  if (!eff.both()) log("[lang] turn sent with the " + language_spec(eff) + "-only instruction");
   ChatResult r = eng_.llm->turn(sent, [&](const std::string& delta) {
     {
       std::lock_guard<std::mutex> l(mutex_);
@@ -694,8 +851,18 @@ VoiceSession::Snapshot VoiceSession::snapshot() const {
   // An atomic on the device callback's side, so it is read here rather than
   // mirrored into a member the frame loop would have to remember to clear.
   const float speaking = (loaded_ && speaker_) ? speaker_->level() : 0.0f;
+  // M8.3, read before the lock for the same reason: none of it is behind
+  // mutex_, and the settings surface needs all three every frame.
+  const LanguageSelection eff = effective_langs();
+  VoiceLoad ja = VoiceLoad::Absent;
+  if (speech_ && speech_->has_japanese()) ja = VoiceLoad::Ready;
+  else if (ja_failed_) ja = VoiceLoad::Failed;
+  else if (ja_loading_) ja = VoiceLoad::Loading;
   std::lock_guard<std::mutex> l(mutex_);
   Snapshot s;
+  s.effective_langs = eff;
+  s.japanese_voice = ja;
+  if (ja == VoiceLoad::Failed) s.japanese_voice_error = ja_error_;
   s.state = state_;
   s.status = status_;
   s.usage = usage_;

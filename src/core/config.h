@@ -6,6 +6,8 @@
 // seeded, composed prompt tree — see `core/prompt_store.h` and `aii::system_prompt()`.
 #include <string>
 
+#include "core/language.h"
+
 namespace aii {
 
 // Environment variable or a default (empty values count as unset).
@@ -15,7 +17,15 @@ struct Config {
   std::string backend;         // AII_BACKEND: "code" (Claude Code CLI) or "api"
   std::string effort;          // AII_EFFORT
   std::string model_override;  // AII_MODEL (empty = backend default)
-  std::string stt_lang;        // AII_STT_LANG: auto | en | ja
+  std::string stt_lang;        // AII_STT_LANG: auto | en | ja (an explicit override)
+  // M8.3. Which languages are on. The avatar overwrites this from
+  // settings.json before it builds anything; `AII_LANGS` ("en", "ja", "en,ja")
+  // is how voiceloop and the test harnesses reach the same switch. It decides
+  // three things: the recogniser's option, whether VOICEVOX is built at all,
+  // and whether Claude is told to stay in one language. `stt_lang` still wins
+  // over it when it is set to something other than the default, so the
+  // existing override is not quietly taken away.
+  LanguageSelection langs;
   std::string claude_exe;      // AII_CLAUDE_EXE
   std::string api_key;         // ANTHROPIC_API_KEY (api backend only)
   int kokoro_sid = 3;          // AII_KOKORO_SID

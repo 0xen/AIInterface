@@ -306,9 +306,24 @@ int main(int /*argc*/, char** /*argv*/) {
     settings.load(aii::settings_file_path());
     if (settings.take_status_change()) log::warn("{}", settings.status());
 
+    // M8.3. Read here rather than with the rest of the panel's state further
+    // down, because this one is not a preference about how the widget looks —
+    // it decides which engines are built, and the session below starts
+    // building them the moment it is constructed. Read a frame later and
+    // VOICEVOX would already be loading, which is the second of startup this
+    // setting exists to save.
+    //
+    // The pair is read through one spec string rather than two booleans so
+    // that the invariant lives in one place: `language_selection_from_spec`
+    // repairs a hand-edited file that switched both off, the same way it
+    // repairs an `AII_LANGS` that names nothing.
+    aii::Config voiceCfg = aii::Config::from_env();
+    voiceCfg.langs = aii::language_selection_from_spec(
+        settings.get_string("language", "enabled", aii::language_spec(voiceCfg.langs)));
+
     // The voice loop loads its engines in the background while the window comes up.
     std::unique_ptr<aii::VoiceSession> session;
-    if (voiceEnabled) session = std::make_unique<aii::VoiceSession>(aii::Config::from_env());
+    if (voiceEnabled) session = std::make_unique<aii::VoiceSession>(voiceCfg);
 
     auto backendResult = platform::createBackend(platform::BackendKind::SDL3);
     if (!backendResult) {
@@ -612,6 +627,11 @@ int main(int /*argc*/, char** /*argv*/) {
     // source rather than from the settings file for exactly that reason.
     uiState.avatar_name = avatarName;
     uiState.theme = avatarSource.theme();
+    // M8.3. The same selection the session was built from, so the checkboxes
+    // show what is actually in force rather than re-reading the file and
+    // possibly disagreeing with the engines that are already loading.
+    uiState.lang_english = voiceCfg.langs.english;
+    uiState.lang_japanese = voiceCfg.langs.japanese;
     // M1c.5. The picker's own value, and the last value this side pushed into
     // it. The pair is what keeps a drag one-way: while the user is moving the
     // control the panel is the authority and the source follows, and on every
@@ -1069,6 +1089,11 @@ int main(int /*argc*/, char** /*argv*/) {
             avatarOptions.art_status_ok = avatarSource.status_ok();
             avatarOptions.derived = avatarSource.derived();
             avatarOptions.custom_theme = avatarSource.theme() == aii::AvatarSource::custom_theme();
+            // M8.3. What the session is really doing, which is not always what
+            // the checkboxes say — see VoiceSession::effective_langs.
+            avatarOptions.japanese_voice = snap.japanese_voice;
+            avatarOptions.japanese_voice_error = snap.japanese_voice_error;
+            avatarOptions.stt_language = aii::stt_language_for(snap.effective_langs);
             const aii::AvatarUiResult r =
                 aii::draw_avatar_ui(uiState, snap, avatarOptions, session != nullptr,
                                     session && session->mic_open(),
@@ -1083,6 +1108,10 @@ int main(int /*argc*/, char** /*argv*/) {
                 // no-op unless it changed, and the cut-what-is-playing part of
                 // it happens on the edge inside the session.
                 session->set_muted(uiState.muted);
+                // M8.3, the same level-not-edge mirror as mute, and for the
+                // same reason: the panel owns the flags, this pushes them
+                // down, and set_languages() is a no-op unless they changed.
+                session->set_languages({uiState.lang_english, uiState.lang_japanese});
                 // Only reaches here once the panel has satisfied itself the
                 // session can take it; say() refuses the rest anyway.
                 if (!r.send_text.empty()) session->say(r.send_text);
@@ -1097,6 +1126,11 @@ int main(int /*argc*/, char** /*argv*/) {
             settings.set_enum("panel", "avatar_mode", aii::kAvatarVisibilityNames,
                               aii::kAvatarVisibilityCount,
                               static_cast<int>(uiState.avatar_mode));
+            // M8.3. One string, "en" / "ja" / "en,ja", rather than two
+            // booleans: a file can then never hold the state the app has no
+            // answer for, because there is no spelling of "neither".
+            settings.set_string("language", "enabled",
+                                aii::language_spec({uiState.lang_english, uiState.lang_japanese}));
             // The scrim and the caption belong to the loader, not the panel:
             // the loading screen has to look the same whether or not there is
             // anything underneath it. The foreground draw list puts them over
