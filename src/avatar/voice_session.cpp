@@ -243,9 +243,8 @@ void VoiceSession::load() {
   speech_ = std::make_unique<SpeechQueue>(eng_.kokoro.get(), eng_.voicevox.get(), speaker_.get());
   speech_->set_on_status([this](const std::string& s) { log("[tts] " + s); });
   workers_ = std::make_unique<WorkerPool>(cfg_.claude_exe, cfg_.worker_bypass);
-  workers_->set_on_report([this](const std::string&, WorkerPool::State, const std::string& summary) {
-    announce(summary);
-  });
+  workers_->set_on_report([this](const std::string&, WorkerPool::State, const std::string& shown,
+                                 const std::string& spoken) { announce(shown, spoken); });
   // M3.3. The same store the system prompt was composed from, read a second
   // time for its lazy half. Cheap (a few small files), and it keeps the
   // injector honest about *when* it sees the store: the global prompts left
@@ -761,8 +760,10 @@ void VoiceSession::run_turn(std::string text) {
   run_commands(r.text);
 }
 
-void VoiceSession::announce(const std::string& text) {
-  if (text.empty()) return;
+void VoiceSession::announce(const std::string& text) { announce(text, text); }
+
+void VoiceSession::announce(const std::string& shown, const std::string& spoken) {
+  if (shown.empty()) return;
   // Shown at once, but not spoken here. A worker can report at any moment,
   // including while the microphone is open, and speaking straight from this
   // call would put the app's own voice into the room with the mic still
@@ -771,9 +772,9 @@ void VoiceSession::announce(const std::string& text) {
   // thread via run_commands), neither of which may drive the microphone.
   // update() picks these up and takes the floor properly.
   std::lock_guard<std::mutex> l(mutex_);
-  lines_.push_back({false, text});
+  lines_.push_back({false, shown});
   if (lines_.size() > kMaxLines) lines_.erase(lines_.begin(), lines_.begin() + (lines_.size() - kMaxLines));
-  pending_announce_.push_back(text);
+  if (!spoken.empty()) pending_announce_.push_back(spoken);
 }
 
 bool VoiceSession::flush_announcements() {

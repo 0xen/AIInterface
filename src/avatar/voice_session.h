@@ -194,6 +194,9 @@ class VoiceSession {
   void run_commands(const std::string& reply_text);
   // Speak a line from the app itself (worker reports) and show it.
   void announce(const std::string& text);
+  // Same, where what is shown and what is spoken differ: a worker report is
+  // named in the transcript and unnamed in the voice.
+  void announce(const std::string& shown, const std::string& spoken);
   // Speaks anything announce() left queued, closing the microphone first.
   // True if it took the floor. Frame loop only.
   bool flush_announcements();

@@ -33,8 +33,13 @@ class WorkerPool {
   };
 
   // Called from a worker thread when an instance finishes (Done or Failed).
-  // `summary` is one short spoken sentence.
-  using ReportFn = std::function<void(const std::string& name, State state, const std::string& summary)>;
+  // Two texts, deliberately different: `shown` names the worker and goes to
+  // the transcript, `spoken` does not and is what the voice reads out. The
+  // user asked not to hear the worker's name when work comes back; it costs
+  // them nothing on screen, where the panel row and the transcript both keep
+  // it, so only the spoken copy loses it.
+  using ReportFn = std::function<void(const std::string& name, State state,
+                                      const std::string& shown, const std::string& spoken)>;
 
   WorkerPool(std::string claude_exe, bool bypass_permissions);
   ~WorkerPool();

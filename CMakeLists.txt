@@ -91,6 +91,17 @@ if(MSVC)
   target_compile_options(schedule_test PRIVATE /utf-8 /W4)
 endif()
 
+# ---- worker_report_test: what a finished worker hands to the speech path ----
+# Links aii_core because it drives a real WorkerPool and a real Claude Code
+# child; no engines are loaded, so the DLLs beside it are only there because
+# aii_core imports them.
+add_executable(worker_report_test tests/worker_report_test.cpp)
+target_link_libraries(worker_report_test PRIVATE aii_core)
+if(MSVC)
+  target_compile_options(worker_report_test PRIVATE /utf-8 /W4)
+endif()
+aii_copy_runtime_dlls(worker_report_test)
+
 # ---- avatar: the corner window on the Renderer engine (sibling checkout) ----
 option(AII_BUILD_AVATAR "Build the avatar window (needs the Renderer checkout and the Vulkan SDK's dxc)" ON)
 set(AII_RENDERER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Renderer" CACHE PATH "Checkout of the rend engine")

@@ -13,11 +13,24 @@ constexpr size_t kRecent = 6;
 
 // A worker's system prompt: it does real work with tools, and its final
 // message is read aloud, so it must end with a one-sentence summary.
+//
+// The closing sentence obeys the same rules the user set for the voice in
+// `assets/pre-prompt.md` -- short, and technical jargon (URLs, file paths,
+// process names) kept to a minimum -- because it is heard by voice exactly as
+// a reply is, and the pre-prompt reaches the conversational instance only.
+// Not naming itself is part of that: the C++ below no longer speaks the
+// worker's name, and a worker that opened with "counter here" would put it
+// straight back in the model's own words.
 const char* kWorkerPrompt =
     "You are a background worker instance driven by a voice assistant. Do the task you are given "
     "using your tools. You cannot ask questions: no one will answer, so make reasonable choices and "
     "state them. Your final message is read aloud, so end with ONE short plain sentence saying what "
-    "you did and whether it worked. No markdown, no lists, no code in the final message.";
+    "you did and whether it worked. No markdown, no lists, no code in the final message. "
+    "That sentence is heard, not read, so keep it short and keep technical jargon to a minimum: no "
+    "file paths, no URLs, no process or command names, no error codes -- say what happened in "
+    "ordinary words. Do not name or refer to yourself, and do not mention being a worker, an agent "
+    "or a sub-agent: the listener is told which task this is by other means. Say what was done, not "
+    "who did it.";
 
 std::string first_sentence(const std::string& text, size_t limit = 220) {
   std::string t = trim(text);
@@ -114,28 +127,43 @@ void WorkerPool::run(Worker* w) {
   }
   ChatResult r = w->client->turn(w->task, nullptr, &w->cancel);
   State state;
-  std::string summary;
+  // `shown` keeps the worker's name, `spoken` never does -- see ReportFn.
+  std::string shown, spoken;
   {
     std::lock_guard<std::mutex> l(mutex_);
     if (w->cancel) {
       w->state = State::Paused;
       w->activity = "paused";
-      summary = w->name + " paused.";
+      shown = w->name + " paused.";
+      spoken = "Paused.";
     } else if (!r.ok) {
       w->state = State::Failed;
       w->activity = "failed";
       w->result = r.error;
-      summary = w->name + " failed: " + first_sentence(r.error, 120);
+      std::string why = first_sentence(r.error, 120);
+      // A CLI error can end in a dangling "reason:" with nothing after it
+      // ("claude process exited: "), which is read out as a colon-shaped
+      // pause. Spoken, a full stop is the honest punctuation.
+      while (!why.empty() && (why.back() == ':' || why.back() == ' ')) why.pop_back();
+      if (!why.empty() && why.back() != '.' && why.back() != '!' && why.back() != '?') why += '.';
+      shown = w->name + " failed: " + why;
+      // The failure path loses the name too, not only the success path. A rule
+      // with an exception is one the user hears break; the panel row and the
+      // transcript still say which worker failed, and a failure is acted on by
+      // looking, not by listening.
+      spoken = "The task failed. " + why;
     } else {
       w->state = State::Done;
       w->activity = "done";
       w->result = trim(r.text);
-      summary = w->name + " finished. " + first_sentence(r.text);
+      const std::string what = first_sentence(r.text);
+      shown = w->name + " finished. " + what;
+      spoken = "Finished. " + what;
     }
     state = w->state;
   }
   w->finished = true;
-  if (report_) report_(w->name, state, summary);
+  if (report_) report_(w->name, state, shown, spoken);
 }
 
 bool WorkerPool::pause(const std::string& name) {
