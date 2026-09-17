@@ -248,25 +248,78 @@ void ImGuiLayer::make_current() {
   g_state = s_.get();
 }
 
-bool ImGuiLayer::handle_event(const platform::Event& event) {
+namespace {
+
+// The pointer in `hwnd`'s client space, read from the OS now. Returns false
+// when there is no window to measure against, or the OS declines to say.
+bool live_client_pointer(void* hwnd, float* x, float* y) {
+  if (!hwnd) return false;
+  POINT p{};
+  if (!GetCursorPos(&p)) return false;
+  if (!ScreenToClient(static_cast<HWND>(hwnd), &p)) return false;
+  *x = static_cast<float>(p.x);
+  *y = static_cast<float>(p.y);
+  return true;
+}
+
+}  // namespace
+
+bool ImGuiLayer::handle_event(const platform::Event& event, void* hwnd) {
   make_current();
   ImGuiIO& io = ImGui::GetIO();
+  // Where the pointer is *now*, in the client space this window has *now*.
+  //
+  // Not where the message says it was. A mouse message is stamped with client
+  // coordinates when the OS generates it, and this window moves itself out from
+  // under a stationary pointer: pressing the microphone makes the avatar band
+  // appear, which grows the widget upwards by 260 px at the top of the next
+  // frame. A release generated in the window before that move, and pumped after
+  // it, then arrives 260 px above the button the pointer never left — which is
+  // an abandoned press, which is byte-for-byte hold-to-dictate. Measured
+  // 17 Sep 2026: a 70-110 ms click on the microphone with the avatar hidden,
+  // where the release lands in exactly that gap. Shorter clicks release before
+  // the move and longer ones after it, which is why a harness that only ever
+  // clicked for 100 ms passed 60/60.
+  //
+  // sync_pointer() already states this rule once a frame and cannot fix this
+  // case: ImGui's input trickling holds back a position that arrives after a
+  // button change, so the position sync_pointer queues lands a frame too late
+  // to be the one the release is judged against.
+  //
+  // The cost is that a pointer moving fast is reported where it is at pump time
+  // rather than where it was a fraction of a frame earlier. That is the trade
+  // imgui_impl_win32 makes every frame, and a few pixels of lag is not the same
+  // order of wrong as 260.
+  //
+  // SidebarWindow::draw() has polled the cursor rather than tracked
+  // WM_MOUSEMOVE since M4, with a comment giving this same reason for the
+  // strip. The strip was right and the widget was the one still trusting the
+  // message; this is the two windows agreeing.
+  float lx = 0.0f, ly = 0.0f;
+  const bool live = live_client_pointer(hwnd, &lx, &ly);
   switch (event.type) {
-    case platform::Event::Type::MouseMoved:
-      s_->mouse_x = event.mouseX;
-      s_->mouse_y = event.mouseY;
-      io.AddMousePosEvent(event.mouseX, event.mouseY);
+    case platform::Event::Type::MouseMoved: {
+      const float x = live ? lx : event.mouseX;
+      const float y = live ? ly : event.mouseY;
+      if (x == s_->mouse_x && y == s_->mouse_y) return io.WantCaptureMouse;
+      s_->mouse_x = x;
+      s_->mouse_y = y;
+      io.AddMousePosEvent(x, y);
       return io.WantCaptureMouse;
+    }
     case platform::Event::Type::MouseButtonDown:
     case platform::Event::Type::MouseButtonUp: {
       const int button = to_imgui_button(event.button);
       if (button < 0) return false;
-      // The click carries its own position: a window that never takes focus
-      // can deliver the press before any motion event has arrived.
-      if (event.mouseX != s_->mouse_x || event.mouseY != s_->mouse_y) {
-        s_->mouse_x = event.mouseX;
-        s_->mouse_y = event.mouseY;
-        io.AddMousePosEvent(event.mouseX, event.mouseY);
+      // The click carries a position of its own: a window that never takes
+      // focus can deliver the press before any motion event has arrived, so
+      // this is the only chance to place the pointer before the button lands.
+      const float x = live ? lx : event.mouseX;
+      const float y = live ? ly : event.mouseY;
+      if (x != s_->mouse_x || y != s_->mouse_y) {
+        s_->mouse_x = x;
+        s_->mouse_y = y;
+        io.AddMousePosEvent(x, y);
       }
       io.AddMouseButtonEvent(button, event.type == platform::Event::Type::MouseButtonDown);
       return io.WantCaptureMouse;

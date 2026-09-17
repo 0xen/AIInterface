@@ -52,7 +52,18 @@ class ImGuiLayer {
   // pointer is over a widget and the app should not also act on the click.
   // The mouse only: keyboard events are dropped here because WinTextInput's
   // HWND subclass is ImGui's only keyboard path (see win_text_input.h).
-  bool handle_event(const rend::platform::Event& event);
+  //
+  // `hwnd` is this layer's window, and passing it changes where the *position*
+  // in a mouse event comes from: the live cursor, converted into that window's
+  // client space now, instead of the coordinates the message was stamped with
+  // when the OS generated it. A queued message remembers the client space the
+  // window had at that moment, and this window moves itself — so a release
+  // generated 260 px lower than the window now sits arrives pointing at bare
+  // desktop. See sync_pointer() below; this is the same rule applied to the
+  // event path, which sync_pointer cannot reach because ImGui's event trickling
+  // defers a position that arrives *after* a button change to the next frame.
+  // A null hwnd falls back to the event's own coordinates.
+  bool handle_event(const rend::platform::Event& event, void* hwnd = nullptr);
 
   // Whether ImGui is using the keyboard this frame — a text field has focus,
   // or some widget is active. The app's own hotkeys must stand down when it

@@ -887,7 +887,12 @@ int main(int /*argc*/, char** /*argv*/) {
         for (const auto& event : backend->pumpEvents()) {
             // The mouse only. Keys reach ImGui through the subclass alone, so
             // forwarding them here as well would deliver each one twice.
-            if (ui) ui->handle_event(event);
+            // The widget's HWND goes with it: the pointer's position is taken
+            // from the live cursor in this window's client space rather than
+            // from the coordinates the message was stamped with, because this
+            // window moves itself and a queued message remembers where it used
+            // to be. See ImGuiLayer::handle_event.
+            if (ui) ui->handle_event(event, hwnd);
             if (uiHasKeyboard && (event.type == platform::Event::Type::KeyDown ||
                                   event.type == platform::Event::Type::KeyUp)) {
                 // Held keys still have to be released, or a SPACE leaned on as

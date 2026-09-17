@@ -14,6 +14,13 @@
 #include <ctime>
 #include <string>
 
+// GetCursorPos, for the gesture instrumentation below: what Windows says the
+// pointer is doing, beside what ImGui believes it is doing.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 namespace aii {
 namespace {
 
@@ -1321,9 +1328,34 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
   // the words spoken while it was still undecided.
   const MicFace face = mic_face(snap, voice_enabled, loading, mic_on, mic_hold);
   transport_slot("##mic", slot_pos(0), mic_icon(face), mic_skin(face));
+  // One line per edge of the gesture, with everything needed to decide *why* a
+  // release was judged off the button: the item's rect, where ImGui thinks the
+  // pointer is, where Windows thinks it is, and the display the two are
+  // measured against. Client coordinates throughout — ImGui's screen space is
+  // this window's client space, since there is one viewport at (0,0) — so the
+  // harness's window rect is the only thing needed to relate them to a desktop
+  // position. Extends the f713297 instrumentation rather than replacing it.
+  const auto gesture_line = [&](const char* edge) {
+    if (!std::getenv("AII_TALK_DEBUG")) return;
+    const ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 r0 = ImGui::GetItemRectMin();
+    const ImVec2 r1 = ImGui::GetItemRectMax();
+    POINT raw{};
+    GetCursorPos(&raw);
+    std::printf(
+        "  [gesture] %s item=(%.1f,%.1f)-(%.1f,%.1f) imgui_mouse=(%.1f,%.1f) "
+        "screen_mouse=(%d,%d) display=%.0fx%.0f hovered=%d active=%d "
+        "down=%d t=%.3f\n",
+        edge, r0.x, r0.y, r1.x, r1.y, io.MousePos.x, io.MousePos.y, static_cast<int>(raw.x),
+        static_cast<int>(raw.y), io.DisplaySize.x, io.DisplaySize.y,
+        static_cast<int>(ImGui::IsItemHovered()), static_cast<int>(ImGui::IsItemActive()),
+        static_cast<int>(io.MouseDown[0]), ImGui::GetTime());
+    std::fflush(stdout);
+  };
   if (ImGui::IsItemActivated()) {
     state.talk_pressed_at = ImGui::GetTime();
     out.talk_pressed = true;
+    gesture_line("press  ");
   }
   if (ImGui::IsItemDeactivated()) {
     out.talk_released = true;
@@ -1336,6 +1368,7 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
     // an abandoned press — the Talk-click bug of 16 Sep 2026. The fixed slots
     // above are the same invariant applied within the row.
     out.talk_over_button = ImGui::IsItemHovered();
+    gesture_line("release");
   }
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", mic_tooltip(face));
 
