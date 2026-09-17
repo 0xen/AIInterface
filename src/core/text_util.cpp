@@ -149,4 +149,21 @@ std::string strip_markdown(const std::string& in) {
   return trim(out);
 }
 
+int estimate_tokens(const std::string& utf8) {
+  // Per script run, so a Japanese sentence inside an English paragraph is
+  // charged at the Japanese rate and nothing else is.
+  double tokens = 0.0;
+  bool any = false;
+  for (const ScriptRun& run : split_by_script(utf8)) {
+    size_t chars = 0, i = 0;
+    while (i < run.text.size()) { next_cp(run.text, i); ++chars; }
+    if (chars == 0) continue;
+    any = true;
+    tokens += static_cast<double>(chars) / (run.japanese ? 1.6 : 3.6);
+  }
+  if (!any) return 0;
+  const int n = static_cast<int>(tokens + 0.5);
+  return n < 1 ? 1 : n;
+}
+
 }  // namespace aii

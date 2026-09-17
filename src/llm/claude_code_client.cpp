@@ -340,6 +340,7 @@ UsageStats ClaudeCodeClient::usage() const {
   u.week = util_7d_;
   u.session_reset = reset_5h_;
   u.week_reset = reset_7d_;
+  u.ctx_window = ctx_window_;
   if (ctx_tokens_ >= 0 && ctx_window_ > 0)
     u.ctx = static_cast<double>(ctx_tokens_) / static_cast<double>(ctx_window_);
   return u;

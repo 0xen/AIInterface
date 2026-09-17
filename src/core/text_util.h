@@ -38,5 +38,27 @@ std::string trim(const std::string& s);
 // not valid UTF-8: this clips, it does not sanitise. Invalid bytes *at* the cut
 // are cut at the cap rather than searched backwards forever.
 std::string clip_utf8(std::string s, std::size_t max_bytes);
+// M5.3: a **rough** token count for UTF-8 text. There is no tokenizer in this
+// process and this is not one -- it is a ratio, and every caller must present
+// it as such.
+//
+// Two ratios, because one would be wrong for half of what this app says:
+// English runs at roughly 3.6 characters per token and Japanese at roughly
+// 1.6, since a kana or a kanji rarely shares a token with its neighbour while
+// English packs whole words into one. Mixed text is normal here, so the string
+// is split with `split_by_script` -- the same split the speech path uses to
+// route a sentence between two voices -- and each run is measured with its own
+// ratio and the runs summed. That also settles digits and punctuation without
+// a third rule: `split_by_script` folds a neutral stretch into the run it
+// follows, so they are counted at the ratio of the script around them.
+//
+// **Characters, not bytes.** The whole point of the Japanese ratio is that
+// those characters are dense; measuring the same text in UTF-8 bytes would
+// count each one three times and then divide by 1.6, which is wrong by a
+// factor of three in the direction that most flatters the estimate.
+//
+// Never returns 0 for text that has anything in it: a row reading "0" would
+// claim its prompt was free.
+int estimate_tokens(const std::string& utf8);
 
 }  // namespace aii

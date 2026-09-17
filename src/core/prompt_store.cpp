@@ -7,6 +7,7 @@
 #include <system_error>
 
 #include "core/config.h"
+#include "core/text_util.h"
 #include "core/user_paths.h"
 #include "json.hpp"
 
@@ -593,6 +594,7 @@ PromptInventory build_inventory(const PromptStore& store, const PromptInjector& 
       r.section = PromptSection::Global;
       r.title = n->title.empty() ? n->id : n->title;
       r.source = n->file.empty() ? n->id : n->file;
+      r.est_tokens = estimate_tokens(n->body);
       r.injected = true;
       r.at_session_start = true;
       inv.rows.push_back(std::move(r));
@@ -607,6 +609,7 @@ PromptInventory build_inventory(const PromptStore& store, const PromptInjector& 
     r.section = PromptSection::Global;
     r.title = "Pre-prompt";
     r.source = local_prompt_path().string();
+    r.est_tokens = estimate_tokens(local_prompt());
     r.injected = true;
     r.at_session_start = true;
     inv.rows.push_back(std::move(r));
@@ -627,6 +630,9 @@ PromptInventory build_inventory(const PromptStore& store, const PromptInjector& 
       r.title = n.title.empty() ? n.id : n.title;
       r.source = n.file.empty() ? n.id : n.file;
       r.triggers = n.triggers;
+      // Estimated whether or not it has fired: an unloaded row shows what it
+      // *would* cost, which is half of why M5.4 lists it at all.
+      r.est_tokens = estimate_tokens(n.body);
       r.injected = injector.is_loaded(n.id);
       // Injected *during* the session unless the caller says otherwise: these
       // are never part of the launch argument, so "session start" would be

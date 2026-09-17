@@ -272,6 +272,12 @@ struct PromptRow {
   // M5.4's trigger words. Collected now because the injector already has them
   // and a second pass to fetch them would be a second source of truth.
   std::vector<std::string> triggers;
+  // M5.3. A ratio, not a count -- `estimate_tokens` explains the two ratios --
+  // and **-1 means we cannot see the text at all**, which is the honest state
+  // for every CLI row: that context exists, reaches the model and costs
+  // tokens, and this app never sees a byte of it. A 0 there would have read as
+  // "free", which is the one thing it is not.
+  int est_tokens = -1;
 };
 
 struct PromptInventory {
@@ -287,6 +293,16 @@ struct PromptInventory {
   // cannot disagree with the session about what time it is.
   double uptime = 0.0;
   std::vector<PromptRow> rows;
+  // M5.3: the real context fullness, as the CLI reports it -- the fraction of
+  // the window in use, and the window it is a fraction of. Negative / zero
+  // until a turn has been answered, because nothing has reported yet.
+  //
+  // It rides on the inventory rather than being fetched beside it so that the
+  // footer's two numbers always come from the same instant. An estimate taken
+  // this frame against a fullness taken last frame would wander on its own,
+  // and this window exists to be trusted about exactly this comparison.
+  double ctx = -1.0;
+  long long ctx_window = 0;
 };
 
 // The rows for context the Claude Code CLI brings in by itself, which no flag

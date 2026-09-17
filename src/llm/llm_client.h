@@ -23,6 +23,9 @@ struct ChatResult {
 // fractions are 0..1; a negative value means the CLI has not said yet.
 struct UsageStats {
   double ctx = -1.0;      // context window in use / its size
+  long long ctx_window = 0;  // that window's size in tokens, 0 = unknown. A
+                             // fraction alone cannot be compared with a token
+                             // count, and M5.3's footer has to do exactly that.
   double session = -1.0;  // five-hour window utilisation
   double week = -1.0;     // seven-day window utilisation
   long long session_reset = 0;  // unix seconds, 0 = unknown

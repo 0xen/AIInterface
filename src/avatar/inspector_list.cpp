@@ -115,12 +115,122 @@ void empty_section(PromptSection s, bool ready, int defined) {
   ImGui::PopStyleColor();
 }
 
-// One section: heading, note, and a table of its rows.
+// M5.3 --- how an estimate is allowed to look.
 //
-// The table has a fourth column with no content. That is M5.3's - the
-// per-row token estimate and the total against the real context fullness -
-// and its place is held rather than added later so that a column appearing
-// does not reflow every row the user has learned the shape of.
+// **It must not look like a count.** The number behind it came out of a ratio
+// (~3.6 characters per token in English, ~1.6 in Japanese; see
+// `estimate_tokens`), and there is no tokenizer in this process to check it
+// against. "1,183" would be a claim this app cannot support, and the user
+// would then reasonably read the footer's comparison as an exact shortfall.
+// So every figure carries a `~`, and it is rounded hard enough that nobody
+// could mistake it for a measurement: to the nearest ten below a thousand, and
+// to one decimal place in thousands above it.
+std::string tokens_text(int n) {
+  char buf[32];
+  if (n >= 1000) std::snprintf(buf, sizeof buf, "~%.1fk", n / 1000.0);
+  else std::snprintf(buf, sizeof buf, "~%d", ((n + 5) / 10) * 10);
+  return buf;
+}
+
+// The same, for a number that came from the CLI rather than from us. No `~`
+// below a thousand -- these are counted, not estimated -- but still rounded in
+// thousands, because a context window is not interesting to the last token.
+std::string real_tokens_text(long long n) {
+  char buf[32];
+  if (n >= 1000000) std::snprintf(buf, sizeof buf, "%gM", static_cast<double>(n) / 1000000.0);
+  else if (n >= 10000) std::snprintf(buf, sizeof buf, "%.0fk", n / 1000.0);
+  else if (n >= 1000) std::snprintf(buf, sizeof buf, "%.1fk", n / 1000.0);
+  else std::snprintf(buf, sizeof buf, "%lld", n);
+  return buf;
+}
+
+// A fullness percentage. One decimal below ten per cent, because a fresh
+// session sits at a fraction of one and "0%" would read as "nothing is in
+// there", which is the opposite of what the next sentence goes on to say.
+std::string percent_text(double fraction) {
+  char buf[32];
+  const double pct = fraction * 100.0;
+  std::snprintf(buf, sizeof buf, pct < 10.0 ? "%.1f%%" : "%.0f%%", pct);
+  return buf;
+}
+
+// The trigger words, as the reason a row has not fired.
+std::string triggers_text(const std::vector<std::string>& t) {
+  if (t.empty())
+    // Not a misconfiguration: a node with no triggers is still reachable
+    // through M3.4's `load name=`, which resolves against ids and titles too.
+    // Saying so is the difference between "broken" and "loaded another way".
+    return "no trigger words - only by name";
+  std::string s;
+  for (const std::string& w : t) {
+    if (!s.empty()) s += ", ";
+    s += '"' + w + '"';
+  }
+  return s;
+}
+
+const ImGuiTableFlags kTableFlags = ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg |
+                                    ImGuiTableFlags_SizingStretchProp |
+                                    ImGuiTableFlags_PadOuterX;
+
+// M5.4: the prompts that exist and have not fired.
+//
+// **A separate table, under its own heading, entirely in the dimmest colour
+// the window has.** The one thing this must never do is let a glance read an
+// available prompt as a loaded one -- that would make the window lie about the
+// single thing it exists to be trusted on. So the separation is structural and
+// not only a shade: a different table, a column no loaded row has ("Trigger
+// words"), and a token cell that says "if loaded" in words. Three independent
+// signals, because colour alone fails the glance test, and fails it silently
+// for anyone who cannot see the difference.
+//
+// On a normal run this draws nothing: the shipped `graph.json` has no project
+// or skill nodes, so there is nothing available either, and the empty states
+// above are the whole of what that run shows.
+void available_rows(PromptSection s, const PromptInventory& inv) {
+  int n = 0;
+  for (const PromptRow& r : inv.rows)
+    if (r.section == s && !r.injected) ++n;
+  if (n == 0) return;
+
+  ImGui::Spacing();
+  ImGui::PushStyleColor(ImGuiCol_Text, dim());
+  ImGui::TextWrapped("Available, not loaded - not in Claude's head. Listed so the words that "
+                     "would load them are visible before they are needed.");
+  ImGui::PopStyleColor();
+
+  // Every cell in this table is dim(), its headers included, so the block
+  // reads as one greyed-out thing rather than as live rows with a grey tint.
+  ImGui::PushStyleColor(ImGuiCol_Text, dim());
+  const std::string id = std::string("##available_") + section_title(s);
+  if (ImGui::BeginTable(id.c_str(), 4, kTableFlags)) {
+    ImGui::TableSetupColumn("Prompt", ImGuiTableColumnFlags_WidthStretch, 0.26f);
+    ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthStretch, 0.28f);
+    ImGui::TableSetupColumn("Trigger words", ImGuiTableColumnFlags_WidthStretch, 0.30f);
+    ImGui::TableSetupColumn("Tokens", ImGuiTableColumnFlags_WidthStretch, 0.16f);
+    ImGui::TableHeadersRow();
+    for (const PromptRow& r : inv.rows) {
+      if (r.section != s || r.injected) continue;
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextWrapped("%s", r.title.c_str());
+      ImGui::TableNextColumn();
+      ImGui::TextWrapped("%s", r.source.c_str());
+      ImGui::TableNextColumn();
+      ImGui::TextWrapped("%s", triggers_text(r.triggers).c_str());
+      ImGui::TableNextColumn();
+      // "if loaded", in words, so this number cannot be swept into the total
+      // by a reader skimming the column.
+      if (r.est_tokens >= 0) ImGui::TextWrapped("%s if loaded", tokens_text(r.est_tokens).c_str());
+      else ImGui::TextUnformatted("-");
+    }
+    ImGui::EndTable();
+  }
+  ImGui::PopStyleColor();
+}
+
+// One section: heading, note, the table of what is loaded, and beneath it
+// (M5.4) what is available and is not.
 void section(PromptSection s, const PromptInventory& inv) {
   int drawn = 0, defined = 0;
   for (const PromptRow& r : inv.rows) {
@@ -138,22 +248,30 @@ void section(PromptSection s, const PromptInventory& inv) {
   ImGui::Spacing();
 
   if (drawn == 0) {
+    // M5.2's three empty states, unchanged and still first. M5.4's rows go
+    // *under* this text rather than in place of it: "3 defined, none mentioned
+    // yet this session" is the sentence that explains the greyed-out table,
+    // and a list of available prompts with no such sentence above it would
+    // leave the reader to work out for themselves why none of them are in
+    // Claude.
+    //
     // `defined - drawn` and not `defined`: a section whose prompts all fired
     // is never empty, so the count reaching empty_section is always the number
     // still waiting.
     empty_section(s, inv.ready, defined - drawn);
+    available_rows(s, inv);
     ImGui::Spacing();
     ImGui::Spacing();
     return;
   }
 
-  const ImGuiTableFlags flags = ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg |
-                                ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX;
-  if (ImGui::BeginTable(section_title(s), 4, flags)) {
+  if (ImGui::BeginTable(section_title(s), 4, kTableFlags)) {
     ImGui::TableSetupColumn("Prompt", ImGuiTableColumnFlags_WidthStretch, 0.30f);
     ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthStretch, 0.36f);
     ImGui::TableSetupColumn("Injected", ImGuiTableColumnFlags_WidthStretch, 0.22f);
-    ImGui::TableSetupColumn("Tokens", ImGuiTableColumnFlags_WidthStretch, 0.12f);
+    // The header says "est." and every cell carries a "~", because a column
+    // headed "Tokens" is read as a count whatever a footnote says elsewhere.
+    ImGui::TableSetupColumn("Tokens (est.)", ImGuiTableColumnFlags_WidthStretch, 0.12f);
     ImGui::PushStyleColor(ImGuiCol_Text, quiet());
     ImGui::TableHeadersRow();
     ImGui::PopStyleColor();
@@ -174,12 +292,103 @@ void section(PromptSection s, const PromptInventory& inv) {
       ImGui::TableNextColumn();
       ImGui::TextColored(quiet(), "%s", when_text(r, inv.uptime).c_str());
       ImGui::TableNextColumn();
-      ImGui::TextColored(dim(), "-");  // M5.3
+      // M5.3. `-1` is a CLI row: that text exists, reaches the model and costs
+      // real tokens, and this app has never seen a byte of it. "unknown" is
+      // the only honest cell, and it is also the first hint of what the footer
+      // goes on to say outright.
+      if (r.est_tokens >= 0) ImGui::TextColored(quiet(), "%s", tokens_text(r.est_tokens).c_str());
+      else ImGui::TextColored(dim(), "unknown");
     }
     ImGui::EndTable();
   }
+  available_rows(s, inv);
   ImGui::Spacing();
   ImGui::Spacing();
+}
+
+// The footer: our estimate, the real fullness, and the distance between them.
+//
+// **That distance is the point of this window and the hardest thing on it to
+// word.** Every number above is a guess about text this app wrote. `ctx` is
+// measured: the CLI reports what it actually handed the model on the last
+// turn. The two are not competing attempts at one quantity, so the difference
+// between them is not an error bar -- it is the size of everything in Claude's
+// head that never passed through here: the CLI's own context (the first
+// section, listed and unmeasurable), the conversation so far, and every file,
+// command and search result the session has pulled in.
+//
+// So the footer never says "off by", "missing" or "discrepancy". It names the
+// two numbers as the different things they are, and then says what the gap
+// between them consists of, in that order. A reader who finishes this and goes
+// looking for a bug has been told the wrong thing.
+void footer(const PromptInventory& inv) {
+  int total = 0, unknown = 0;
+  for (const PromptRow& r : inv.rows) {
+    if (!r.injected) continue;  // an available prompt has cost nothing yet
+    if (r.est_tokens >= 0) total += r.est_tokens;
+    else ++unknown;
+  }
+
+  ImGui::PushStyleColor(ImGuiCol_Text, heading());
+  ImGui::SeparatorText("Totals");
+  ImGui::PopStyleColor();
+
+  ImGui::PushStyleColor(ImGuiCol_Text, body());
+  ImGui::TextWrapped("%s tokens, estimated, for the prompts listed above.",
+                     tokens_text(total).c_str());
+  ImGui::PopStyleColor();
+  ImGui::PushStyleColor(ImGuiCol_Text, quiet());
+  ImGui::TextWrapped(
+      "Estimated from character counts - about 3.6 characters per token in English, 1.6 in "
+      "Japanese - because there is no tokenizer in this app. It is the right order of "
+      "magnitude, not a figure to reconcile.");
+  if (unknown > 0)
+    ImGui::TextWrapped(
+        "%d row%s above cannot be estimated at all: the CLI's own context is text this app "
+        "never sees.",
+        unknown, unknown == 1 ? "" : "s");
+  ImGui::PopStyleColor();
+  ImGui::Spacing();
+
+  if (inv.ctx < 0.0) {
+    ImGui::PushStyleColor(ImGuiCol_Text, dim());
+    ImGui::TextWrapped(
+        "How full Claude's context actually is will appear here once a turn has been "
+        "answered - the CLI reports it, we do not measure it.");
+    ImGui::PopStyleColor();
+    return;
+  }
+
+  const long long window = inv.ctx_window;
+  const long long used = window > 0 ? static_cast<long long>(inv.ctx * window + 0.5) : -1;
+
+  ImGui::PushStyleColor(ImGuiCol_Text, body());
+  if (used >= 0)
+    ImGui::TextWrapped("Claude's context is %s full: about %s tokens of a %s window.",
+                       percent_text(inv.ctx).c_str(), real_tokens_text(used).c_str(),
+                       real_tokens_text(window).c_str());
+  else
+    ImGui::TextWrapped("Claude's context is %s full.", percent_text(inv.ctx).c_str());
+  ImGui::PopStyleColor();
+
+  ImGui::PushStyleColor(ImGuiCol_Text, quiet());
+  if (used > total) {
+    ImGui::TextWrapped(
+        "The prompts on this page are roughly %s of that. The other %s or so is everything "
+        "this window cannot show you: the CLI's own context above, the conversation so far, "
+        "and every file, command and search result this session has read. That gap is the "
+        "measure of how much of Claude's head we do not put there, not a shortfall in the "
+        "list.",
+        tokens_text(total).c_str(), real_tokens_text(used - total).c_str());
+  } else {
+    // Reachable early, when the estimate's own slack is wider than the little
+    // that has actually been sent. Saying so beats drawing a negative gap and
+    // inviting the reader to explain it.
+    ImGui::TextWrapped(
+        "That is close to the estimate above, which is as near as these two numbers come: "
+        "almost nothing has reached the session yet beyond the prompts themselves.");
+  }
+  ImGui::PopStyleColor();
 }
 
 }  // namespace
@@ -206,6 +415,9 @@ void draw_prompt_list(const PromptInventory& inv) {
   section(PromptSection::Global, inv);
   section(PromptSection::Project, inv);
   section(PromptSection::Skill, inv);
+  // The footer is last because it is a conclusion: it only means anything
+  // after the reader has seen what is being totalled.
+  footer(inv);
 }
 
 }  // namespace aii

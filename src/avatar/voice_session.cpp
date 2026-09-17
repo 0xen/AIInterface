@@ -1855,9 +1855,17 @@ PromptInventory VoiceSession::prompt_inventory() const {
   // else in this class holds `mutex_` across anything it does not have to.
   const double up =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - session_began_).count();
+  // M5.3: the real context fullness travels with the list it is compared
+  // against. Asked for before `mutex_` is taken, for the reason snapshot()
+  // gives above its own call -- the client's reader thread calls back into us
+  // while holding its lock, so taking ours first is the AB/BA deadlock.
+  UsageStats stats;
+  if (loaded_ && eng_.llm) stats = eng_.llm->usage();
   std::lock_guard<std::mutex> l(mutex_);
   PromptInventory inv = inventory_;
   inv.uptime = up;
+  inv.ctx = stats.ctx;
+  inv.ctx_window = stats.ctx_window;
   return inv;
 }
 
