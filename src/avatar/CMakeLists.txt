@@ -21,6 +21,8 @@ add_executable(avatar
   loader_anim.h
   pixel_icons.cpp
   pixel_icons.h
+  script_host.cpp
+  script_host.h
   settings.cpp
   settings.h
   sidebar_window.cpp
@@ -31,7 +33,11 @@ add_executable(avatar
   watermark.h
   win_text_input.cpp
   win_text_input.h)
-target_include_directories(avatar PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(avatar PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+  # M2.6: the engine's Python-host C ABI, header-only. Included path-only with
+  # no link, exactly as apps/viewer does it — the DLL is resolved at runtime,
+  # and only on a run that has a script.
+  "${AII_RENDERER_DIR}/pyhost/include")
 # Comctl32 for SetWindowSubclass: the window's HWND is how this app gets a
 # character event at all, since the engine's portable event set has none (B1).
 target_link_libraries(avatar PRIVATE aii_core rend::engine imgui Comctl32)
@@ -45,6 +51,13 @@ if(MSVC)
   target_compile_options(avatar PRIVATE /utf-8 /W4 /wd4996)
 endif()
 set_target_properties(avatar PROPERTIES FOLDER "apps")
+# M2.6. Neither DLL is linked — both are LoadLibrary'd, and only on a run that
+# has a script — but the documented build command is `--target avatar`, and a
+# feature that silently is not there because a second target was not named is
+# the kind of thing that gets debugged as a code bug.
+if(AII_BUILD_SCRIPTS)
+  add_dependencies(avatar aii_pyhost rend_pyhost)
+endif()
 aii_copy_runtime_dlls(avatar)
 
 # Our HLSL, compiled by the engine's dxc rule into data/shaders next to the

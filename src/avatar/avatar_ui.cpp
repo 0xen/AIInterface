@@ -776,6 +776,23 @@ void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   // shape that exists rather than a decision to be taken again.
   language_section(state, options);
 
+  // M2.6. Scripting's only surface in the app, and the only place a script
+  // that failed to load says so — the traceback goes to the log, but the log
+  // is a console this window does not have.
+  settings_heading("Scripts");
+  if (options.script_status.empty()) {
+    ImGui::TextColored(dim(), "None. Put a .py in scripts\\ to start;");
+    ImGui::TextColored(dim(), "scripts\\examples\\ has one to copy.");
+  } else {
+    ImGui::PushStyleColor(ImGuiCol_Text, options.script_status_ok ? dim() : warn());
+    ImGui::TextWrapped("%s", options.script_status.c_str());
+    ImGui::PopStyleColor();
+  }
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Python, in this process, over the app bus.\n"
+                      "%%APPDATA%%\\AIInterface\\scripts\\*.py runs at startup;\n"
+                      "nothing below that directory is scanned.");
+
   settings_heading("Voice");
   ImGui::TextColored(dim(), "Which voice speaks each language: M8.");
   settings_heading("Timing");

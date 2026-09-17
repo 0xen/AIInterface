@@ -73,12 +73,25 @@
 //
 // ## Threads
 //
-// `publish()` and `post()` may be called from any thread and never block on a
-// consumer — there is no consumer to block on, only a short mutex around a
-// bounded container. `drain_events()` and `apply_pending()` are frame-loop
-// only. That is the rule `VoiceSession::announce()` already keeps and the
+// `publish()`, `post()` and `drain_events()` may be called from any thread and
+// never block on a consumer — there is no consumer to block on, only a short
+// mutex around a bounded container.
+//
+// **`apply_pending()` is frame-loop only, and that is the rule that matters.**
+// It is the one call that runs handlers, and a handler touches the avatar, the
+// registry and the settings. That is `VoiceSession::announce()`'s rule and the
 // reason it keeps it: work that arrives off the frame loop is queued, and the
-// frame loop is the only thing that acts on it.
+// frame loop is the only thing that acts on it. Getting this wrong does not
+// fail loudly — it fails as a rare crash or a torn frame.
+//
+// This paragraph used to call `drain_events()` frame-loop-only too. That was
+// never a safety claim (it takes the same mutex as everything else) and M2.6's
+// script thread drains from Python. What is true, and is the real hazard, is
+// that **draining empties the queue for everybody**: there is one queue and
+// therefore one consumer's worth of events. Two readers — a script and
+// `--bus-out`, or two scripts — split the stream between them unless something
+// above fans it out, which is exactly what `aii_pyhost` does for the script
+// threads.
 #include <cstddef>
 #include <deque>
 #include <functional>

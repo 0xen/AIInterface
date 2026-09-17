@@ -21,10 +21,12 @@
 //                     and label. `ButtonActionKind::Invoke` is not reachable
 //                     from here and there is no verb that could produce one.
 //   toolbar.clear  -> ButtonRegistry::clear_registered
+//   script.status  -> the Scripts line in the settings surface (M2.6)
+//   script.log     -> one [py] line in the app's log
 //
 // **Adding a family is a data change.** `AppBus::add_family("task", handler)`
-// and one function; M2b's scheduled tasks are the next one and need nothing
-// from the bus, the queues, the bounds or the parser.
+// and one function; M2.6's `script` family was exactly that — two lines here
+// and nothing at all in `app_bus.*` — and M2b's scheduled tasks are next.
 //
 // Everything with a lease on it — clip, sprite, cells — expires. A script that
 // dies mid-performance leaves the avatar back under the C++ policy within
@@ -114,13 +116,34 @@ class BusBindings {
   // rate-limited. Frame loop.
   void publish(const VoiceSession::Snapshot& snap, float dt);
 
+  // M2.6. One line about scripting for the settings surface — a script's own
+  // `aii.status()`, the bootstrap's report of a script that raised, or the
+  // app's own reason for not starting a host at all. It is deliberately the
+  // same field for all three: from the user's side "my script isn't working"
+  // has one answer, not three places to look for one.
+  //
+  // `aii.status()` is a bus message like any other, so it is applied on the
+  // frame loop with everything else and a script cannot write into the panel
+  // from its own thread.
+  void set_script_status(std::string text, bool ok);
+  const std::string& script_status() const { return script_status_; }
+  bool script_status_ok() const { return script_status_ok_; }
+
+  // Lines a script asked to have logged, since the last call. Frame loop.
+  std::vector<std::string> take_script_log();
+
  private:
   void on_avatar(const BusMessage& m, std::string* error);
   void on_theme(const BusMessage& m, std::string* error);
   void on_toolbar(const BusMessage& m, std::string* error);
+  void on_script(const BusMessage& m, std::string* error);
   float lease_from(const BusMessage& m) const;
 
   Context ctx_;
+
+  std::string script_status_;
+  bool script_status_ok_ = true;
+  std::vector<std::string> script_log_;
 
   std::string sprite_;
   float sprite_left_ = 0.0f;

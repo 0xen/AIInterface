@@ -35,6 +35,12 @@
 //     --bus-out   a file every published bus event is appended to.
 //     --bus-text  also publish turn text. Opt-in on purpose: the transcript
 //                 does not leave the process because something connected.
+//     --script    run this Python file (M2.6), repeatable, ahead of the user's
+//                 own. The viewer's flag, and for the same use: a harness has
+//                 to be up before a script that never returns starts. With no
+//                 --script and an empty %APPDATA%\AIInterface\scripts, no
+//                 Python DLL is loaded at all.
+//     --no-scripts  discover nothing, whatever is in scripts\.
 //
 //   SPACE / Talk    click (or tap) toggles the mic: conversation mode. While
 //                   the mic is on, a pause in speech sends that utterance and
@@ -80,6 +86,7 @@
 #include "avatar_ui.h"
 #include "bus_bindings.h"
 #include "core/app_bus.h"
+#include "script_host.h"
 #include "core/button_registry.h"
 #include "core/config.h"
 #include "core/worker_pool.h"
@@ -259,6 +266,9 @@ int main(int /*argc*/, char** /*argv*/) {
     // M2.5's escape hatch, in the spirit of --buttons.
     std::string busIn, busOut;
     bool busText = false;
+    // M2.6.
+    std::vector<std::string> scriptArgs;
+    bool scriptsEnabled = true;
     {
         // Wide command line so Japanese survives (argv is ANSI-mangled).
         int wargc = 0;
@@ -290,6 +300,9 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (a == L"--bus-in" && i + 1 < wargc) busIn = utf8FromWide(wargv[++i]);
             else if (a == L"--bus-out" && i + 1 < wargc) busOut = utf8FromWide(wargv[++i]);
             else if (a == L"--bus-text") busText = true;
+            else if (a == L"--script" && i + 1 < wargc)
+                scriptArgs.push_back(utf8FromWide(wargv[++i]));
+            else if (a == L"--no-scripts") scriptsEnabled = false;
         }
         if (wargv) LocalFree(wargv);
     }
@@ -683,6 +696,40 @@ int main(int /*argc*/, char** /*argv*/) {
     if (!busIn.empty()) log::info("[bus] tailing {}", busIn);
     if (!busOut.empty()) log::info("[bus] publishing to {}", busOut);
 
+    // ---- M2.6: Python, only if there is a script ----
+    // After the families are registered, because a message posted from a
+    // script before its family exists would be applied against nobody. Before
+    // the loop, because the interesting half of scripting is the loading
+    // sequence — a script sees session.state go Loading → Idle like anything
+    // else on the bus.
+    //
+    // **The trigger is a script to run, and nothing else.** No script, no
+    // `LoadLibrary`, no `python313.dll`, no interpreter, and no stage added to
+    // the loading screen. See script_host.h for what "a script to run" means
+    // and why the shipped example does not count as one.
+    aii::ScriptHost scripts;
+    bool scripting = false;
+    if (scriptsEnabled) {
+        const std::vector<std::string> found = aii::ScriptHost::discover(scriptArgs);
+        if (!found.empty()) {
+            for (const std::string& s : found) log::info("[py] script {}", s);
+            scripting = scripts.start(aii::AppBus::instance(), found);
+            if (!scripting) log::warn("[py] {}", scripts.status());
+        }
+    }
+    // The same field the scripts' own `aii.status()` writes to: from the
+    // user's side "my script isn't working" has one answer, not two places to
+    // look for one.
+    if (!scripts.status().empty()) bus.set_script_status(scripts.status(), scripts.status_ok());
+    // Both of these drain the *same* outbound queue, so a run with a script
+    // and a --bus-out file splits the event stream between them. That is fine
+    // for what --bus-out is (a debugging hatch, and how M2.5 was tested with
+    // no Python at all) and confusing for anything else, so it is said once
+    // here rather than discovered from a capture with half the lines missing.
+    if (!busOut.empty() && scripting)
+        log::warn("[bus] --bus-out and a script share one event queue; each sees only "
+                  "what the other has not drained");
+
     log::info("avatar live: {}x{} {} {}", extent.width, extent.height,
               transparent ? "transparent" : "opaque", gpu::apiName(api));
 
@@ -935,6 +982,12 @@ int main(int /*argc*/, char** /*argv*/) {
         bus.tick(dt);
         for (const std::string& note : aii::AppBus::instance().take_status())
             log::warn("[bus] {}", note);
+        // M2.6. Empties the engine queue the Python host is wired to — nothing
+        // here consumes it, so a script that called into the `rend` module
+        // would otherwise grow it for the rest of the run — and passes on
+        // whatever a script asked to have logged.
+        scripts.tick();
+        for (const std::string& line : bus.take_script_log()) log::info("[py] {}", line);
         // Published from the snapshot the frame loop already took, rather than
         // from inside the session: the turn thread and the worker poll keep
         // queueing and the frame loop keeps acting, which is announce()'s rule
@@ -1151,6 +1204,8 @@ int main(int /*argc*/, char** /*argv*/) {
             aii::AvatarOptions avatarOptions;
             avatarOptions.avatars = avatarNames;
             avatarOptions.themes = avatarSource.themes();
+            avatarOptions.script_status = bus.script_status();
+            avatarOptions.script_status_ok = bus.script_status_ok();
             avatarOptions.art_status = avatarSource.status();
             avatarOptions.art_status_ok = avatarSource.status_ok();
             avatarOptions.derived = avatarSource.derived();
@@ -1253,6 +1308,11 @@ int main(int /*argc*/, char** /*argv*/) {
     // unique_ptr's own scope so that it happens before the device it draws on
     // is touched by anything else in this teardown.
     sidebar.reset();
+    // Python next, and before anything the scripts can still reach. The
+    // engine's host stops the interpreter and joins its thread; the app's own
+    // teardown must not be racing a script that is still posting. Nothing is
+    // FreeLibrary'd — CPython does not survive being unloaded.
+    scripts.stop();
     // Anything still inside the debounce window goes now: a mode clicked and
     // then Esc pressed half a second later is still a change the user made.
     settings.flush();

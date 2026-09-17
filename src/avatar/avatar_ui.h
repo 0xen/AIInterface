@@ -89,6 +89,14 @@ struct AvatarOptions {
   std::string japanese_voice_error;
   // The recogniser's `language` option in force: "auto", "en" or "ja".
   const char* stt_language = "auto";
+
+  // M2.6. One line under Scripts: how many are running, why the host did not
+  // start, or the last failure a script reported through `aii.status()`. Empty
+  // is the normal case — nobody is scripting — and the section then says where
+  // to put a script rather than nothing at all, because a feature with no
+  // visible door is a feature nobody finds.
+  std::string script_status;
+  bool script_status_ok = true;
 };
 
 struct AvatarUiState {

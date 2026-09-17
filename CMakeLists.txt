@@ -86,7 +86,21 @@ if(AII_BUILD_AVATAR)
   endif()
   include(cmake/FetchImgui.cmake)
   set(REND_BUILD_APPS OFF CACHE BOOL "" FORCE)
-  set(REND_PYTHON OFF CACHE BOOL "" FORCE)
+  # M2.6. The engine's own embedded-CPython host, in process, as the user
+  # asked: "just like the viewer application python is ran in our code. Not as
+  # a separate process." It used to be unbuildable from here — the engine
+  # gated `pyhost` behind REND_BUILD_APPS *and* REND_PYTHON, and we force the
+  # first off — so the engine's gate was split and REND_PYTHON now stands
+  # alone, which is what its own comment always claimed.
+  #
+  # Turning this off costs the app nothing but scripting: no script is ever
+  # discovered, `avatar.exe` links none of it either way, and the built-in
+  # policy is what runs when nothing is scripting.
+  option(AII_BUILD_SCRIPTS "Build the Python script host (M2.6)" ON)
+  set(REND_PYTHON ${AII_BUILD_SCRIPTS} CACHE BOOL "" FORCE)
   add_subdirectory("${AII_RENDERER_DIR}" "${CMAKE_BINARY_DIR}/renderer")
+  if(AII_BUILD_SCRIPTS)
+    add_subdirectory(src/pyhost)
+  endif()
   add_subdirectory(src/avatar)
 endif()

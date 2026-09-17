@@ -61,6 +61,11 @@ void BusBindings::install(Context ctx) {
   bus.add_family("avatar", [this](const BusMessage& m, std::string* e) { on_avatar(m, e); });
   bus.add_family("theme", [this](const BusMessage& m, std::string* e) { on_theme(m, e); });
   bus.add_family("toolbar", [this](const BusMessage& m, std::string* e) { on_toolbar(m, e); });
+  // M2.6. The one family that points back at the user rather than at the app:
+  // it is how a script says something, and how a script that fell over is
+  // something the user can see rather than a line in a console they are not
+  // watching.
+  bus.add_family("script", [this](const BusMessage& m, std::string* e) { on_script(m, e); });
 }
 
 float BusBindings::lease_from(const BusMessage& m) const {
@@ -231,6 +236,43 @@ void BusBindings::on_toolbar(const BusMessage& m, std::string* error) {
     return;
   }
   if (error) *error = "unknown verb";
+}
+
+// ------------------------------------------------------------------ script
+
+void BusBindings::on_script(const BusMessage& m, std::string* error) {
+  if (m.verb == "status") {
+    // A failure replaces a success but not another failure: when two scripts
+    // are running, the one that broke is the news, and a healthy one
+    // reporting afterwards must not paper over it.
+    const bool ok = m.flag("ok", true);
+    if (ok && !script_status_ok_) return;
+    set_script_status(m.str("text"), ok);
+    // Also into the log. The settings surface is where the user finds it; the
+    // log is where a scripted run finds it, and a status line that only
+    // existed behind a cog would be untestable without a screenshot.
+    if (script_log_.size() < kBusStatusMax)
+      script_log_.push_back((ok ? "status: " : "status (failed): ") + script_status_);
+    return;
+  }
+  if (m.verb == "log") {
+    // Bounded like everything else here. A script logging in a tight loop
+    // fills a frame's worth and no more, because this is drained every frame.
+    if (script_log_.size() < kBusStatusMax) script_log_.push_back(m.str("text"));
+    return;
+  }
+  if (error) *error = "unknown verb";
+}
+
+void BusBindings::set_script_status(std::string text, bool ok) {
+  script_status_ = std::move(text);
+  script_status_ok_ = ok;
+}
+
+std::vector<std::string> BusBindings::take_script_log() {
+  std::vector<std::string> out;
+  out.swap(script_log_);
+  return out;
 }
 
 // -------------------------------------------------------------- the frame
