@@ -5,6 +5,8 @@
 # voice loop from aii_core.
 add_executable(avatar
   main.cpp
+  avatar_appearance.cpp
+  avatar_appearance.h
   avatar_controller.cpp
   avatar_controller.h
   avatar_def.cpp

@@ -118,8 +118,8 @@ class AvatarRenderer {
   // origin worked out for this band, and `alpha`) then both layers. Call
   // after waitFrameSlot(), when the GPU has finished reading the slot.
   //
-  // `alpha` is the M1.5 handoff times the M1.6 visibility fade; the shader
-  // premultiplies by it.
+  // `alpha` is M7.2's AvatarAppearance: the pop-in on the way in, the fade on
+  // the way out. The shader premultiplies by it.
   void write_slot(std::uint32_t slot, const AvatarGrid& grid, std::uint32_t band_w,
                   std::uint32_t band_h, float alpha);
 

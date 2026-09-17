@@ -94,6 +94,8 @@ void AvatarController::start_oneshot(const char* clip, Yield yield) {
   oneshot_yield_ = yield;
 }
 
+void AvatarController::appear() { appear_pending_ = true; }
+
 bool AvatarController::request_clip(const std::string& clip, float seconds,
                                     std::string* error) {
   if (clip.empty()) {
@@ -163,10 +165,25 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
     for (const auto& w : snap.workers) worker_state_[w.name] = w.state;
     blink_wait_ = roll_blink_wait();
   }
-  if (!woke_ && snap.state != VoiceSession::State::Loading) {
-    woke_ = true;
-    start_oneshot("wake", Yield::ToUser);
+  // M7.2. The entrance, started here and asked for from outside — see
+  // appear(). The trigger name rather than a clip name, so M7.1 picks the
+  // variant and an avatar that declares none still gets its single `wake`.
+  if (appear_pending_) {
+    appear_pending_ = false;
+    oneshot_from_mic_ = snap.state == VoiceSession::State::Listening;
+    start_oneshot("wake", Yield::Entrance);
+    // The dwell floor protects what is *on screen* from being replaced too
+    // soon, and nothing was: the clip the policy had been playing was behind a
+    // zero alpha for as long as the avatar was hidden. Measured before this
+    // line existed: a turn in "shown when talking" appeared mid-`think`, and
+    // the thought bubble's 0.80 s sprite floor held the entrance off for
+    // 0.47 s of it — so the summon put an unrelated clip on screen and the
+    // entrance arrived late to its own appearance.
+    entered_first_frame_ = true;
   }
+  // Cleared as a level, not an edge: once the session has left Listening the
+  // entrance no longer has the microphone as an excuse, whatever happens next.
+  if (snap.state != VoiceSession::State::Listening) oneshot_from_mic_ = false;
   if (snap.turn_failed_seq != last_failed_seq_) {
     last_failed_seq_ = snap.turn_failed_seq;
     start_oneshot("confused", Yield::ToMic);
@@ -266,12 +283,17 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
   // ---- reactions outrank the ambient state, for as long as they last ----
   if (oneshot_left_ > 0.0f) {
     oneshot_left_ -= dt;
-    const bool preempt =
-        oneshot_yield_ == Yield::ToUser
-            ? (snap.state == VoiceSession::State::Listening ||
-               snap.state == VoiceSession::State::Thinking ||
-               snap.state == VoiceSession::State::Speaking)
-            : (snap.state == VoiceSession::State::Listening);
+    const bool at_mic = snap.state == VoiceSession::State::Listening;
+    bool preempt = at_mic;
+    switch (oneshot_yield_) {
+      case Yield::ToMic:
+        break;
+      case Yield::Entrance:
+        // The microphone that was already open when this entrance began is
+        // the reason it began; only a later one takes it.
+        preempt = at_mic && !oneshot_from_mic_;
+        break;
+    }
     if (preempt || oneshot_left_ <= 0.0f) {
       oneshot_left_ = 0.0f;
       oneshot_.clear();
@@ -361,13 +383,17 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
     const bool blinking = current_ == "blink" || std::strcmp(want, "blink") == 0;
     const float floor =
         avatar_clip_sprite(current_) ? tune_.sprite_dwell : tune_.min_dwell;
-    if (urgent || blinking || entered_ >= floor) {
+    if (urgent || blinking || entered_first_frame_ || entered_ >= floor) {
       last_dwell_ = entered_;
       current_ = want;
       reason_ = why;
       entered_ = 0.0f;
     }
   }
+  // One frame only, and cleared whether or not the commit above took it: the
+  // exemption is "the avatar was not on screen a moment ago", which stops
+  // being true immediately.
+  entered_first_frame_ = false;
 
   AvatarPose pose;
   pose.clip = current_;

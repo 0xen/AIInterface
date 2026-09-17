@@ -105,6 +105,22 @@ class AvatarController {
  public:
   explicit AvatarController(AvatarTuning tuning = {});
 
+  // M7.2. The avatar is arriving on screen: play an entrance.
+  //
+  // **This is the only thing that starts one, and it is not this object's
+  // decision.** It used to be: `update()` fired `wake` the first time the
+  // session left Loading, which is a fair guess at "the avatar is appearing"
+  // and is wrong in both directions. It is too early on the startup path --
+  // the loading screen is still dissolving over the band and the clip is over
+  // before the avatar is opaque -- and it never happens at all on the three
+  // paths that appear *later*, a mode switch and every turn in "shown when
+  // talking". Only the thing that owns the band's alpha knows when the avatar
+  // is actually arriving, so AvatarAppearance says so and this plays it.
+  //
+  // Idempotence is not promised and is not wanted: called twice, the entrance
+  // restarts, because two arrivals are two arrivals.
+  void appear();
+
   // Clip lengths for the one-shots, taken from the definition rather than
   // guessed, and re-taken on every hot reload so retiming `happy.txt` retimes
   // how long the policy gives it.
@@ -171,14 +187,40 @@ class AvatarController {
  private:
   // What a one-shot will stand aside for. The question requirement 5 asks is
   // whether a one-shot may be interrupted mid-play, and the honest answer is
-  // "by some things": an entrance is never a reason to ignore the user, but a
-  // reaction that has no other channel is worth a second of the floor.
+  // "by some things": nothing the avatar is playing is a reason to ignore the
+  // user reaching for the microphone, but a reaction that has no other channel
+  // is worth a second of the floor.
+  //
+  // `ToUser` -- any state the user caused takes it -- was the third member
+  // and is gone with M7.2: `wake` was its only holder, and see Entrance below
+  // for why that stopped being a coherent rule for an entrance. Nothing else
+  // ever wanted it, so it is deleted rather than kept warm for a caller that
+  // does not exist.
   enum class Yield {
-    ToUser,  // wake: any state the user caused takes it (listen/think/talk)
     ToMic,   // happy, confused, frustrated: only the user taking the
              // microphone. In particular `happy` holds the floor through the
              // spoken worker report it is reacting to, which is the whole
              // point of it.
+    // M7.2's entrance: ToMic, except that the microphone cannot cancel an
+    // entrance it *summoned*.
+    //
+    // The entrance used to be `ToUser` -- pre-empted by listen, think and
+    // talk alike -- which was coherent while it only ever fired at startup:
+    // the user talking a second after the app opened wanted the listen clip,
+    // not an opening. It is incoherent the moment the
+    // entrance fires on every appearance, because in "shown when talking" the
+    // avatar appears *because* the state went to Listening or Speaking -- so
+    // under ToUser the entrance was pre-empted on the frame it started, every
+    // time, and under plain ToMic the Listening half of that is still true.
+    // An animation that its own trigger cancels is not an animation.
+    //
+    // So: whatever the state was when the entrance fired cannot end it, and
+    // anything after can. If the user picks up the microphone *during* an
+    // entrance that something else summoned, they still take it instantly,
+    // which is the guarantee ToMic exists for and the only one that matters
+    // here -- capture itself was never gated on the avatar, so this is about
+    // what the slime is doing and nothing else.
+    Entrance,
   };
 
   struct Timing {
@@ -205,13 +247,28 @@ class AvatarController {
   std::string oneshot_;
   float oneshot_left_ = 0.0f;
   Yield oneshot_yield_ = Yield::ToMic;
+  // Yield::Entrance's memory: the microphone was already open when this
+  // entrance began, so it is the cause and not an interruption. Cleared the
+  // moment the session leaves Listening, after which the next Listening is
+  // somebody reaching for the mic and does take the avatar.
+  bool oneshot_from_mic_ = false;
+  // appear() latches; update() starts the clip. The frame loop settles the
+  // band's alpha after it has run the policy for the frame, so the edge
+  // arrives just past this object's turn -- and an entrance has to be started
+  // against the session state it is entering on anyway (see Yield::Entrance),
+  // which only update() is holding. The cost is that the clip's first frame
+  // lands one frame into an eighty-millisecond reveal.
+  bool appear_pending_ = false;
+  // True for the single update() that starts an entrance: the dwell floors
+  // are suspended for it, because they exist to stop the *visible* clip
+  // flapping and the avatar was not visible.
+  bool entered_first_frame_ = false;
 
   // The script's lease: which clip and how much of it is left.
   std::string script_;
   float script_left_ = 0.0f;
 
   bool seeded_ = false;  // first update() records the world without reacting to it
-  bool woke_ = false;
   unsigned last_failed_seq_ = 0;
   // M1f.3. The latched microphone closed itself on silence, and the slime has
   // not been given a reason to wake up since.

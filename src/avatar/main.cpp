@@ -97,6 +97,7 @@
 #include <thread>
 #include <vector>
 
+#include "avatar_appearance.h"
 #include "avatar_controller.h"
 #include "avatar_def.h"
 #include "avatar_renderer.h"
@@ -142,16 +143,17 @@ constexpr std::uint32_t kWindowH = 780;
 constexpr std::uint32_t kAvatarH = 260;   // avatar band at the top
 constexpr float kFontPx = 15.0f;
 constexpr int kCornerMargin = 16;
-// M1.5: the loading screen hands over to the avatar across this many seconds,
-// the loader fading out as the avatar fades in. Long enough to read as the
-// widget settling, short enough that it is not a dissolve you wait through.
+// M1.5: the loading screen leaves across this many seconds. Long enough to
+// read as the widget settling, short enough that it is not a dissolve you wait
+// through.
+//
+// M7.2 narrowed what this covers. It used to be a crossfade — the loader out
+// as the avatar came in — and the avatar's half of it is gone: the band is now
+// summoned by AvatarAppearance once the loader has no opacity left, because
+// the entrance clip has to be seen and it was not. The scrim, the cubes and
+// the caption still leave on this clock, and the panel is still released on
+// its first frame.
 constexpr float kHandoffSeconds = 0.42f;
-// M1.6: how long the avatar takes to fade in or out when the visibility mode
-// changes, or when "shown when talking" follows the session in and out of a
-// turn. Much shorter than the handoff on purpose — this is an answer to
-// something that just happened, not an opening — but long enough that the
-// listening → thinking → speaking sequence reads as a fade and not a blink.
-constexpr float kVisibilitySeconds = 0.16f;
 
 // Hermite ramp from 0 at `a` to 1 at `b`. Both ends of the handoff need to
 // start and stop without an edge, and the two fades run over different
@@ -1102,10 +1104,11 @@ int main(int /*argc*/, char** /*argv*/) {
     float handoff = 0.0f;
     std::string loaderStage;
     float loaderProgress = 0.0f;
-    // M1.6 visibility fade, 0..1. Negative means "no first frame yet": it then
-    // snaps to whatever the mode already asks for, so the default mode does
-    // not fade the avatar band in from nothing behind the loading screen.
-    float visFade = -1.0f;
+    // M7.2, replacing M1.6's visibility fade: the avatar's arrivals and
+    // departures, from every path, in one object. It needs no "first frame"
+    // special case — the loading screen is up on frame one and it will not
+    // let the avatar appear underneath it.
+    aii::AvatarAppearance appearance;
 
     // ---- M4: the sidebar, a real second window ----
     //
@@ -1631,16 +1634,33 @@ int main(int /*argc*/, char** /*argv*/) {
         // --say all read the snapshot before it.
         if (loading) snap.state = aii::VoiceSession::State::Loading;
 
-        // M1.6: the same alpha the handoff drives, now also carrying the
-        // visibility mode. Multiplying rather than choosing is what makes the
-        // end of loading right in every mode: in a mode that does not want the
-        // avatar yet, `vis` is already 0, so the handoff fades the loader out
-        // to nothing instead of crossfading into an avatar that then vanishes.
+        // M7.2: the one place the avatar appears. Every path that can put it
+        // on screen — the loader handing over at startup, the mode switched in
+        // settings, a turn starting in "shown when talking", hold-to-dictate
+        // letting go — is `avatarWanted` by the time it reaches here, and none
+        // of them is named below. `snap.state` is read *after* the clamp above
+        // on purpose: while the loading screen still has opacity the session
+        // reads as Loading, so no mode wants the avatar and the two gates say
+        // the same thing.
+        //
+        // The M1.5 handoff no longer multiplies into this. That product was
+        // the bug: it fed the avatar in across the loader's own 0.42 s
+        // dissolve, so the entrance M2.4 fired on the same frame played under
+        // a scrim and was finished before the band was opaque. Now the loader
+        // leaves first and the avatar is summoned into the space it left.
         const bool avatarWanted = aii::avatar_visible(uiState.avatar_mode, snap.state);
-        if (visFade < 0.0f) visFade = avatarWanted ? 1.0f : 0.0f;
-        visFade = std::clamp(visFade + (avatarWanted ? dt : -dt) / kVisibilitySeconds, 0.0f, 1.0f);
-        const float vis = smoothstep(0.0f, 1.0f, visFade);
-        avatarAlpha = smoothstep(0.30f, 1.00f, handoff) * vis;
+        const aii::AvatarAppearance::Frame appeared =
+            appearance.update(avatarWanted, loading, dt);
+        avatarAlpha = appeared.alpha;
+        // The whole of the summon: an arrival plays an entrance, and this is
+        // the only line in the program that starts one. It is deliberately
+        // outside the `controllerOwnsAvatar` test's block but inside its
+        // condition — a run pinned to `--clip` has no policy to ask.
+        if (appeared.summoned && controllerOwnsAvatar) {
+            controller.appear();
+            log::info("avatar: summoned at {:.2f}s (pop {:.0f} ms)", t,
+                      aii::AvatarAppearance::kPopSeconds * 1000.0f);
+        }
         // The band is reserved while anything might still draw in it, and
         // always while the loading screen is up: that overlay covers the whole
         // window and is centred in it, so a mode that hides the avatar gives
@@ -1655,7 +1675,7 @@ int main(int /*argc*/, char** /*argv*/) {
         // band while the window still has the old height puts every control
         // that far from where it is on screen; that mismatch is what made a
         // click on Talk read as hold-to-dictate (see the note at `band`).
-        nextBand = (loading || visFade > 0.0f) ? kAvatarH : 0;
+        nextBand = (loading || appearance.present()) ? kAvatarH : 0;
         if (loading) loaderPush = aii::loader_push(t, width, height, loaderAlpha);
         // The panel is released on the first frame of the handoff, not held for
         // it: its one discrete change (the usage row, the state line, the live
