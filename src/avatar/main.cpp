@@ -35,6 +35,9 @@
 //     --bus-out   a file every published bus event is appended to.
 //     --bus-text  also publish turn text. Opt-in on purpose: the transcript
 //                 does not leave the process because something connected.
+//     --schedule  create a one-shot timer S seconds from startup (M2b.1),
+//                 repeatable, `S` or `S:label`; the fire is logged with the
+//                 thread it arrived on and how late it was
 //     --script    run this Python file (M2.6), repeatable, ahead of the user's
 //                 own. The viewer's flag, and for the same use: a harness has
 //                 to be up before a script that never returns starts. With no
@@ -74,6 +77,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -89,6 +93,7 @@
 #include "script_host.h"
 #include "core/button_registry.h"
 #include "core/config.h"
+#include "core/schedule.h"
 #include "core/worker_pool.h"
 #include "imgui_layer.h"
 #include "loader_anim.h"
@@ -269,6 +274,8 @@ int main(int /*argc*/, char** /*argv*/) {
     // M2.6.
     std::vector<std::string> scriptArgs;
     bool scriptsEnabled = true;
+    // M2b.1.
+    std::vector<std::string> scheduleArgs;
     {
         // Wide command line so Japanese survives (argv is ANSI-mangled).
         int wargc = 0;
@@ -303,6 +310,14 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (a == L"--script" && i + 1 < wargc)
                 scriptArgs.push_back(utf8FromWide(wargv[++i]));
             else if (a == L"--no-scripts") scriptsEnabled = false;
+            // M2b.1. `--schedule S` (repeatable, `S:label` optional): create a
+            // one-shot timer S seconds after startup. A primitive whose only
+            // door is a live turn cannot be measured without spending the
+            // subscription, which is exactly why --buttons and --bus-in exist.
+            // It is also the demonstration that firing lands on the frame loop
+            // of the *real* app and not only of a harness.
+            else if (a == L"--schedule" && i + 1 < wargc)
+                scheduleArgs.push_back(utf8FromWide(wargv[++i]));
         }
         if (wargv) LocalFree(wargv);
     }
@@ -734,6 +749,31 @@ int main(int /*argc*/, char** /*argv*/) {
               transparent ? "transparent" : "opaque", gpu::apiName(api));
 
     const auto start = std::chrono::steady_clock::now();
+    // M2b.1. The thread that owns delivery. Recorded rather than assumed: the
+    // whole point of the primitive is that a schedule fires *here*, and a claim
+    // nobody can check is a claim that quietly stops being true.
+    const std::thread::id frameThread = std::this_thread::get_id();
+    for (const std::string& spec : scheduleArgs) {
+        const std::size_t colon = spec.find(':');
+        const double secs = atof(spec.substr(0, colon).c_str());
+        aii::ScheduleAction action;
+        action.kind = "timer";
+        action.label = colon == std::string::npos ? (spec + " second timer")
+                                                  : spec.substr(colon + 1);
+        action.report = "Your " + action.label + " is done.";
+        // Captured now, never re-resolved at fire time: a deferred worker runs
+        // with bypassed permissions in the directory it was promised, and the
+        // user may be away from the desk when it fires.
+        action.cwd = std::filesystem::current_path().string();
+        std::string err;
+        const std::uint64_t id = aii::ScheduleBook::instance().create(
+            std::chrono::duration<double>(secs), action, aii::ReportGrade::Fixed, &err);
+        if (id == 0)
+            log::warn("[schedule] refused: {}", err);
+        else
+            log::info("[schedule] created id={} kind=timer in {:.3f}s grade=fixed label=\"{}\"", id,
+                      secs, action.label);
+    }
     double lastT = 0.0;
     std::uint32_t windowH = kWindowH;  // what the OS window was last set to
     // Resizing the window from inside the frame does not come back as a
@@ -1022,6 +1062,30 @@ int main(int /*argc*/, char** /*argv*/) {
         bus.tick(dt);
         for (const std::string& note : aii::AppBus::instance().take_status())
             log::warn("[bus] {}", note);
+        // M2b.1: the schedule book, ticked from the same defined point and for
+        // the same reason. There is no timer thread anywhere in this feature —
+        // a thread would still have to hand the event back to this loop, so it
+        // would add a join, a kernel object and a cancel/callback race and buy
+        // no promptness the loop does not already have at 60 Hz.
+        //
+        // M2b.4 replaces the log line below with the two report grades (a fixed
+        // line through announce(), an injected turn for the phrased one) and
+        // M2b.2/M2b.3 add the doors that create these. The delivery point does
+        // not move when they do.
+        {
+            const auto fireNow = std::chrono::steady_clock::now();
+            for (const aii::Schedule& s : aii::ScheduleBook::instance().tick(fireNow)) {
+                const bool onLoop = std::this_thread::get_id() == frameThread;
+                log::info(
+                    "[schedule] fired id={} kind={} grade={} late={:.1f}ms frame-loop={} "
+                    "cwd=\"{}\" report=\"{}\"",
+                    s.id, s.action.kind, aii::to_string(s.grade),
+                    std::chrono::duration<double, std::milli>(fireNow - s.due).count(),
+                    onLoop ? "yes" : "NO", s.action.cwd, s.action.report);
+            }
+            for (const std::string& note : aii::ScheduleBook::instance().take_status())
+                log::warn("[schedule] {}", note);
+        }
         // M2.6. Empties the engine queue the Python host is wired to — nothing
         // here consumes it, so a script that called into the `rend` module
         // would otherwise grow it for the rest of the run — and passes on
@@ -1353,6 +1417,23 @@ int main(int /*argc*/, char** /*argv*/) {
     // teardown must not be racing a script that is still posting. Nothing is
     // FreeLibrary'd — CPython does not survive being unloaded.
     scripts.stop();
+    // M2b.1: schedules are not persistent, by the user's decision — but they
+    // must not vanish *silently*, which the plan calls out as a thing to
+    // design rather than accept. The book hands back exactly what is being
+    // dropped, with enough of each payload to describe it. Today that is a log
+    // line; M2b.3/M2b.4 own the wording that reaches the user, and this is what
+    // it will read.
+    {
+        const auto dropped = aii::ScheduleBook::instance().take_pending();
+        if (!dropped.empty()) {
+            const auto now = std::chrono::steady_clock::now();
+            log::warn("[schedule] {} pending schedule{} dropped at shutdown (not persistent):",
+                      dropped.size(), dropped.size() == 1 ? "" : "s");
+            for (const aii::Schedule& s : dropped)
+                log::warn("[schedule]   id={} kind={} label=\"{}\" due in {:.1f}s", s.id,
+                          s.action.kind, s.action.label, s.seconds_until(now));
+        }
+    }
     // Anything still inside the debounce window goes now: a mode clicked and
     // then Esc pressed half a second later is still a change the user made.
     settings.flush();

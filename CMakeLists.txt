@@ -36,6 +36,7 @@ add_library(aii_core STATIC
   src/core/engines.cpp
   src/core/language.cpp
   src/core/prompt_store.cpp
+  src/core/schedule.cpp
   src/core/sentence_splitter.cpp
   src/core/speech_queue.cpp
   src/core/text_util.cpp
@@ -76,6 +77,19 @@ if(MSVC)
   target_compile_options(voiceloop PRIVATE /utf-8 /W4 /wd4996)
 endif()
 aii_copy_runtime_dlls(voiceloop)
+
+# ---- schedule_test: M2b.1's harness ----
+# Deliberately *not* linked against aii_core. The schedule primitive depends on
+# nothing but the standard library, and a test that dragged in sherpa-onnx and
+# VOICEVOX would need their DLLs beside it to start — a timing harness should
+# not be able to fail for a reason that has nothing to do with timing.
+add_executable(schedule_test tests/schedule_test.cpp src/core/schedule.cpp)
+target_include_directories(schedule_test PRIVATE src)
+target_link_libraries(schedule_test PRIVATE winmm)
+target_compile_definitions(schedule_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+if(MSVC)
+  target_compile_options(schedule_test PRIVATE /utf-8 /W4)
+endif()
 
 # ---- avatar: the corner window on the Renderer engine (sibling checkout) ----
 option(AII_BUILD_AVATAR "Build the avatar window (needs the Renderer checkout and the Vulkan SDK's dxc)" ON)
