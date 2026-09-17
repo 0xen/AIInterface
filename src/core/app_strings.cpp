@@ -1,0 +1,159 @@
+#include "core/app_strings.h"
+
+#include <atomic>
+
+#include "core/text_util.h"
+
+namespace aii {
+namespace {
+
+// ---------------------------------------------------------------------------
+// The table
+// ---------------------------------------------------------------------------
+//
+// On the Japanese column: these are **heard**, in 四国めたん's voice, so they
+// are written as spoken sentences rather than as translations of the English.
+// Where English hedges with "Sorry, I have not set that up" the Japanese says
+// the same thing the way a person says it out loud; where English names a
+// value in the middle of a sentence, the Japanese puts it where Japanese wants
+// it, which is what the `{}` slots are for. No keigo: the app talks to one
+// person it already knows, and 丁寧語 on an error line reads as an apology
+// from a machine rather than from her.
+//
+// Order must match `enum class Msg` exactly; the test asserts the table is the
+// same length and that every row has English in it.
+const AppLine kLines[] = {
+    // --- WorkerPool --------------------------------------------------------
+    {"{} paused.", "{} はいったん止めたよ。"},
+    {"Paused.", "いったん止めたよ。"},
+    {"{} failed: {}", "{} は失敗しちゃった: {}"},
+    // The reason is the CLI's own words and still English; a separate task
+    // maps those to plain sentences. What matters here is that the sentence
+    // *around* it is hers, so a Japanese conversation does not open with an
+    // English clause.
+    {"The task failed. {}", "うまくいかなかったみたい。{}"},
+    // `{}` here is the worker's first sentence -- the model's words, so it is
+    // already in the user's language and must not be touched.
+    {"{} finished. {}", "{} が終わったよ。{}"},
+    {"Finished. {}", "終わったよ。{}"},
+
+    // --- Workers addressed by voice ---------------------------------------
+    {"Could not start worker {}. {}", "{} を始められなかったよ。{}"},
+    {"No running worker called {}.", "{} っていう動いてる作業はないよ。"},
+    {"No worker called {}.", "{} っていう作業はないよ。"},
+
+    // --- A schedule the app would not accept ------------------------------
+    {"Sorry, I have not set that up. I need to know how long, and under a day.",
+     "ごめん、それは用意できなかった。どれくらい先か、一日以内で教えて。"},
+    {"Sorry, I have not set that up. I need to know which folder to do it in.",
+     "ごめん、それは用意できなかった。どのフォルダでやればいいか教えて。"},
+    {"Sorry, I have not set that up. I need the full path of the folder.",
+     "ごめん、それは用意できなかった。フォルダのフルパスがいるんだ。"},
+    {"Sorry, I have not set that up. I am not sure what you wanted me to do then.",
+     "ごめん、それは用意できなかった。そのとき何をすればいいのか分からなかったんだ。"},
+    {"Sorry, I have not set that up. I am already keeping track of too many things.",
+     "ごめん、それは用意できなかった。もう抱えてる予定が多すぎるんだ。"},
+
+    // --- A schedule firing -------------------------------------------------
+    {"That is the time you asked me to tell you about.", "言われてた時間だよ。"},
+    {"Scheduled worker {} could not start in {}.", "予約してた作業 {} を {} で始められなかったよ。"},
+    {"I could not start the thing I put aside for you, and it has not run.",
+     "あずかってた用事を始められなかったよ。まだ何もやれてないんだ。"},
+    {"Something I set aside for you has finished, but I could not tell you how it went.",
+     "あずかってた用事は終わったんだけど、どうなったかは伝えられないんだ。"},
+
+    // --- A cancel that missed ---------------------------------------------
+    {"That one had already gone off, so there was nothing to stop.",
+     "それはもう時間が来ちゃってたから、止めるものはなかったよ。"},
+    {"Those had already gone off, so there was nothing to stop.",
+     "どれももう時間が来ちゃってたから、止めるものはなかったよ。"},
+    {"I stopped the rest, but one of those had already gone off.",
+     "ほかのは止めたけど、ひとつはもう時間が来ちゃってたよ。"},
+    {"I stopped the rest, but some of those had already gone off.",
+     "ほかのは止めたけど、いくつかはもう時間が来ちゃってたよ。"},
+
+    // --- Shutting down with schedules still pending ------------------------
+    {"Closing with {} thing still to do: ", "やり残し {} 件のまま閉じるよ: "},
+    {"Closing with {} things still to do: ", "やり残し {} 件のまま閉じるよ: "},
+};
+
+static_assert(sizeof(kLines) / sizeof(kLines[0]) == static_cast<size_t>(Msg::Count),
+              "app_strings: the table and the Msg enum have drifted apart");
+
+// Both halves of the resolution at the top of app_strings.h. Separate atomics
+// rather than one packed value: they are written by different things (the
+// settings surface and the turn loop) and neither has to know about the other.
+std::atomic<unsigned> g_enabled{0x3};      // bit 0 English, bit 1 Japanese; both on
+std::atomic<bool> g_user_japanese{false};  // nothing heard yet reads as English
+
+}  // namespace
+
+const AppLine& app_line(Msg m) {
+  const size_t i = static_cast<size_t>(m);
+  // A key past the end is a programming error, not a user-facing one, and the
+  // honest answer to it is still a sentence rather than a crash in the middle
+  // of telling someone their build broke.
+  if (i >= static_cast<size_t>(Msg::Count)) return kLines[static_cast<size_t>(Msg::PausedSpoken)];
+  return kLines[i];
+}
+
+const char* pick(const AppLine& line, AppLang lang) {
+  if (lang == AppLang::Japanese && line.ja && *line.ja) return line.ja;
+  // English, or a translation that is not there yet. Either way a sentence
+  // comes back: never "", never a key name.
+  return (line.en && *line.en) ? line.en : "";
+}
+
+std::string app_text_in(AppLang lang, Msg m, const std::string& a, const std::string& b) {
+  const std::string form = pick(app_line(m), lang);
+  std::string out;
+  out.reserve(form.size() + a.size() + b.size());
+  int slot = 0;
+  for (size_t i = 0; i < form.size(); ++i) {
+    if (form[i] == '{' && i + 1 < form.size() && form[i + 1] == '}') {
+      // A slot with no argument behind it collapses to nothing rather than
+      // surviving as "{}" into something the user hears.
+      if (slot == 0) out += a;
+      else if (slot == 1) out += b;
+      ++slot;
+      ++i;
+      continue;
+    }
+    out += form[i];
+  }
+  return out;
+}
+
+std::string app_text(Msg m, const std::string& a, const std::string& b) {
+  return app_text_in(app_language(), m, a, b);
+}
+
+AppLang app_language_for(LanguageSelection enabled, bool user_spoke_japanese) {
+  // One language on: it decides, and nothing else is consulted. This is the
+  // case the whole task is about -- a user who has switched English off must
+  // never hear an English line.
+  if (enabled.japanese && !enabled.english) return AppLang::Japanese;
+  if (enabled.english && !enabled.japanese) return AppLang::English;
+  // Both on (the default), or the repaired neither-on: follow the user.
+  return user_spoke_japanese ? AppLang::Japanese : AppLang::English;
+}
+
+void set_enabled_languages(LanguageSelection sel) {
+  g_enabled.store((sel.english ? 1u : 0u) | (sel.japanese ? 2u : 0u), std::memory_order_relaxed);
+}
+
+void note_user_language(const std::string& user_text) {
+  // A turn with no letters, digits or kana in it is not evidence of anything,
+  // and counting it as English would flip the app out of Japanese on a stray
+  // "..." or an empty transcription.
+  if (!has_speakable_content(user_text)) return;
+  g_user_japanese.store(has_japanese(user_text), std::memory_order_relaxed);
+}
+
+AppLang app_language() {
+  const unsigned bits = g_enabled.load(std::memory_order_relaxed);
+  LanguageSelection sel{(bits & 1u) != 0, (bits & 2u) != 0};
+  return app_language_for(sel, g_user_japanese.load(std::memory_order_relaxed));
+}
+
+}  // namespace aii

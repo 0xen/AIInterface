@@ -31,6 +31,7 @@ add_library(aii_core STATIC
   src/tts/kokoro_tts.cpp
   src/tts/voicevox_tts.cpp
   src/core/app_bus.cpp
+  src/core/app_strings.cpp
   src/core/button_registry.cpp
   src/core/config.cpp
   src/core/engines.cpp
@@ -104,6 +105,20 @@ target_include_directories(clip_utf8_test PRIVATE src)
 target_compile_definitions(clip_utf8_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 if(MSVC)
   target_compile_options(clip_utf8_test PRIVATE /utf-8 /W4)
+endif()
+
+# ---- app_strings_test: the canned lines, and that their bytes survive MSVC ----
+# Same rule as schedule_test and clip_utf8_test: app_strings.cpp and
+# text_util.cpp are standard-library-only, so this builds and runs with no
+# engine DLL anywhere near it. /utf-8 matters here more than anywhere else in
+# the build -- without it MSVC reads the Japanese in app_strings.cpp as the
+# system codepage and the byte assertions in this test are what catches it.
+add_executable(app_strings_test tests/app_strings_test.cpp src/core/app_strings.cpp
+                                src/core/text_util.cpp)
+target_include_directories(app_strings_test PRIVATE src)
+target_compile_definitions(app_strings_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+if(MSVC)
+  target_compile_options(app_strings_test PRIVATE /utf-8 /W4)
 endif()
 
 # ---- worker_report_test: what a finished worker hands to the speech path ----

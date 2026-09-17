@@ -9,6 +9,7 @@
 
 #include "rend/core/log.h"
 
+#include "core/app_strings.h"
 #include "core/language.h"
 #include "core/schedule.h"
 #include "core/sentence_splitter.h"
@@ -280,6 +281,10 @@ void VoiceSession::load() {
   // set_japanese() is how the on-demand load hands it one later.
   speech_ = std::make_unique<SpeechQueue>(eng_.kokoro.get(), eng_.voicevox.get(), speaker_.get());
   speech_->set_on_status([this](const std::string& s) { log("[tts] " + s); });
+  // The canned lines need the setting from the first second, not from the
+  // first turn: a schedule restored before anyone has spoken can fire, and a
+  // worker can fail, with the table still on its default.
+  set_enabled_languages(effective_langs());
   workers_ = std::make_unique<WorkerPool>(cfg_.claude_exe, cfg_.worker_bypass);
   workers_->set_on_report([this](const std::string& name, WorkerPool::State state,
                                  const std::string& shown, const std::string& spoken) {
@@ -862,6 +867,9 @@ void VoiceSession::set_languages(LanguageSelection sel) {
   // never out of step in the wrong direction.
   ensure_japanese_voice();
   apply_stt_language();
+  // And the app's own sentences, for the same reason the recogniser is told
+  // here: the checkbox has moved and the next thing said must already know.
+  set_enabled_languages(effective_langs());
 }
 
 void VoiceSession::set_muted(bool muted) {
@@ -1011,6 +1019,13 @@ void VoiceSession::run_turn(std::string text, bool is_injected) {
   const std::string pending = is_injected ? std::string() : pending_context();
   if (!pending.empty()) log("[schedule] this turn carries the pending list");
   const LanguageSelection eff = effective_langs();
+  // Which language the app's *own* sentences speak in (core/app_strings.h).
+  // Same two facts the rest of this function already works from: the resolved
+  // settings, and -- only when both languages are on -- whether the user's own
+  // words had Japanese in them. An injected turn is the app talking to itself,
+  // so it is not evidence of anything and is not counted.
+  set_enabled_languages(eff);
+  if (!is_injected) note_user_language(text);
   const std::string sent = decorate_language(pending + injected, eff);
   if (!eff.both()) log("[lang] turn sent with the " + language_spec(eff) + "-only instruction");
   ChatResult r = eng_.llm->turn(sent, [&](const std::string& delta) {
@@ -1057,7 +1072,7 @@ void VoiceSession::run_turn(std::string text, bool is_injected) {
     // no worker, no folder, no error code — the same rule the worker report
     // and every other canned line in this app follow.
     log("[schedule] the report turn failed: " + r.error);
-    announce("Something I set aside for you has finished, but I could not tell you how it went.");
+    announce(app_text(Msg::ScheduledReportLost));
     return;
   }
   if (!r.ok) return;
@@ -1448,11 +1463,9 @@ void VoiceSession::apply_cancels() {
   // answer. No ids, no names, no numbers beyond the ones a person would use.
   std::string line;
   if (stopped == 0)
-    line = missed == 1 ? "That one had already gone off, so there was nothing to stop."
-                       : "Those had already gone off, so there was nothing to stop.";
+    line = app_text(missed == 1 ? Msg::CancelMissedOne : Msg::CancelMissedMany);
   else
-    line = missed == 1 ? "I stopped the rest, but one of those had already gone off."
-                       : "I stopped the rest, but some of those had already gone off.";
+    line = app_text(missed == 1 ? Msg::CancelPartialOne : Msg::CancelPartialMany);
   announce(line);
 }
 
@@ -1575,8 +1588,8 @@ void VoiceSession::deliver_schedule(const Schedule& s) {
     // failure's `error` is the whole command line, system prompt included, and
     // a transcript is a place the user reads, not a place to dump 900
     // characters of argv. What the chat needs is which one and where.
-    announce("Scheduled worker " + name + " could not start in " + a.cwd + ".",
-             "I could not start the thing I put aside for you, and it has not run.");
+    announce(app_text(Msg::DeferredStartFailedShown, name, a.cwd),
+             app_text(Msg::DeferredStartFailedSpoken));
     return;
   }
 
@@ -1586,7 +1599,7 @@ void VoiceSession::deliver_schedule(const Schedule& s) {
   // be an English word in front of a Japanese sentence, and a decoration would
   // be the app talking over the words the user was promised.
   std::string report = a.report.empty() ? a.label : a.report;
-  if (report.empty()) report = "That is the time you asked me to tell you about.";
+  if (report.empty()) report = app_text(Msg::TimerNoWords);
   if (s.grade == ReportGrade::Fixed) {
     announce(report, report);
     return;
@@ -1616,8 +1629,8 @@ void VoiceSession::drop_schedules(const std::vector<Schedule>& dropped) {
   // promise is itself the failure. This is the record that it was broken, for
   // the chat and the log, and it names what is being dropped because a shown
   // form may.
-  std::string shown = "Closing with " + std::to_string(dropped.size()) +
-                      (dropped.size() == 1 ? " thing" : " things") + " still to do: ";
+  std::string shown = app_text(dropped.size() == 1 ? Msg::ClosingWithOne : Msg::ClosingWithMany,
+                               std::to_string(dropped.size()));
   for (size_t i = 0; i < dropped.size(); ++i) {
     const std::string& label = dropped[i].action.label.empty() ? dropped[i].action.name
                                                                : dropped[i].action.label;
@@ -1650,7 +1663,7 @@ std::string create_schedule(const Command& c, std::string* detail) {
   double seconds = 0.0;
   if (!parse_delay(c.in, &seconds)) {
     *detail = c.in.empty() ? "no in= given" : ("could not read in=\"" + c.in + "\"");
-    return "Sorry, I have not set that up. I need to know how long, and under a day.";
+    return app_text(Msg::RefuseDelay);
   }
 
   ScheduleAction action;
@@ -1672,11 +1685,11 @@ std::string create_schedule(const Command& c, std::string* detail) {
     // that could have caught it.
     if (c.cwd.empty()) {
       *detail = "no cwd= on a scheduled worker";
-      return "Sorry, I have not set that up. I need to know which folder to do it in.";
+      return app_text(Msg::RefuseNoFolder);
     }
     if (!std::filesystem::path(c.cwd).is_absolute()) {
       *detail = "cwd=\"" + c.cwd + "\" is not an absolute path";
-      return "Sorry, I have not set that up. I need the full path of the folder.";
+      return app_text(Msg::RefuseRelativeFolder);
     }
     if (action.label.empty()) action.label = action.name;
     if (action.report.empty()) action.report = c.say.empty() ? action.label : c.say;
@@ -1686,7 +1699,7 @@ std::string create_schedule(const Command& c, std::string* detail) {
     if (action.label.empty()) action.label = c.say;
   } else {
     *detail = "neither say= nor task= given";
-    return "Sorry, I have not set that up. I am not sure what you wanted me to do then.";
+    return app_text(Msg::RefuseNothingToDo);
   }
   action.cwd = c.cwd.empty() ? std::filesystem::current_path().string() : c.cwd;
 
@@ -1700,7 +1713,7 @@ std::string create_schedule(const Command& c, std::string* detail) {
     *detail = err;
     // The one refusal the book itself makes is "full" (64 pending). Said
     // without the number, because the user did not ask for a number.
-    return "Sorry, I have not set that up. I am already keeping track of too many things.";
+    return app_text(Msg::RefuseTooMany);
   }
   char buf[160];
   std::snprintf(buf, sizeof buf, "created id=%llu kind=%s grade=%s in %.1fs",
@@ -1766,10 +1779,10 @@ void VoiceSession::run_commands(const std::string& reply_text) {
       if (workers_->spawn(c.name, c.cwd, c.task, &err)) {
         log("[worker] spawned " + c.name + " in " + (c.cwd.empty()? std::string("(app dir)") : c.cwd));
       } else {
-        announce("Could not start worker " + c.name + ". " + err);
+        announce(app_text(Msg::SpawnFailed, c.name, err));
       }
     } else if (c.verb == "pause") {
-      if (!workers_->pause(c.name)) announce("No running worker called " + c.name + ".");
+      if (!workers_->pause(c.name)) announce(app_text(Msg::NoRunningWorker, c.name));
     } else if (c.verb == "stop") {
       // M2b.5. Same suppression as a cancel, and for the same reason: this is a
       // stop the user asked for out loud, so the pool reporting it as Paused a
@@ -1779,7 +1792,7 @@ void VoiceSession::run_commands(const std::string& reply_text) {
       silence_worker(c.name);
       if (!workers_->stop(c.name)) {
         take_silenced_worker(c.name);
-        announce("No worker called " + c.name + ".");
+        announce(app_text(Msg::NoWorker, c.name));
       }
     }
   }

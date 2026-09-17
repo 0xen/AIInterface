@@ -47,6 +47,7 @@
 
 #include "audio/audio_out.h"
 #include "audio/mic_in.h"
+#include "core/app_strings.h"
 #include "core/config.h"
 #include "core/engines.h"
 #include "core/prompt_store.h"
@@ -180,6 +181,11 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
     auto t_send = clk::now();
     std::atomic<bool> cancel{false};
+    // The same two facts the avatar feeds the canned-line table, so a worker
+    // failing under the console loop says it in the same language this loop is
+    // being held in. See core/app_strings.h.
+    aii::set_enabled_languages(cfg.langs);
+    aii::note_user_language(user_text);
     const std::string sent = aii::decorate_language(injector.decorate(user_text), cfg.langs);
     if (sent.size() != user_text.size()) std::printf("[prompts] context injected\n");
     aii::ChatResult r = llm->turn(sent, [&](const std::string& delta) {

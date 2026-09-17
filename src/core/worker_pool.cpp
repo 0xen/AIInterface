@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "core/app_strings.h"
 #include "core/button_registry.h"
 #include "core/config.h"
 #include "core/text_util.h"
@@ -137,8 +138,8 @@ void WorkerPool::run(Worker* w) {
     if (w->cancel) {
       w->state = State::Paused;
       w->activity = "paused";
-      shown = w->name + " paused.";
-      spoken = "Paused.";
+      shown = app_text(Msg::WorkerPausedShown, w->name);
+      spoken = app_text(Msg::PausedSpoken);
     } else if (!r.ok) {
       w->state = State::Failed;
       w->activity = "failed";
@@ -149,19 +150,19 @@ void WorkerPool::run(Worker* w) {
       // pause. Spoken, a full stop is the honest punctuation.
       while (!why.empty() && (why.back() == ':' || why.back() == ' ')) why.pop_back();
       if (!why.empty() && why.back() != '.' && why.back() != '!' && why.back() != '?') why += '.';
-      shown = w->name + " failed: " + why;
+      shown = app_text(Msg::WorkerFailedShown, w->name, why);
       // The failure path loses the name too, not only the success path. A rule
       // with an exception is one the user hears break; the panel row and the
       // transcript still say which worker failed, and a failure is acted on by
       // looking, not by listening.
-      spoken = "The task failed. " + why;
+      spoken = app_text(Msg::TaskFailedSpoken, why);
     } else {
       w->state = State::Done;
       w->activity = "done";
       w->result = trim(r.text);
       const std::string what = first_sentence(r.text);
-      shown = w->name + " finished. " + what;
-      spoken = "Finished. " + what;
+      shown = app_text(Msg::WorkerFinishedShown, w->name, what);
+      spoken = app_text(Msg::FinishedSpoken, what);
     }
     state = w->state;
   }
