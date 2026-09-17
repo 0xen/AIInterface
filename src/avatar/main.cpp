@@ -847,8 +847,43 @@ int main(int /*argc*/, char** /*argv*/) {
         // on Talk opened the band, moved the panel, and then read as a hold. A
         // 55-68 ms click failed every time; with the avatar already shown, where
         // nothing moves, the same click was always right.
-        band = nextBand;
-        if (pendingH != 0) {
+        // ...and not at all while a gesture is in flight.
+        //
+        // Applying the band and the height together, before the pump, made the
+        // panel's own layout self-consistent, and 4837a94 made the pointer's
+        // position survive the move. Neither is enough, because the *hover*
+        // verdict does not come from this frame's layout at all: ImGui decides
+        // which window the pointer is over inside NewFrame, before a single
+        // window has been submitted, so it tests against each window's rect as
+        // of the previous frame. On the one frame the widget grows 260 px, that
+        // rect is the old short one, and a pointer sitting on the transport row
+        // — whose position is now correctly reported in the *new* client space
+        // — falls outside it. IsItemHovered() then says no about a button the
+        // pointer never left. Measured as rect=1 clip=1 win=0 in the [gesture]
+        // line, which is that disagreement written down. It is a one-frame
+        // race, so it failed about one click in four rather than every time,
+        // and a matrix with one sample per cell could not see it.
+        //
+        // Chasing that with more coordinate repair means winning a race every
+        // time. Not moving is strictly better: a resize that waits for the
+        // user's finger to come up costs a few tens of milliseconds nobody can
+        // see, and removes the whole class — the microphone, the chat arrow,
+        // the cog and anything M5 adds, for every reason the window resizes,
+        // not just this one.
+        //
+        // The one visible consequence, stated rather than hidden: hold-to-
+        // dictate holds the avatar's appearance back for the length of the
+        // hold, so in "shown when talking" the avatar arrives when the user
+        // lets go rather than when they press. That is a second or two, it
+        // applies only to the hold gesture, and an avatar popping up in the
+        // middle of a deliberate hold was never the point of the mode.
+        //
+        // Both halves of gesture_in_flight() matter and neither is a timeout:
+        // it clears when ImGui sees the release, which is the same event the
+        // deferral exists to protect, so there is no way for it to latch on.
+        const bool gestureInFlight = ui && ui->gesture_in_flight();
+        band = gestureInFlight ? band : nextBand;
+        if (pendingH != 0 && !gestureInFlight) {
             height = pendingH;
             pendingH = 0;
             // The OS window is moved here too, immediately before the

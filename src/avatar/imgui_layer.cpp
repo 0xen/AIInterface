@@ -359,6 +359,17 @@ void ImGuiLayer::sync_pointer(void* hwnd) {
   ImGui::GetIO().AddMousePosEvent(x, y);
 }
 
+bool ImGuiLayer::gesture_in_flight() const {
+  if (!s_) return false;
+  ImGui::SetCurrentContext(s_->ctx);
+  // ActiveId and MouseDown both survive between frames, so this is legal
+  // outside NewFrame/Render and describes the frame that just ended. The
+  // release is still in the event queue at the moment the caller asks, which
+  // is exactly what makes the answer useful: the frame that will consume the
+  // release is the frame that must not move anything.
+  return ImGui::IsAnyItemActive() && ImGui::GetIO().MouseDown[0];
+}
+
 bool ImGuiLayer::wants_keyboard() const {
   if (!s_) return false;
   ImGui::SetCurrentContext(s_->ctx);

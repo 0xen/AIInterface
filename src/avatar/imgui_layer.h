@@ -70,6 +70,16 @@ class ImGuiLayer {
   // is, or a space typed into the message field also toggles the microphone.
   bool wants_keyboard() const;
 
+  // Is a mouse gesture in flight — a button down on one of our widgets, with
+  // the release not yet seen? Read between frames, so it answers for the frame
+  // just finished, which is what the geometry block at the top of the next one
+  // needs to know.
+  //
+  // Both halves are required. An active item alone is not a gesture: the
+  // message field is active for as long as it has focus, and freezing the
+  // window's geometry while someone types would stop the chat ever opening.
+  bool gesture_in_flight() const;
+
   // Re-read the pointer from the OS and hand ImGui its position in this
   // window's client space. Call once a frame, just before begin_frame().
   //

@@ -1342,14 +1342,37 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
     const ImVec2 r1 = ImGui::GetItemRectMax();
     POINT raw{};
     GetCursorPos(&raw);
+    // `hovered` is one answer built from three separate facts, and when it
+    // disagrees with the position above, which of the three is lying is the
+    // whole question. So all three are printed:
+    //
+    //   rect   - the pointer against this item's rect, unclipped. Position
+    //            alone. A 1 here says ImGui's mouse position and the item's
+    //            geometry agree, which is what 4837a94 fixed.
+    //   clip   - the same test through the window's clip rect, which is set
+    //            during Begin() *this* frame.
+    //   win    - whether ImGui holds this window to be the hovered one. This is
+    //            computed in NewFrame, before any window is submitted, so it
+    //            is tested against each window's rect as of the *previous*
+    //            frame. On the frame the widget grows, that rect is the old,
+    //            shorter one, and a pointer at the button's new client y is
+    //            outside it.
+    //
+    // rect=1 clip=1 win=0 is therefore the signature of a hover verdict and a
+    // pointer position evaluated one frame apart.
+    const bool rect_hit = ImGui::IsMouseHoveringRect(r0, r1, false);
+    const bool clip_hit = ImGui::IsMouseHoveringRect(r0, r1, true);
+    const bool win_hit = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     std::printf(
         "  [gesture] %s item=(%.1f,%.1f)-(%.1f,%.1f) imgui_mouse=(%.1f,%.1f) "
-        "screen_mouse=(%d,%d) display=%.0fx%.0f hovered=%d active=%d "
-        "down=%d t=%.3f\n",
+        "screen_mouse=(%d,%d) display=%.0fx%.0f hovered=%d rect=%d clip=%d win=%d "
+        "active=%d down=%d t=%.3f\n",
         edge, r0.x, r0.y, r1.x, r1.y, io.MousePos.x, io.MousePos.y, static_cast<int>(raw.x),
         static_cast<int>(raw.y), io.DisplaySize.x, io.DisplaySize.y,
-        static_cast<int>(ImGui::IsItemHovered()), static_cast<int>(ImGui::IsItemActive()),
-        static_cast<int>(io.MouseDown[0]), ImGui::GetTime());
+        static_cast<int>(ImGui::IsItemHovered()), static_cast<int>(rect_hit),
+        static_cast<int>(clip_hit), static_cast<int>(win_hit),
+        static_cast<int>(ImGui::IsItemActive()), static_cast<int>(io.MouseDown[0]),
+        ImGui::GetTime());
     std::fflush(stdout);
   };
   if (ImGui::IsItemActivated()) {
