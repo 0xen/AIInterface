@@ -59,6 +59,26 @@ bool parse_delay(const std::string& text, double* seconds) {
   return true;
 }
 
+// M2b.5. The units a person asks in. Rounded on purpose: see the header.
+//
+// There is no "in 3 minutes and 42 seconds" band and there never will be. The
+// bands below are the ones a person uses out loud, and the hedge ("about")
+// carries the rounding honestly instead of hiding it — the one place it is
+// dropped is under a minute, where "in less than a minute" is already exact
+// enough to act on and "about a minute" would be vaguer than the truth.
+std::string describe_delay(double seconds) {
+  if (seconds <= 0.5) return "due now";
+  if (seconds < 45.0) return "in less than a minute";
+  if (seconds < 90.0) return "in about a minute";
+  const long total_min = static_cast<long>(seconds / 60.0 + 0.5);
+  if (total_min < 60) return "in about " + std::to_string(total_min) + " minutes";
+  const long h = total_min / 60;
+  const long m = total_min % 60;
+  std::string out = "in about " + std::to_string(h) + (h == 1 ? " hour" : " hours");
+  if (m > 0) out += " " + std::to_string(m) + (m == 1 ? " minute" : " minutes");
+  return out;
+}
+
 const char* to_string(ReportGrade grade) {
   return grade == ReportGrade::Phrased ? "phrased" : "fixed";
 }

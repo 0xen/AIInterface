@@ -117,6 +117,21 @@ enum class ReportGrade {
 constexpr double kScheduleMaxDelaySeconds = 24.0 * 60.0 * 60.0;
 bool parse_delay(const std::string& text, double* seconds);
 
+// M2b.5. A delay written the way a person says one, which is the unit the user
+// actually asks in: "in about four minutes", never a timestamp and never a
+// count of seconds. Deliberately rounded and deliberately hedged — the book is
+// accurate to a frame, but nobody sets a timer in order to be told it has 237
+// seconds left, and a precise number read aloud is exactly the register the
+// user rejected.
+//
+// It is built here, in English, because it is **machine traffic**: it goes into
+// the block the conversational instance is handed with the user's turn (see
+// `VoiceSession::pending_context()`), never to the user directly. The model
+// then says it in the language the conversation is being held in — the same
+// division of labour the Phrased report grade already rests on. The app states
+// the fact; the model chooses the words.
+std::string describe_delay(double seconds);
+
 const char* to_string(ReportGrade grade);
 // Parses "fixed"/"phrased"; anything else is `Fixed`, because a bare timer is
 // the cheap, unspendable answer and an unparseable grade must not silently

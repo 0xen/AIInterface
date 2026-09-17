@@ -260,7 +260,27 @@ void VoiceSession::load() {
     // right — and the *voice* gets nothing yet: the sentence goes to the
     // conversational instance instead, which is holding this conversation in
     // whatever language it is being held in, and it says what happened.
-    if (!take_scheduled_worker(name)) {
+    // M2b.5. Stopped on purpose: the user asked for it and has already been
+    // told it is stopping. The pool is right to report a cancelled turn as
+    // Paused; saying so out loud, or spending a turn on it, would be the app
+    // narrating its own bookkeeping.
+    if (take_silenced_worker(name)) {
+      log("[worker] " + name + " stopped on request; nothing reported");
+      // The list entry goes too, or the pending list keeps offering a worker
+      // that is not there any more.
+      take_scheduled_worker(name, nullptr);
+      return;
+    }
+    bool phrased = true;
+    if (!take_scheduled_worker(name, &phrased)) {
+      announce(shown, spoken);
+      return;
+    }
+    // M2b.5. Every schedule-started worker is now registered, not only the
+    // Phrased ones, so that "what is pending?" can see it and a cancel has
+    // something to address. A Fixed one (the bus's, M2b.2) still reports the
+    // ordinary way once it is off the list.
+    if (!phrased) {
       announce(shown, spoken);
       return;
     }
@@ -787,8 +807,21 @@ void VoiceSession::run_turn(std::string text, bool is_injected) {
     for (const std::string& id : injector_.loaded()) names += (names.empty() ? "" : ", ") + id;
     log("[prompts] injected context; loaded this session: " + names);
   }
+  // M2b.5. What the user is still waiting for, composed into the turn rather
+  // than written into the system prompt (which is a launch argument and cannot
+  // show live state) or fetched with a verb (which costs a round trip and only
+  // works if the model decides to ask). See pending_context() for the full
+  // argument and for what this choice cannot do.
+  //
+  // **User turns only.** An injected turn is the app telling Claude that one
+  // deferred thing has finished, and its whole job is one or two sentences
+  // about that one thing; handing it the rest of the list at the same moment
+  // invites a report that recites the queue. The user is not at the keyboard
+  // for it and did not ask.
+  const std::string pending = is_injected ? std::string() : pending_context();
+  if (!pending.empty()) log("[schedule] this turn carries the pending list");
   const LanguageSelection eff = effective_langs();
-  const std::string sent = decorate_language(injected, eff);
+  const std::string sent = decorate_language(pending + injected, eff);
   if (!eff.both()) log("[lang] turn sent with the " + language_spec(eff) + "-only instruction");
   ChatResult r = eng_.llm->turn(sent, [&](const std::string& delta) {
     {
@@ -984,15 +1017,253 @@ bool VoiceSession::flush_injected_turns() {
   return true;
 }
 
-bool VoiceSession::take_scheduled_worker(const std::string& name) {
+bool VoiceSession::take_scheduled_worker(const std::string& name, bool* phrased) {
   std::lock_guard<std::mutex> l(mutex_);
   for (auto it = scheduled_workers_.begin(); it != scheduled_workers_.end(); ++it) {
-    if (*it == name) {
+    if (it->name == name) {
+      if (phrased) *phrased = it->phrased;
       scheduled_workers_.erase(it);
       return true;
     }
   }
   return false;
+}
+
+void VoiceSession::silence_worker(const std::string& name) {
+  if (name.empty()) return;
+  std::lock_guard<std::mutex> l(mutex_);
+  silenced_workers_.push_back(name);
+}
+
+bool VoiceSession::take_silenced_worker(const std::string& name) {
+  std::lock_guard<std::mutex> l(mutex_);
+  for (auto it = silenced_workers_.begin(); it != silenced_workers_.end(); ++it) {
+    if (*it == name) {
+      silenced_workers_.erase(it);
+      return true;
+    }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------- M2b.5
+//
+// ## How the AI comes to know what is pending, and why it is not a verb
+//
+// The plan offered two doors — surface it into the prompt, or add a verb to
+// fetch it — and both are wrong here.
+//
+// **The system prompt cannot carry it.** A system prompt in this app is a
+// *launch argument*: `ClaudeCodeClient` hands it to the child process once,
+// when the process is created, which is why `PromptStore` deliberately does
+// not hot-reload (HANDOFF says so in as many words). A list of pending
+// schedules written into it would be the list as it stood at startup, which is
+// always empty, forever.
+//
+// **A verb costs a round trip and a decision.** "What have you got pending?"
+// would become: a turn that emits a fetch, an app that answers it, and a
+// second turn that speaks. Two turns of usage and several seconds for a
+// question whose answer the app already holds — and worse, it only works if
+// the model *decides* to ask. A model that thinks it remembers will answer
+// from memory and be wrong, and "cancel that" will address a schedule that
+// fired four minutes ago. The failure is silent and sounds confident.
+//
+// **The third door is the one M3.3 already built: a turn is composed, not
+// just sent.** `run_turn()` decorates the user's words with the lazy project
+// prompts and, since M8.3, with the language directive — machine traffic in a
+// `<context>` block, never shown and never spoken. Pending schedules are the
+// same kind of thing and ride the same rail. The model sees them *with* the
+// question, so "what is pending?" is one turn and no decision, and "cancel the
+// stretch reminder" resolves against a list that is at most one turn old.
+//
+// What this choice cannot do, stated rather than discovered later:
+//
+//   * **It is a snapshot at turn start, not a live feed.** A schedule that
+//     fires while the model is composing its reply is still in the block the
+//     model is reading. That is why a cancel that misses is *spoken* — see
+//     apply_cancels() — rather than assumed to be impossible.
+//   * **It only reaches the model when the user speaks.** Nothing wakes the
+//     model to tell it a timer went off; M2b.4's report is what does that.
+//   * **It costs tokens on every turn that has anything pending.** Bounded by
+//     `kSchedulesMax` and a line each. When nothing is pending it emits
+//     nothing at all, so a session that never schedules anything sends
+//     byte-for-byte what it sent before this existed — the same property M8.3
+//     gave the language directive, and for the same reason.
+//
+// ## What "pending" means, and it is not the book
+//
+// `ScheduleBook::list()` is the obvious answer and it is the wrong one. A
+// `Phrased` worker schedule leaves the book *the instant it fires*, and what
+// it starts then runs for minutes. Answering from the book alone would say
+// "nothing is pending" to a user who is sitting there waiting for the build
+// result they asked for — the app would be telling them, confidently, that it
+// had forgotten.
+//
+// So pending means **what the user is still waiting for**, which is three
+// things: schedules not yet due, workers a schedule started that are still
+// running, and reports that are finished but not yet spoken. The user does not
+// experience those as three mechanisms. They experience one promise, and it is
+// not kept until they hear it.
+std::string VoiceSession::pending_context() const {
+  const std::vector<Schedule> book = ScheduleBook::instance().list();
+  std::vector<ScheduledWorker> running;
+  std::size_t ready = 0;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    running = scheduled_workers_;
+    ready = pending_turns_.size();
+  }
+  if (book.empty() && running.empty() && ready == 0) return std::string();
+
+  const auto now = std::chrono::steady_clock::now();
+  std::string b;
+  b += "<context name=\"Pending\" kind=\"state\">\n";
+  b += "Things you promised the user earlier and have not delivered yet. This list is the "
+       "app's, not your memory: trust it over anything you recall.\n\n";
+  if (!book.empty()) {
+    b += "Still to come:\n";
+    for (const Schedule& s : book) {
+      b += "- id=" + std::to_string(s.id) + ", " + describe_delay(s.seconds_until(now)) + ": ";
+      const std::string& label = s.action.label.empty() ? s.action.report : s.action.label;
+      b += label.empty() ? std::string("something you set") : label;
+      if (s.action.kind == "worker") b += " (work to be done in " + s.action.cwd + ")";
+      b += "\n";
+    }
+    b += "\n";
+  }
+  if (!running.empty()) {
+    b += "Started already, still working, and you owe them the outcome:\n";
+    for (const ScheduledWorker& w : running) {
+      const double elapsed =
+          std::chrono::duration<double>(now - w.started).count();
+      b += "- id=" + std::to_string(w.id) + ", running for ";
+      b += elapsed < 60.0 ? std::string("less than a minute")
+                          : (std::to_string(static_cast<long>(elapsed / 60.0 + 0.5)) + " minutes");
+      b += ": " + (w.label.empty() ? w.name : w.label) + "\n";
+    }
+    b += "\n";
+  }
+  if (ready > 0) {
+    // No id, and that is honest rather than an omission: the work is done and
+    // the words are written. There is nothing left to cancel, only something
+    // left to say, and it will be said as soon as there is a gap to say it in.
+    b += "Finished, and waiting for a gap to tell them about: " + std::to_string(ready) +
+         (ready == 1 ? " thing\n\n" : " things\n\n");
+  }
+  b += "If they ask what is pending, say it the way a person would - what it is and roughly "
+       "how long, in the language you are speaking. Never read out an id or say the word id; "
+       "those are for the cancel line only, and they are not words the user has ever heard. "
+       "If they ask you to cancel something, work out which ones they mean and put a cancel "
+       "line for each in your block. If two could be meant, ask which rather than guessing.\n";
+  b += "</context>\n\n";
+  return b;
+}
+
+// ## Cancelling, and why it is queued rather than done where it is asked
+//
+// `run_commands()` runs on the turn thread. `tick()` and `deliver_schedule()`
+// run on the frame loop. Calling `ScheduleBook::cancel()` straight from the
+// turn thread is *safe* — one mutex, and M2b.1 measured 500 jittered races
+// with zero double-outcomes — but safe is not the same as correct here,
+// because a fired worker schedule lives in two places in succession: it leaves
+// the book inside `tick()` and appears in `scheduled_workers_` inside
+// `deliver_schedule()`, and `spawn()` sits between the two for as long as it
+// takes Windows to create a process. A cancel landing in that gap would find
+// the schedule in neither place and tell the user it had already gone off,
+// while the worker it was supposed to stop started anyway.
+//
+// So the cancel is queued and applied **on the frame loop, immediately after
+// the tick**, which is the same discipline `AppBus::apply_pending()` and
+// `announce()` already follow for the same reason. Two consequences fall out
+// and neither is a check that could be got wrong:
+//
+//   * A schedule that came due on this frame has already been delivered and
+//     registered before any cancel is looked up. The gap is not narrow; it
+//     does not exist.
+//   * `deliver_schedule()` pushes the record *before* it spawns, so even
+//     inside that call there is no frame on which the schedule is nowhere.
+//     A cancel that arrives while the spawn is in flight marks the record and
+//     `deliver_schedule()` stops the worker the moment it has one to stop.
+void VoiceSession::request_cancel(std::vector<std::uint64_t> ids) {
+  if (ids.empty()) return;
+  std::lock_guard<std::mutex> l(mutex_);
+  for (std::uint64_t id : ids) pending_cancels_.push_back(id);
+}
+
+void VoiceSession::apply_cancels() {
+  std::vector<std::uint64_t> ids;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    if (pending_cancels_.empty()) return;
+    ids.swap(pending_cancels_);
+  }
+  int stopped = 0, missed = 0;
+  for (std::uint64_t id : ids) {
+    // The book first. This is the ordinary case and it is exact: ids are
+    // monotonic and never reused, so a cancel that arrives after the schedule
+    // fired is a clean miss and can never take somebody else's timer with it.
+    if (ScheduleBook::instance().cancel(id)) {
+      log("[schedule] cancelled id=" + std::to_string(id));
+      ++stopped;
+      continue;
+    }
+    // Then the workers a schedule already started. Killing one of these is the
+    // honest meaning of "cancel that" when the thing has moved on from being a
+    // timer to being work in progress: the user asked for it, it has not
+    // reported, and they have changed their mind.
+    std::string kill;
+    bool handled = false;
+    {
+      std::lock_guard<std::mutex> l(mutex_);
+      for (auto it = scheduled_workers_.begin(); it != scheduled_workers_.end(); ++it) {
+        if (it->id != id) continue;
+        handled = true;
+        if (it->running) {
+          kill = it->name;
+          scheduled_workers_.erase(it);
+        } else {
+          // Still inside spawn(). Marked rather than erased: deliver_schedule()
+          // is holding this record's other end and will stop the process the
+          // moment it exists. Reported as stopped because it will be, and the
+          // frame loop is the only thread that can act on it either way.
+          it->cancelled = true;
+        }
+        break;
+      }
+    }
+    if (handled) {
+      // Recorded before the stop, not after: stop() joins the worker thread and
+      // the report runs inside that join, so a mark set afterwards would arrive
+      // too late to suppress the very report it exists to suppress.
+      if (!kill.empty()) {
+        silence_worker(kill);
+        if (workers_) workers_->stop(kill);
+      }
+      log("[schedule] cancelled id=" + std::to_string(id) + " by stopping the work it started");
+      ++stopped;
+      continue;
+    }
+    log("[schedule] nothing to cancel for id=" + std::to_string(id));
+    ++missed;
+  }
+  if (missed == 0) return;
+  // **A cancel that misses must be heard.** This is the failure the whole task
+  // exists to avoid: the model has already said "done, cancelled" out loud by
+  // the time this block runs, so a miss that only reached the log would leave
+  // the user believing a timer is gone when it is not. Same reasoning, and the
+  // same shape, as M2b.3's spoken refusal.
+  //
+  // One sentence for the whole block, however many missed, because "cancel
+  // everything" is one request and hearing the same line four times is not an
+  // answer. No ids, no names, no numbers beyond the ones a person would use.
+  std::string line;
+  if (stopped == 0)
+    line = missed == 1 ? "That one had already gone off, so there was nothing to stop."
+                       : "Those had already gone off, so there was nothing to stop.";
+  else
+    line = missed == 1 ? "I stopped the rest, but one of those had already gone off."
+                       : "I stopped the rest, but some of those had already gone off.";
+  announce(line);
 }
 
 std::string VoiceSession::scheduled_report_prompt(WorkerPool::State state,
@@ -1038,17 +1309,70 @@ void VoiceSession::deliver_schedule(const Schedule& s) {
     // deferred worker runs with permissions bypassed, ten minutes after the
     // conversation that could have caught a wrong folder, quite possibly with
     // nobody at the desk. The directory it was promised is the only safe one.
+    // M2b.5. Registered **before** the spawn, not after it, and erased again if
+    // the spawn fails. `spawn()` creates a Windows process and takes as long as
+    // that takes; registering afterwards would leave a window in which the
+    // schedule had left the book and not yet arrived here, and a cancel landing
+    // there would report "already gone off" while the worker started anyway.
+    // With the push first there is no such moment: the schedule is in the book,
+    // or it is in this list, and apply_cancels() runs on this same thread.
+    //
+    // `phrased` is a field rather than a reason not to register: Fixed on a
+    // worker is reachable only through the bus (M2b.2), which can set `grade=`
+    // where the model cannot, and it means "do the work, report it the ordinary
+    // way" — but the user is waiting for it either way, so it belongs in the
+    // pending list and it must be cancellable.
+    {
+      std::lock_guard<std::mutex> l(mutex_);
+      ScheduledWorker w;
+      w.id = s.id;
+      w.name = name;
+      w.label = a.label.empty() ? name : a.label;
+      w.started = std::chrono::steady_clock::now();
+      w.phrased = s.grade == ReportGrade::Phrased;
+      scheduled_workers_.push_back(std::move(w));
+    }
     if (workers_ && workers_->spawn(name, a.cwd, a.task, &err)) {
       log("[schedule] started deferred worker " + name + " in " + a.cwd);
-      // Fixed on a worker is reachable only through the bus (M2b.2), which can
-      // set `grade=` where the model cannot. It means "do the work, report it
-      // the ordinary way", so the worker is simply not registered here and
-      // 517c241's canned sentence is what comes back.
-      if (s.grade == ReportGrade::Phrased) {
+      // A cancel that arrived while the spawn was in flight. **Today this is
+      // unreachable, and deliberately written anyway.** `request_cancel()` only
+      // queues, and `apply_cancels()` runs on this same thread immediately
+      // after the tick loop this call sits inside, so nothing can act on the
+      // record between the push above and here. It is belt and braces against
+      // the one change that would break that — a future consumer (the bus,
+      // M2b.2) applying a cancel from its own thread — because the failure it
+      // would cause is the silent one: a worker the user cancelled running
+      // anyway, with the app having said it stopped. Cheap here, invisible
+      // there.
+      bool kill = false;
+      {
         std::lock_guard<std::mutex> l(mutex_);
-        scheduled_workers_.push_back(name);
+        for (auto it = scheduled_workers_.begin(); it != scheduled_workers_.end(); ++it) {
+          if (it->id != s.id) continue;
+          if (it->cancelled) {
+            kill = true;
+            scheduled_workers_.erase(it);
+          } else {
+            it->running = true;
+          }
+          break;
+        }
+      }
+      if (kill) {
+        silence_worker(name);
+        if (workers_) workers_->stop(name);
+        log("[schedule] stopped deferred worker " + name + ": cancelled while it was starting");
       }
       return;
+    }
+    {
+      std::lock_guard<std::mutex> l(mutex_);
+      for (auto it = scheduled_workers_.begin(); it != scheduled_workers_.end(); ++it) {
+        if (it->id == s.id) {
+          scheduled_workers_.erase(it);
+          break;
+        }
+      }
     }
     // **The promise is now broken and the user is owed a sentence.** Ten
     // minutes ago they were told this would happen; the worst outcome here is
@@ -1199,7 +1523,29 @@ std::string create_schedule(const Command& c, std::string* detail) {
 }  // namespace
 
 void VoiceSession::run_commands(const std::string& reply_text) {
+  // M2b.5. Every cancel in one block is collected and handed over together, so
+  // "cancel everything" is one request with one answer rather than one
+  // sentence per item. Applied on the frame loop; see apply_cancels().
+  std::vector<std::uint64_t> cancels;
   for (const Command& c : parse_commands(reply_text)) {
+    if (c.verb == "cancel") {
+      // The id comes from the list this app gave the model a moment ago, so a
+      // value it cannot read is the model inventing one. Logged, not spoken:
+      // apply_cancels() is what owes the user a sentence, and it will say the
+      // honest thing when the cancel misses.
+      char* end = nullptr;
+      const unsigned long long n = std::strtoull(c.id.c_str(), &end, 10);
+      if (c.id.empty() || (end && *end != '\0') || n == 0) {
+        log("[schedule] refused cancel: could not read id=\"" + c.id + "\"");
+        // Still counted as a miss, because the user asked for something to
+        // stop and nothing did. Queuing a 0 makes apply_cancels() say so
+        // through the one path that says it.
+        cancels.push_back(0);
+        continue;
+      }
+      cancels.push_back(static_cast<std::uint64_t>(n));
+      continue;
+    }
     // M3.4. Not a worker verb, so it is handled before the `workers_` guard
     // and does not need a pool. It only ever queues: the prompt arrives
     // prepended to the next user turn, because that is the whole point of
@@ -1235,9 +1581,19 @@ void VoiceSession::run_commands(const std::string& reply_text) {
     } else if (c.verb == "pause") {
       if (!workers_->pause(c.name)) announce("No running worker called " + c.name + ".");
     } else if (c.verb == "stop") {
-      if (!workers_->stop(c.name)) announce("No worker called " + c.name + ".");
+      // M2b.5. Same suppression as a cancel, and for the same reason: this is a
+      // stop the user asked for out loud, so the pool reporting it as Paused a
+      // moment later is not news. It also clears the pending list if what was
+      // stopped happened to be a schedule-started worker the model addressed by
+      // name instead of by id.
+      silence_worker(c.name);
+      if (!workers_->stop(c.name)) {
+        take_silenced_worker(c.name);
+        announce("No worker called " + c.name + ".");
+      }
     }
   }
+  request_cancel(std::move(cancels));
 }
 
 VoiceSession::Snapshot VoiceSession::snapshot() const {

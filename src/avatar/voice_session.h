@@ -5,6 +5,7 @@
 // queue. The window reads an immutable Snapshot each frame.
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -156,6 +157,21 @@ class VoiceSession {
   // the schedule was created with; `Phrased` starts the work and arranges for
   // the conversational instance to describe the outcome in its own words.
   void deliver_schedule(const Schedule& s);
+  // M2b.5. Apply every cancel the AI asked for. **Frame loop only, and called
+  // from the same block in main.cpp as the schedule tick, immediately after
+  // it** — that placement is the whole of the cancel-versus-fire argument and
+  // is not an accident of ordering. A cancel that arrives on the turn thread
+  // is queued by request_cancel() and applied here, so by the time it is
+  // looked up, any schedule that came due on this frame has already been
+  // delivered and, if it started a worker, registered. "Cancelled" and "fired"
+  // were already exclusive inside the book (M2b.1); this is what keeps them
+  // exclusive across the gap between the book and the worker the fire started.
+  void apply_cancels();
+  // M2b.5. Any thread. The ```aii``` block runs on the turn thread, so this
+  // only queues; see apply_cancels(). Every id from one block arrives in one
+  // call, so a "cancel everything" that partly misses says one sentence rather
+  // than one per item.
+  void request_cancel(std::vector<std::uint64_t> ids);
   // M2b.4. What the app says about schedules it is dropping at shutdown.
   // **One line for all of them**, not one per schedule: this runs during
   // teardown, where the frame loop has already stopped and nothing can be
@@ -229,7 +245,21 @@ class VoiceSession {
   // worker thread is where a scheduled worker's report arrives.
   void queue_injected_turn(std::string sent);
   // M2b.4. True if `name` was a worker a schedule started, and forgets it.
-  bool take_scheduled_worker(const std::string& name);
+  // M2b.5: `phrased` comes back with it, because the list now holds every
+  // schedule-started worker — visibility and cancellation want all of them —
+  // where before it held only the ones that report through a turn.
+  bool take_scheduled_worker(const std::string& name, bool* phrased);
+  // M2b.5. Mark `name` as stopped on purpose, so its report says nothing.
+  void silence_worker(const std::string& name);
+  // M2b.5. True if `name` was silenced, and forgets it.
+  bool take_silenced_worker(const std::string& name);
+  // M2b.5. The block handed to Claude with the user's turn, listing what the
+  // user is still waiting for: schedules not yet due, workers a schedule
+  // started that are still running, and reports that are ready but not yet
+  // spoken. Empty when there is nothing pending, so a session that never
+  // schedules anything sends byte-for-byte what it sent before this existed.
+  // Any thread; called from the turn thread.
+  std::string pending_context() const;
   // M2b.4. The text handed to Claude when a scheduled worker finishes.
   static std::string scheduled_report_prompt(WorkerPool::State state, const std::string& shown);
   void set_state(State s);
@@ -325,7 +355,40 @@ class VoiceSession {
   // a live worker gets, which is what makes a Japanese conversation hear
   // Japanese even though the worker's own task and reply were English. Erased
   // when it reports, so a later worker reusing the name is a live one again.
-  std::vector<std::string> scheduled_workers_;
+  //
+  // M2b.5 turned this from a list of names into a small record, for two
+  // reasons that are really one. First, a fired `Phrased` schedule leaves the
+  // book the instant it fires while the user is still waiting for its report,
+  // so "what is pending?" answered from `ScheduleBook::list()` alone would say
+  // nothing is pending; this list is the other half of that answer. Second, to
+  // cancel one of these the user has to be able to name it, and the only
+  // handle ever spoken about is the schedule's own id — so the id rides along
+  // and the id space stays single, monotonic and never reused.
+  //
+  // The entry is pushed *before* `spawn()` is called and erased if the spawn
+  // fails, which is what makes the fire-then-register handoff atomic from the
+  // cancel's point of view: there is no frame on which a schedule is neither
+  // in the book nor in this list. See apply_cancels().
+  struct ScheduledWorker {
+    std::uint64_t id = 0;   // the schedule that started it; still the handle
+    std::string name;       // the worker's name, for WorkerPool::stop()
+    std::string label;      // what the user called it
+    std::chrono::steady_clock::time_point started{};
+    bool phrased = true;    // report through an injected turn (M2b.4)
+    bool running = false;   // spawn() has returned successfully
+    bool cancelled = false; // a cancel landed while it was still starting
+  };
+  std::vector<ScheduledWorker> scheduled_workers_;
+  // M2b.5. Cancel requests from the turn thread, applied on the frame loop.
+  std::vector<std::uint64_t> pending_cancels_;
+  // M2b.5. Workers stopped on purpose, by name, whose completion report is
+  // therefore not news. `WorkerPool::stop()` cancels the turn and the worker
+  // reports itself as Paused on the way out — which is right for the pool and
+  // wrong for the user here: they have just asked for this to stop and been
+  // told it is stopping, so a "Paused." read out afterwards, or worse a whole
+  // injected turn describing it, is the app talking about itself. Checked and
+  // erased by the report callback.
+  std::vector<std::string> silenced_workers_;
   std::vector<float> chunk_;
 };
 

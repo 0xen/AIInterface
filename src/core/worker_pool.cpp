@@ -313,7 +313,12 @@ std::vector<Command> parse_commands(const std::string& text) {
       // all address a worker by name and a nameless one is unrunnable. A bare
       // timer has nothing to name, so `schedule` is let through and validated
       // by its own handler, which can tell the user *why* it was refused.
-      if (c.verb == "schedule" || !c.name.empty()) out.push_back(std::move(c));
+      // M2b.5 adds `cancel`, which addresses a schedule by id and has no name
+      // either. Both are validated by their own handler, which is what can tell
+      // the user why it was refused; `spawn`, `pause` and `stop` are still
+      // dropped without one, because a nameless worker verb is unrunnable.
+      if (c.verb == "schedule" || c.verb == "cancel" || !c.name.empty())
+        out.push_back(std::move(c));
     }
   }
   return out;

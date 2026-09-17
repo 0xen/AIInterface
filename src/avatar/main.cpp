@@ -76,6 +76,7 @@
 
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -84,7 +85,9 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "avatar_controller.h"
@@ -253,7 +256,14 @@ int main(int /*argc*/, char** /*argv*/) {
     bool vulkan = false;
     bool voiceEnabled = true;
     double seconds = -1.0;
-    std::string sayText;
+    // M2b.5. Repeatable, like `voiceloop --say`, and for the reason HANDOFF
+    // already gives for that one: anything that is *per session* is otherwise
+    // unscriptable. A pending list only exists on the second turn, so a harness
+    // that can take one turn cannot see this feature at all. Each is sent as a
+    // fresh user turn once the session is back to Idle, so the turns are
+    // consecutive in one conversation and schedules created by the first one
+    // are live, and firing, while the second is composed.
+    std::vector<std::string> sayTexts;
     std::string avatarName = "default";
     // M1c.4. Empty means "whatever the settings file says", which in turn
     // falls back to the definition's own default_theme. A name given here
@@ -282,6 +292,12 @@ int main(int /*argc*/, char** /*argv*/) {
     std::vector<std::string> schedulePhrasedArgs;
     std::vector<std::string> scheduleWorkerArgs;
     bool micLatch = false;
+    int cancelRaceReps = 0;
+    // M2b.5. Seconds of Idle between one --say and the next. Two is enough to
+    // read as a conversation; a longer one is how a harness arranges for a
+    // schedule to come due *between* two turns, which is otherwise only
+    // reachable by guessing at how long a reply will take.
+    double sayWait = 2.0;
     // The message field's own escape hatch, and the reason this bug survived
     // three rounds of testing. Everything the panel draws could be put on
     // screen from the command line except the one thing the user actually
@@ -304,7 +320,7 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (a == L"--vulkan") vulkan = true;
             else if (a == L"--no-voice") voiceEnabled = false;
             else if (a == L"--seconds" && i + 1 < wargc) seconds = _wtof(wargv[++i]);
-            else if (a == L"--say" && i + 1 < wargc) sayText = utf8FromWide(wargv[++i]);
+            else if (a == L"--say" && i + 1 < wargc) sayTexts.push_back(utf8FromWide(wargv[++i]));
             else if (a == L"--avatar" && i + 1 < wargc) {
                 avatarName = utf8FromWide(wargv[++i]);
                 avatarFromArgs = true;
@@ -359,6 +375,20 @@ int main(int /*argc*/, char** /*argv*/) {
             // and "a schedule fires with the microphone open" is one of the
             // two interleavings this task had to get right.
             else if (a == L"--mic-latch") micLatch = true;
+            // M2b.5. `--cancel-race <reps>`: drive the cancel verb's own path
+            // against the tick, from another thread, with the cancel jittered
+            // across the frame the schedule is due on. This project has twice
+            // declared a race fixed on one sample and been wrong twice, so the
+            // thing that has to be repeatable is exactly the thing a live turn
+            // cannot repeat: a turn takes seconds and lands where it lands.
+            // The thread stands in for the turn thread, calls the same
+            // request_cancel() run_commands() calls, and the log is the
+            // evidence — each id must appear as fired or as cancelled, and
+            // never as both or as neither.
+            else if (a == L"--cancel-race" && i + 1 < wargc)
+                cancelRaceReps = _wtoi(wargv[++i]);
+            else if (a == L"--say-wait" && i + 1 < wargc)
+                sayWait = _wtof(wargv[++i]);
             else if (a == L"--message" && i + 1 < wargc)
                 messageArg = utf8FromWide(wargv[++i]);
         }
@@ -869,6 +899,53 @@ int main(int /*argc*/, char** /*argv*/) {
             log::info("[schedule] created id={} kind=worker in {}s grade=phrased name={} cwd=\"{}\"",
                       id, f[0], f[1], f[2]);
     }
+    // M2b.5. The cancel-versus-fire race, driven from a thread that is not the
+    // frame loop, which is the only property of the turn thread that matters
+    // here. Each rep creates a timer a few frames out and asks for it to be
+    // cancelled at a moment jittered across the frame it is due on, so the
+    // sample lands on both sides of the tick and on the tick itself.
+    //
+    // It asserts nothing in-process on purpose: the evidence is the log, which
+    // is what a reader can check afterwards and what the two previously
+    // mis-declared races were missing. Every id must show up exactly once as
+    // `fired` or exactly once as `cancelled`, never both and never neither.
+    std::thread raceThread;
+    std::atomic<bool> raceStop{false};
+    if (cancelRaceReps > 0 && session) {
+        raceThread = std::thread([&raceStop, reps = cancelRaceReps, s = session.get()] {
+            std::mt19937 rng(20260917u);
+            // Due ~4 frames out; the cancel lands anywhere from well before to
+            // well after, so roughly a third of the reps are genuinely in the
+            // window where the outcome is decided by which side of one tick
+            // the two calls fall.
+            std::uniform_int_distribution<int> jitter(15, 115);
+            for (int i = 0; i < reps && !raceStop; ++i) {
+                aii::ScheduleAction action;
+                action.kind = "timer";
+                action.label = "race " + std::to_string(i);
+                // Run this with mute on (AII_SETTINGS_FILE with panel.muted):
+                // a fired timer still reaches the transcript and the log, which
+                // is where the evidence is, and nothing is synthesised, which
+                // is what makes hundreds of reps take a minute instead of an
+                // afternoon. That is mute's existing behaviour, not a special
+                // case for the harness.
+                action.report = action.label;
+                action.cwd = std::filesystem::current_path().string();
+                std::string err;
+                const std::uint64_t id = aii::ScheduleBook::instance().create(
+                    std::chrono::duration<double>(0.066), action, aii::ReportGrade::Fixed, &err);
+                if (id == 0) {
+                    log::warn("[race] refused: {}", err);
+                    break;
+                }
+                log::info("[race] rep={} id={}", i, id);
+                std::this_thread::sleep_for(std::chrono::milliseconds(jitter(rng)));
+                s->request_cancel({id});
+                std::this_thread::sleep_for(std::chrono::milliseconds(90));
+            }
+            log::info("[race] done");
+        });
+    }
     double lastT = 0.0;
     std::uint32_t windowH = kWindowH;  // what the OS window was last set to
     // Resizing the window from inside the frame does not come back as a
@@ -885,7 +962,12 @@ int main(int /*argc*/, char** /*argv*/) {
     // drawn with. Adding a band to it is what the window has to become.
     std::uint32_t panelH = 0;
     bool running = true;
-    bool saidOnce = sayText.empty();
+    std::size_t nextSay = 0;
+    // A settle before the next turn goes in: Idle is reached the moment the
+    // audio drains, and a schedule that fired during the reply has not
+    // necessarily been flushed yet. The gap is what makes the transcript read
+    // as a conversation rather than as a burst.
+    std::chrono::steady_clock::time_point lastSayDone{};
     // SPACE is the keyboard half of the Talk gesture, and carries both of its
     // meanings (M1b.3): tap it for the latch, hold it to dictate. SDL repeats
     // KeyDown while a key is held, so only the first one is the press — the
@@ -1129,9 +1211,15 @@ int main(int /*argc*/, char** /*argv*/) {
         if (session) {
             session->update();
             snap = session->snapshot();
-            if (!saidOnce && snap.state == aii::VoiceSession::State::Idle) {
-                saidOnce = true;
-                session->say(sayText);
+            if (nextSay < sayTexts.size() && snap.state == aii::VoiceSession::State::Idle) {
+                const auto nowSay = std::chrono::steady_clock::now();
+                if (lastSayDone.time_since_epoch().count() == 0) lastSayDone = nowSay;
+                if (std::chrono::duration<double>(nowSay - lastSayDone).count() >= sayWait) {
+                    session->say(sayTexts[nextSay++]);
+                    lastSayDone = {};
+                }
+            } else if (session && snap.state != aii::VoiceSession::State::Idle) {
+                lastSayDone = {};
             }
             // M2b.4's harness: the same call a short Talk click makes, once,
             // as soon as there is a session to make it on.
@@ -1192,6 +1280,14 @@ int main(int /*argc*/, char** /*argv*/) {
             }
             for (const std::string& note : aii::ScheduleBook::instance().take_status())
                 log::warn("[schedule] {}", note);
+            // M2b.5: cancels the AI asked for, applied here and nowhere else.
+            // The position is the argument, not a convenience — immediately
+            // after the tick and after every schedule that came due has been
+            // delivered, so a cancel can never land in the gap between a
+            // schedule leaving the book and the work it started being on
+            // record. "Cancelled" and "fired" were exclusive inside the book
+            // already; this is what keeps them exclusive outside it.
+            if (session) session->apply_cancels();
         }
         // M2.6. Empties the engine queue the Python host is wired to — nothing
         // here consumes it, so a script that called into the `rend` module
@@ -1527,6 +1623,12 @@ int main(int /*argc*/, char** /*argv*/) {
     // outcome this feature has. It is destroyed here rather than left to the
     // unique_ptr's own scope so that it happens before the device it draws on
     // is touched by anything else in this teardown.
+    // M2b.5's harness thread, before anything it touches goes: it holds a raw
+    // pointer to the session and calls into the schedule book.
+    if (raceThread.joinable()) {
+        raceStop = true;
+        raceThread.join();
+    }
     sidebar.reset();
     // Python next, and before anything the scripts can still reach. The
     // engine's host stops the interpreter and joins its thread; the app's own
