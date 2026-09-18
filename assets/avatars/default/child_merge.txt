@@ -1,109 +1,123 @@
-# child_merge: the worker has reported, and the child comes home.
-# child_depart.txt run backwards in substance if not in frames -- in by the
-# same upper-left corner it left by, the same three sizes as it closes, the
-# same bud at the shoulder, and then it is absorbed and the body takes the
-# weight before settling.
-# 14 fps, loop=false, 0.93 s.
+# child_merge: the worker has reported, and the child comes home. It walks
+# back in from the left on the same two feet it left on, the same three sizes
+# in the reverse order, up to the parent's flank; the waist that pinched apart
+# re-forms as a neck, the two run together, and the body takes the weight in
+# one wide squat before it settles. 14 fps, loop=false, 0.93 s.
 #
-# That symmetry is the whole job of this clip. A departure and a return that
-# do not share a road and a silhouette are two animations; sharing them is
-# what makes the second one read as the first one *finishing*.
+# **It is child_depart.txt read backwards, frame for frame, and it has to be.**
+# A departure and a return that do not share a road and a silhouette are two
+# animations; sharing them is what makes the second one read as the first one
+# *finishing*. That is why this file was re-drawn when the departure was: the
+# child used to bud off a shoulder and drift away, and this used to be that in
+# reverse. Now it splits and walks, so a child that came home by drifting back
+# into a shoulder would no longer be the same creature -- same size, same
+# one-cell eyes against the parent's two-by-two blocks, same gait, or it is
+# something else arriving.
 #
-# It is followed by `happy` (or by `confused`, if what came back was a worker
-# that fell over), which the controller starts the moment this ends, so the
-# clip does not have to carry the reaction as well as the arrival -- and both
-# of them run under the spoken summary rather than in front of it.
+# The order of the walk is reversed as well as the direction, which is what
+# keeps the two clips from looking like one film run twice: the departure goes
+# whole child, half child, stub, and this goes stub, half child, whole child.
+#
+# Length is load-bearing here in a way the departure's is not. The spoken
+# summary of what the worker found lands with this clip, and the reaction the
+# controller books behind it -- `happy`, or `confused` if what came back was a
+# worker that fell over -- starts the frame it ends, both of them under the
+# speech. So this stays at fourteen ticks whatever the departure grows to; a
+# merge that ran long would hold the reaction off past the sentence it belongs
+# to.
 #
 # Ends on idle.txt's first frame.
 
-# a speck at the corner, and the parent has noticed
+# something at the left edge, and the parent has noticed it
 @frame hold=2
-o#..............
-##..............
-....########....
-..###oo#######..
-..##o#########..
-..############..
-..############..
-.##oo####oo####.
-.##oo####oo####.
-###oo####oo#####
-################
-#####o##o#######
-######oo########
-################
-################
-################
+................
+................
+.....##########.
+....############
+...#############
+...#############
+...###oo###oo###
+...###oo###oo###
+...#############
+...#############
+...####o###o####
+...#####oo######
+##.#############
+##.#############
+##.#############
+#..#############
 
-# close, one cell of daylight left
+# mid-stride, half on the grid, one eye showing; the parent draws back to
+# make the room
 @frame hold=2
-o##.............
-###.............
-###.########....
-..###oo#######..
-..##o#########..
-..############..
-..############..
-.##oo####oo####.
-.##oo####oo####.
-###oo####oo#####
-################
-#####o##o#######
-######oo########
-################
-################
-################
+................
+................
+.......######...
+......#########.
+.....###########
+.....###########
+.....##oo###oo##
+.....##oo###oo##
+.....###########
+.....###########
+.....###o###o###
+###..####oo#####
+####.###########
+##o#.###########
+###..###########
+#.#..###########
 
-# touching: the same bud child_depart.txt pinched off, in reverse
+# all of it on, and it is the size it left at -- one-cell eyes, two feet
 @frame hold=2
 ................
-.###............
-.###########....
-..###oo#######..
-..##o#########..
-..############..
-..############..
-.##oo####oo####.
-.##oo####oo####.
-###oo####oo#####
-################
-#####o##o#######
-######oo########
-################
-################
-################
+................
+................
+.......########.
+.......#########
+.......#########
+.......#########
+.......#oo##oo##
+.......#oo##oo##
+.......#########
+.......#########
+.####..##o###o##
+######.###oo####
+#o##o#.#########
+.####..#########
+##..##.#########
 
-# absorbed. the shoulder is still carrying it and the eyes come front
+# touching: the waist that pinched apart, re-formed as a neck two cells deep
 @frame hold=2
 ................
 ................
-....########....
-..###oo#######..
-.###o#########..
-.#############..
-.#############..
-.###oo####oo###.
-.###oo####oo###.
-####oo####oo####
+.........####...
+........########
+........########
+........########
+........#oo##oo#
+........#oo##oo#
+........########
+........########
+.#####..##o##o##
+.######.###oo###
 ################
-######o##o######
-#######oo#######
-################
-################
-################
+.#o##o##########
+.######.########
+.######.########
 
-# the weight settles through the body
+# one body again, and the weight of it goes through the floor -- the squat
+# the departure opened on, arrived at from the other side
 @frame hold=2
 ................
 ................
-....########....
-..###oo#######..
-..##o#########..
+................
+...##########...
 ..############..
-..############..
-.###oo####oo###.
-.###oo####oo###.
-####oo####oo####
+.##############.
+.##oo######oo##.
+.##oo######oo##.
+################
+################
 ################
 ######o##o######
 #######oo#######

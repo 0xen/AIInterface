@@ -1,6 +1,9 @@
-# child_depart: a worker has been sent off. A bud swells on the left shoulder,
-# pinches off into a child slime, and drifts up and out past the top-left
-# corner; the parent watches it go. 14 fps, loop=false, 1.0 s.
+# child_depart: a worker has been sent off. The slime *splits in two* -- the
+# body goes wide, a second head rises out of the left flank, the waist pinches
+# to a neck and lets go, and for a beat there are plainly two of them standing
+# side by side. The second one is a third the parent's size, and it leaves on
+# its own feet: three strides to the left and out past the edge. The parent is
+# left whole. 14 fps, loop=false, 1.36 s.
 #
 # The *child* leaves here, not the avatar. M2.3c's `depart` is the whole slime
 # walking out of the band, and it ends on an empty frame; this one ends on
@@ -8,128 +11,219 @@
 # separate triggers for exactly that reason -- `child_depart` and `child_merge`
 # are the worker pair, `depart` is the avatar's own exit.
 #
-# Everything is in the base layer and nothing is in @overlay, which is the
-# opposite of what the sprite accessories do and is deliberate. The overlay
-# exists so an accessory never destroys the body art underneath it; the child
-# never passes over the body -- it lives in the empty corridor above the left
-# shoulder, x0-x3 of rows 0-2, which the resting drawings leave clear -- so
-# there is nothing to protect, and one drawing per frame is easier to read in
-# a diff than two.
+# **Why a split and not a bud.** The first drawing of this clip budded a blob
+# off the shoulder and let it drift out of the top-left corner. A bud reads as
+# the body shedding something; what has happened is that a *worker* has gone,
+# which is a second creature, and a second creature has to be seen standing on
+# its own before it can be believed to have walked away. So the whole
+# silhouette divides, and the beat at frame four -- two bodies, two faces, a
+# column of daylight between them -- is the frame the clip exists to reach.
 #
-# It leaves by the upper *left* on purpose. The right of the grid is where
-# every accessory hangs (the thought bubble, the zZz, the mute cross), so a
-# child going that way would walk into whichever one comes back up when the
-# clip ends; and wake_slide already made the left the road the slime arrives
-# by. Things come and go from the left here.
+# **How "smaller" is drawn.** The child is 6x5 against the parent's 16x16, and
+# it wears one-cell eyes where the parent wears two-by-two blocks. At 16 px a
+# cell that difference in the eye is what carries the size, more than the
+# outline does: the same silhouette with the parent's face on it would read as
+# the avatar standing further away.
+#
+# **How "walks" is drawn.** Two poses, alternating: a stride (taller, feet
+# apart at the corners) and a passing position (squashed a cell, feet together
+# under the middle). That is a gait, and it is the one thing a drift cannot
+# fake -- the bottom row changes shape between frames, so the body is pushing
+# off something instead of being carried.
+#
+# There is no face on the frame where the body is dividing, nor on the one
+# where the child is down to two columns at the edge. A shape in the middle of
+# becoming something has no eyes in it, and eyes at the very edge read as a
+# drawing being dragged; wake_slide withholds them on its fast frames for the
+# same reason.
+#
+# It leaves by the *left* on purpose, and along the floor. The right of the
+# grid is where every accessory hangs (the thought bubble, the zZz, the mute
+# cross), so a child going that way would walk into whichever one comes back
+# up when the clip ends; and wake_slide already made the left the road the
+# slime arrives by. Things come and go from the left here. The floor is what
+# is new: the bud drifted out of the upper-left corner because it had no feet,
+# and a thing with feet has to leave along the ground it is standing on.
+#
+# The parent narrows and leans right while the child is being made, and
+# spreads back to full width behind it as it goes. That is what buys the room:
+# sixteen columns will not hold a full-width parent and a child at once, so
+# the parent gives up the left half for four frames and takes it back. It also
+# happens to be what a body that has just let go of a third of itself does.
 #
 # The child leaves the 16x16 grid, not the band: a cell outside the grid is
-# simply not drawn, which is what makes leaving free. With no accessory up
-# the body is centred in a 22-cell stage, so the child winks out about three
-# cells short of the band's own edge -- at 16 px a cell that is a shrinking
-# blob at the corner, which is the read that matters.
+# simply not drawn, which is what makes leaving free. With no accessory up the
+# body is centred in a 22-cell stage, so the child winks out about three cells
+# short of the band's own edge -- at 16 px a cell that is a small slime
+# stepping off the corner, which is the read that matters. Reaching the band's
+# true edge would need a placement, and a placement enlarges the envelope and
+# costs scale off the body in every frame of every clip, showing or not.
 #
 # The last frame is idle.txt's first frame, cell for cell. Same contract the
 # two entrances keep: a one-shot holds its last drawing until the policy asks
-# for another clip, so ending anywhere else would leave the slime resting in
-# a pose the breathe does not start from.
+# for another clip, so ending anywhere else would leave the slime resting in a
+# pose the breathe does not start from.
 
-# anticipation: crouched, eyes gone left, the shoulder swelling
-@frame hold=3
-................
-................
-....########....
-..###oo#######..
-.###o#########..
-.#############..
-.#############..
-.##oo####oo####.
-.##oo####oo####.
-###oo####oo#####
-################
-#####o##o#######
-######oo########
-################
-################
-################
-
-# the bud, pinched off and still attached at the neck
+# anticipation: the body squats wide and the eyes drift apart, each going
+# with the half it is about to belong to
 @frame hold=2
 ................
-.###............
-.###########....
-..###oo#######..
-..##o#########..
-..############..
-..############..
-.##oo####oo####.
-.##oo####oo####.
-###oo####oo#####
-################
-#####o##o#######
-######oo########
-################
-################
-################
-
-# free of it, one cell of daylight between them
-@frame hold=2
-o##.............
-###.............
-###.########....
-..###oo#######..
-..##o#########..
-..############..
-..############..
-.##oo####oo####.
-.##oo####oo####.
-###oo####oo#####
-################
-#####o##o#######
-######oo########
-################
-################
-################
-
-# half off the corner
-@frame hold=2
-o#..............
-##..............
-....########....
-..###oo#######..
-..##o#########..
-..############..
-..############..
-.##oo####oo####.
-.##oo####oo####.
-###oo####oo#####
-################
-#####o##o#######
-######oo########
-################
-################
-################
-
-# gone. the parent rises and is still looking after it
-@frame hold=2
 ................
-.....######.....
-...##oo######...
-..##o#########..
+................
+...##########...
 ..############..
-..############..
-..#oo####oo###..
-.##oo####oo####.
-.##oo####oo####.
 .##############.
-#####o##o#######
-######oo########
+.##oo######oo##.
+.##oo######oo##.
+################
+################
+################
+######o##o######
+#######oo#######
+################
+################
+################
+
+# two heads on one body: the parent has gathered to the right and taken its
+# face with it, and a smaller dome is rising out of the left flank with
+# nothing on it yet but the gloss
+@frame hold=2
+................
+................
+.........####...
+........########
+........########
+........########
+........#oo##oo#
+........#oo##oo#
+.#####..########
+.#o####.########
+##########o##o##
+###########oo###
 ################
 ################
 ################
 .##############.
+
+# the pinch: joined by a neck two cells deep, and the small one has its eyes
+@frame hold=2
+................
+................
+.........####...
+........########
+........########
+........########
+........#oo##oo#
+........#oo##oo#
+........########
+........########
+.#####..##o##o##
+.######.###oo###
+################
+.#o##o##########
+.######.########
+.######.########
+
+# there are two of them. a column of daylight, two faces, and the small one
+# is standing on two feet -- the frame this clip exists to reach
+@frame hold=4
+................
+................
+.........####...
+........########
+........########
+........########
+........#oo##oo#
+........#oo##oo#
+........########
+........########
+........##o##o##
+..####..###oo###
+.######.########
+.#o##o#.########
+..####..########
+.##..##.########
+
+# the first stride: the child drops into a passing position, feet together
+# under it, and the parent settles back down into the room it was given
+@frame hold=2
+................
+................
+................
+.......########.
+.......#########
+.......#########
+.......#########
+.......#oo##oo##
+.......#oo##oo##
+.......#########
+.......#########
+.......##o###o##
+.####..###oo####
+#o##o#.#########
+######.#########
+.####..#########
+
+# mid-walk, half off the grid, one eye still showing; the parent spreads back
+# to the left behind it
+@frame hold=2
+................
+................
+.......######...
+......#########.
+.....###########
+.....###########
+.....##oo###oo##
+.....##oo###oo##
+.....###########
+.....###########
+.....###o###o###
+###..####oo#####
+####.###########
+##o#.###########
+###..###########
+#.#..###########
+
+# the last of it at the edge, no face on it now
+@frame hold=1
+................
+................
+.....##########.
+....############
+...#############
+...#############
+...###oo###oo###
+...###oo###oo###
+...#############
+...#############
+...####o###o####
+...#####oo######
+##.#############
+##.#############
+##.#############
+#..#############
+
+# gone. the parent is whole again and still looking after it
+@frame hold=2
+................
+................
+....########....
+..###oo#######..
+..##o#########..
+..############..
+..############..
+.##oo####oo####.
+.##oo####oo####.
+###oo####oo#####
+################
+#####o##o#######
+######oo########
+################
+################
+################
 
 # idle.txt's first frame
-@frame hold=3
+@frame hold=2
 ................
 .....######.....
 ...##oo######...

@@ -1,0 +1,147 @@
+# child_depart_quick: the other way a worker gets sent off (the second variant
+# behind the `child_depart` trigger -- not M2.3c's `depart`, which is the
+# avatar's own exit). Same event as child_depart.txt and the same three things
+# have to be true of it: the body divides, the second one is smaller, and it
+# leaves on its feet. What differs is where the division happens and how long
+# it takes. 16 fps, loop=false, 0.81 s against child_depart's 1.36.
+#
+# This one splits from the *bottom*. The parent squashes flat, shuts its eyes
+# and squeezes, a lump extrudes out of the base on the left while the body
+# snaps up tall and thin above it, and the lump lets go already on the floor
+# and already walking. child_depart.txt divides from the top down and watches
+# it happen; this is a body getting something out of itself and going straight
+# back to what it was doing.
+#
+# **This replaced a fling.** The variant here used to throw the child off the
+# top edge in two frames, which was a fine second reading of a bud drifting
+# away and is the wrong second reading of a split: a thrown child does not
+# walk, and a variation that contradicts the thing it is a variation of is not
+# a variation, it is a second animation that happens to share a trigger. The
+# two have to differ in *shape* -- that is the lesson wake_slide was drawn to
+# -- so they differ in which end the body divides at, and in how hard it is
+# working, and not in whether the child has feet.
+#
+# The trigger keeps two drawings for the reason it always had: spawn three
+# tasks in a session and one departure played three times reads as a loop, and
+# avatar_children_test asserts the count rather than the names.
+#
+# No face on the squeeze or on the stub at the edge, for the reason every
+# fast clip here withholds one.
+#
+# Ends on idle.txt's first frame, as every one of the child's clips does --
+# the parent is still standing in the band when this is over.
+
+# the squash: flat, wide, eyes screwed shut, working at something
+@frame hold=2
+................
+................
+................
+................
+...##########...
+.##############.
+################
+################
+.##oo######oo##.
+################
+################
+################
+################
+################
+################
+################
+
+# the body snaps up tall and a lump is pushed out of the base on the left
+@frame hold=2
+................
+.......######...
+......########..
+......########..
+......########..
+......########..
+......#oo##oo#..
+......#oo##oo#..
+......########..
+......########..
+......##o##o##..
+......###oo###..
+..############..
+.#############..
+.#############..
+..############..
+
+# let go of, and standing. two of them, a column of daylight between
+@frame hold=3
+................
+................
+........######..
+.......########.
+.......########.
+.......########.
+.......#oo##oo#.
+.......#oo##oo#.
+.......########.
+.......########.
+.......##o##o##.
+.####..###oo###.
+######.########.
+#o##o#.########.
+.####..########.
+##..##.########.
+
+# already going: half off the grid, one eye left, and the parent is spreading
+# back into the room
+@frame hold=2
+................
+................
+........######..
+.......########.
+......##########
+......##########
+......##oo##oo##
+......##oo##oo##
+......##########
+......##########
+......###o##o###
+####..####oo####
+####..##########
+###o#.##########
+#####.##########
+##..#.##########
+
+# the last of it at the edge, no face on it now
+@frame hold=2
+................
+......######....
+.....#########..
+....############
+....############
+....############
+....##oo###oo###
+....##oo###oo###
+....############
+....############
+....###o###o####
+....#####oo#####
+....############
+##..############
+###.############
+#.#.############
+
+# idle.txt's first frame
+@frame hold=2
+................
+.....######.....
+...##oo######...
+..##o#########..
+..############..
+..############..
+..##oo####oo##..
+.###oo####oo###.
+.###oo####oo###.
+.##############.
+######o##o######
+#######oo#######
+################
+################
+################
+.##############.
