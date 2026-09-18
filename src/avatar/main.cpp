@@ -17,6 +17,9 @@
 //     --vulkan    use the Vulkan backend (no transparency, and no UI: the
 //                 ImGui layer is D3D12 only)
 //     --say       send this text as the first user turn once the engines are up
+//     --say-on-report  send this text as a user turn the first frame a finished
+//                 worker report is waiting to be spoken (M2c.2): the harness
+//                 for a report riding out on the tail of an answer
 //     --no-voice  window only, no engines (layout work)
 //     --avatar    which definition under %APPDATA%\AIInterface\avatars to load
 //     --theme     one of the definition's named palettes, or "custom"
@@ -278,6 +281,9 @@ int main(int /*argc*/, char** /*argv*/) {
     // consecutive in one conversation and schedules created by the first one
     // are live, and firing, while the second is composed.
     std::vector<std::string> sayTexts;
+    // M2c.2. `--say-on-report TEXT`: send TEXT as a user turn the first frame a
+    // finished worker report is waiting to be spoken. See the frame loop.
+    std::string sayOnReport;
     std::string avatarName = "default";
     // M1c.4. Empty means "whatever the settings file says", which in turn
     // falls back to the definition's own default_theme. A name given here
@@ -378,6 +384,8 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (a == L"--no-voice") voiceEnabled = false;
             else if (a == L"--seconds" && i + 1 < wargc) seconds = _wtof(wargv[++i]);
             else if (a == L"--say" && i + 1 < wargc) sayTexts.push_back(utf8FromWide(wargv[++i]));
+            else if (a == L"--say-on-report" && i + 1 < wargc)
+                sayOnReport = utf8FromWide(wargv[++i]);
             else if (a == L"--avatar" && i + 1 < wargc) {
                 avatarName = utf8FromWide(wargv[++i]);
                 avatarFromArgs = true;
@@ -1557,6 +1565,19 @@ int main(int /*argc*/, char** /*argv*/) {
         // ---- voice loop tick ----
         aii::VoiceSession::Snapshot snap;
         if (session) {
+            // M2c.2's harness, and it has to be **before** update(). The thing
+            // under test is what happens when a user turn starts while a
+            // worker's report is sitting finished and unspoken — the case a
+            // person reaches by still talking when the report lands. From
+            // outside the process that window is one frame wide: update() is
+            // where a waiting report takes the floor on its own, so a check
+            // made after it would only ever see a report that had already been
+            // delivered the old way.
+            if (!sayOnReport.empty() && session->reports_waiting()) {
+                log::info("[harness] a report is waiting; sending a user turn on top of it");
+                session->say(sayOnReport);
+                sayOnReport.clear();
+            }
             session->update();
             snap = session->snapshot();
             if (nextSay < sayTexts.size() && snap.state == aii::VoiceSession::State::Idle) {

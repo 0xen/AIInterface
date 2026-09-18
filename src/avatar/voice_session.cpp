@@ -1036,10 +1036,20 @@ void VoiceSession::start_turn(std::string text) {
     set_state_locked(State::Thinking);
     status_ = "thinking...";
   }
+  // M2c.2. Anything a live worker finished while the user was talking rides
+  // *with* this turn rather than waiting to become a turn of its own. Taken
+  // here, after the cancel-and-join above, so the batch cannot be claimed by a
+  // turn that is being torn down; a report that lands between this line and
+  // the send simply stays queued and is delivered the ordinary way.
+  std::vector<PendingTurn> rider = take_riding_reports();
+  if (!rider.empty()) {
+    log("[report] " + std::to_string(rider.size()) +
+        " report(s) riding on the user's turn");
+  }
   const unsigned gen = ++turn_generation_;
   turn_running_ = true;
-  turn_ = std::thread([this, text = std::move(text), gen] {
-    run_turn(text, false);
+  turn_ = std::thread([this, text = std::move(text), gen, rider = std::move(rider)]() mutable {
+    run_turn(text, false, std::string(), std::move(rider));
     (void)gen;
     turn_running_ = false;
   });
@@ -1072,7 +1082,8 @@ void VoiceSession::start_injected_turn(std::string sent, std::string fallback) {
   });
 }
 
-void VoiceSession::run_turn(std::string text, bool is_injected, std::string fallback) {
+void VoiceSession::run_turn(std::string text, bool is_injected, std::string fallback,
+                            std::vector<PendingTurn> rider) {
   speech_->mark_new_reply();
   // The one place a reply becomes sound, and therefore the only place mute can
   // honestly be applied. Clearing the queue alone (what silence() used to do)
@@ -1137,6 +1148,17 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
   // for it and did not ask.
   const std::string pending = is_injected ? std::string() : pending_context();
   if (!pending.empty()) log("[schedule] this turn carries the pending list");
+  // M2c.2. The aside. It goes in front of the user's own words for the same
+  // reason the pending block does — it is context for the answer, not part of
+  // the question — and it is the only thing in the composed prompt that asks
+  // for something to be said *after* the answer.
+  std::string rider_block;
+  if (!rider.empty()) {
+    std::vector<std::string> shown;
+    shown.reserve(rider.size());
+    for (const PendingTurn& t : rider) shown.push_back(t.report);
+    rider_block = rider_report_prompt(shown);
+  }
   const LanguageSelection eff = effective_langs();
   // Which language the app's *own* sentences speak in (core/app_strings.h).
   // Same two facts the rest of this function already works from: the resolved
@@ -1145,7 +1167,7 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
   // so it is not evidence of anything and is not counted.
   set_enabled_languages(eff);
   if (!is_injected) note_user_language(text);
-  const std::string sent = decorate_language(pending + injected, eff);
+  const std::string sent = decorate_language(pending + rider_block + injected, eff);
   if (!eff.both()) log("[lang] turn sent with the " + language_spec(eff) + "-only instruction");
   ChatResult r = eng_.llm->turn(sent, [&](const std::string& delta) {
     {
@@ -1159,7 +1181,15 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
     }
     splitter.feed(delta);
   }, &cancel_);
-  if (cancel_) return;  // the caller already moved the state on
+  if (cancel_) {
+    // M2c.2. A cancelled turn says nothing, so anything riding on it was not
+    // delivered and goes straight back into the queue. This runs *before* the
+    // thread exits and therefore before the join in start_turn() returns,
+    // which is what lets a report survive being cancelled by the very turn
+    // that is about to carry it: the next turn picks it up again.
+    requeue_riding_reports(std::move(rider));
+    return;  // the caller already moved the state on
+  }
   splitter.flush();
   const std::string usage = eng_.llm->status_line();
   bool injected_turn_failed = false;
@@ -1205,7 +1235,15 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
     announce(fallback.empty() ? app_text(Msg::ScheduledReportLost) : fallback);
     return;
   }
-  if (!r.ok) return;
+  if (!r.ok) {
+    // M2c.2. The user's turn failed, so the aside was never said either. Back
+    // in the queue rather than announced here: the user is at the keyboard and
+    // can see the error, and the next gap will try the report again through
+    // its own turn — which has the raw sentence as *its* fallback, so a model
+    // that stays down still ends in the plain line rather than in silence.
+    requeue_riding_reports(std::move(rider));
+    return;
+  }
   // Worker commands ride in a fenced block, which is shown but never spoken.
   run_commands(r.text);
 }
@@ -1330,6 +1368,79 @@ void VoiceSession::queue_worker_report(std::string shown, std::string spoken) {
   t.live_worker = true;
   std::lock_guard<std::mutex> l(mutex_);
   pending_turns_.push_back(std::move(t));
+}
+
+// ---------------------------------------------------------------- M2c.2
+//
+// ## Riding the tail of the answer, and why it is opportunistic
+//
+// A report that lands while the user is talking used to wait for a gap and
+// then be delivered as a turn of its own — correct, never interrupting, and
+// still two utterances back to back: the answer to the question, then a
+// separate little speech about a worker. What the user asked for is one reply
+// that answers them and then says "by the way, I heard back".
+//
+// The mechanism is deliberately *pull*, not push. Nothing is ever held back
+// waiting for a user turn to ride on. A finished report sits in
+// `pending_turns_` exactly as it did before, and the frame loop's flush points
+// will deliver it on its own at the next gap exactly as they did before; the
+// only new thing is that start_turn() looks in the queue on its way past and
+// takes what is ready. If no question ever comes, nothing changes. That is the
+// whole answer to "a report lost waiting for a turn that never came" — the
+// waiting state does not exist.
+//
+// The two edges that could still drop one are both cancellation-shaped, and
+// both go back to the queue rather than to the floor:
+//
+//   * A report landing **between** the take and the send stays queued. It was
+//     never taken, so it is simply the next flush's business.
+//   * A turn that carried a rider and then was cancelled or failed puts it
+//     back, from the turn thread, before that thread exits — which is before
+//     start_turn()'s join returns, so the turn that cancelled it can pick the
+//     same report up itself.
+//
+// Live worker reports only, and not scheduled ones. A scheduled report is
+// already a *composed* turn by the time it reaches the queue, written for a
+// user who is not at the desk ("picking the conversation back up after a
+// gap"), and that framing is wrong for an aside — it would need a third
+// prompt, not a plumbing change. It also merges reports the existing design
+// deliberately keeps apart: two schedules are two promises made at two
+// moments. Live workers are the case the user described and the case where
+// merging is already the rule.
+
+bool VoiceSession::reports_waiting() const {
+  std::lock_guard<std::mutex> l(mutex_);
+  for (const PendingTurn& t : pending_turns_) {
+    if (t.live_worker) return true;
+  }
+  return false;
+}
+
+std::vector<VoiceSession::PendingTurn> VoiceSession::take_riding_reports() {
+  std::vector<PendingTurn> rider;
+  std::lock_guard<std::mutex> l(mutex_);
+  // The same leading run flush_injected_turns() would have taken, and for the
+  // same reason: a scheduled report sitting in front of a live one keeps its
+  // place, because reordering it would be this mechanism deciding which
+  // promise the user hears about first.
+  while (!pending_turns_.empty() && pending_turns_.front().live_worker) {
+    rider.push_back(std::move(pending_turns_.front()));
+    pending_turns_.erase(pending_turns_.begin());
+  }
+  return rider;
+}
+
+void VoiceSession::requeue_riding_reports(std::vector<PendingTurn> rider) {
+  if (rider.empty()) return;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    // At the head, which is where they came from. Anything that arrived while
+    // the turn was running is newer and belongs behind them.
+    pending_turns_.insert(pending_turns_.begin(), std::make_move_iterator(rider.begin()),
+                          std::make_move_iterator(rider.end()));
+  }
+  log("[report] the turn carrying " + std::to_string(rider.size()) +
+      " report(s) said nothing; they are back in the queue");
 }
 
 bool VoiceSession::flush_injected_turns() {
@@ -1739,6 +1850,47 @@ std::string VoiceSession::live_report_prompt(const std::vector<std::string>& sho
       "message, the app or the worker.";
   return "<context name=\"Task finished\" kind=\"report\">\n" + body + "\n</context>\n\n" +
          "That's back — what happened?";
+}
+
+std::string VoiceSession::rider_report_prompt(const std::vector<std::string>& shown) {
+  // M2c.2. The same facts as live_report_prompt() and the same division of
+  // labour, with one thing added and one thing taken away.
+  //
+  // Added: *where in the reply this goes*. The user has just asked something
+  // and is waiting for the answer; the report is news they did not ask for at
+  // this moment. So the answer comes first, whole, and the news arrives on the
+  // tail of it the way a person drops something in as they finish speaking.
+  //
+  // Taken away: any suggestion that this is the reply. An aside that grows
+  // into a second report buries the answer the user actually wanted, which is
+  // the cost of doing it this way at all, so the length is stated as a limit
+  // relative to the answer rather than as a sentence count in the abstract.
+  const bool many = shown.size() > 1;
+  std::string body =
+      many ? "Several of the background tasks you started have just finished, while the user "
+             "was talking to you.\n\n"
+           : "The background task you started has just finished, while the user was talking "
+             "to you.\n\n";
+  body +=
+      "They have not heard about it yet and they did not ask about it just now. This block is "
+      "the app telling you; it is not something they said.\n\n";
+  body += "What came back";
+  body += many ? ", one line each:\n" : ":\n";
+  for (const std::string& s : shown) body += (many ? "- " : "") + s + "\n";
+  body += "\n";
+  body +=
+      "Answer what they actually said first, properly and in full. Then, at the end of that "
+      "same reply, mention this - the way a person adds something on the way out: \"by the "
+      "way, I heard back about...\". Not a heading, not a new subject, and in the language you "
+      "have been speaking.\n";
+  body += many ? "One or two short sentences covering all of them together, and never longer "
+                 "than the answer itself.\n"
+               : "One short sentence, and never longer than the answer itself.\n";
+  body +=
+      "That text was written to be read, not heard: say what it amounts to. Do not read it "
+      "back, do not spell out paths, names, identifiers or counts, and do not mention this "
+      "message, the app or the worker.";
+  return "<context name=\"Task finished\" kind=\"report\">\n" + body + "\n</context>\n\n";
 }
 
 void VoiceSession::deliver_schedule(const Schedule& s) {
