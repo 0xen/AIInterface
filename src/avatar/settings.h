@@ -15,6 +15,7 @@
 //     "panel": { "chat_open": false, "avatar_mode": "always" },
 //     "language": { "enabled": "en,ja" },
 //     "timing": { "listen_timeout": 60.0 },
+//     "tools": { "web": true, "file_read": true, "file_write": false },
 //     "inspector": { "placed": true, "x": 1180, "y": 420, "w": 1100, "h": 700 }
 //   }
 //
@@ -32,6 +33,15 @@
 // `VoiceSession::set_listen_timeout`), so there is one way to say "never" in
 // the whole feature rather than a number and a flag that can contradict
 // each other.
+//
+// `tools` (M3.8) is one boolean per *group* of Claude Code tools, keyed by the
+// table in `core/tool_policy.h` — not one per tool, of which there are
+// twenty-eight. A missing key is that group's own default, so a file written
+// before this section existed reads as the shipped policy. Unlike everything
+// else in this file these are only read at startup: they become
+// `--allowedTools` on the `claude` child's command line, which is fixed when
+// that process starts, so a change here reaches Claude at the next launch and
+// the settings surface says so rather than appearing to do nothing.
 //
 // `language.enabled` (M8.3) is one string — "en", "ja" or "en,ja" — and not
 // two booleans, because at least one language must always be on and a pair of

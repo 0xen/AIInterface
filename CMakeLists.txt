@@ -41,6 +41,7 @@ add_library(aii_core STATIC
   src/core/sentence_splitter.cpp
   src/core/speech_queue.cpp
   src/core/text_util.cpp
+  src/core/tool_policy.cpp
   src/core/user_paths.cpp
   src/core/worker_pool.cpp)
 target_include_directories(aii_core PUBLIC

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "avatar_def.h"
+#include "core/tool_policy.h"
 #include "voice_session.h"
 
 namespace aii {
@@ -125,6 +126,24 @@ struct AvatarOptions {
   // visible door is a feature nobody finds.
   std::string script_status;
   bool script_status_ok = true;
+
+  // M3.8. What the conversational instance was *actually launched with*, as
+  // opposed to what the tick boxes say. The two differ the moment a toggle is
+  // changed and stay different until the app is next started, because
+  // `--allowedTools` is fixed when the child process starts and there is no
+  // way to change it on a running one without throwing the conversation away
+  // (M3.6). The surface's whole job in that state is to say so: a setting
+  // that appears to do nothing is the worst failure a setting has, and this
+  // one cannot do anything yet, so it must at least be honest about when it
+  // will.
+  //
+  // Seeded once, before the first frame, from the same value `build_llm` was
+  // given. Nothing writes it afterwards.
+  ToolPolicy tools_in_force;
+  // False on the `api` backend, which is not the Claude Code CLI and has no
+  // tools of any kind. The toggles are then inert and say so rather than
+  // claiming to have removed something that was never there.
+  bool tools_supported = true;
 };
 
 struct AvatarUiState {
@@ -220,6 +239,17 @@ struct AvatarUiState {
   // piece of state that can disagree with the one in force.
   bool listen_timeout_on = false;
   int listen_timeout_sec = 0;
+  // M3.8. The Tools toggles, as the control holds them. Same contract as
+  // `muted` in one half — the panel is the owner of record and main.cpp
+  // mirrors it into settings.json — and the opposite in the other: there is
+  // no level to push down. `--allowedTools` is decided when the `claude` child
+  // process starts, so what is ticked here is what the *next* launch gets, and
+  // `AvatarOptions::tools_in_force` is what this one got. The section draws
+  // both whenever they disagree.
+  //
+  // Seeded from `Config::tools` before the first frame, so the defaults in
+  // ToolPolicy's constructor are never the second spelling of anything.
+  ToolPolicy tools;
   // M1f.3. The latched microphone shut itself on silence, and nothing has
   // happened since. What the microphone button draws while this is true is a
   // face of its own (MicFace::Dozed) rather than the bare Idle capsule, which
@@ -311,6 +341,10 @@ struct AvatarUiState {
   // project is the documented way a widget goes unlooked-at (see --message).
   // Harness only (`--settings timing`); nothing in the UI sets it.
   bool settings_scroll_timing = false;
+  // M3.8's, for the same reason: Tools sits below the fold of a surface that
+  // scrolls, so without this there is no state in which it can be
+  // screenshotted. Harness only (`--settings-tools`).
+  bool settings_scroll_tools = false;
 };
 
 // M1f.2. What the two fields above mean as one number, in the one spelling the

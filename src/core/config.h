@@ -7,6 +7,7 @@
 #include <string>
 
 #include "core/language.h"
+#include "core/tool_policy.h"
 
 namespace aii {
 
@@ -53,6 +54,21 @@ struct Config {
   // mechanism without sitting through a real minute; the floor a person is
   // allowed to type belongs in M1f.2's control, where a refusal can be shown.
   float listen_timeout = 60.0f;
+  // M3.8. Which tool groups the *conversational* instance gets. The default is
+  // the table's (core/tool_policy.h); main.cpp reads settings.json over it
+  // before the session is built, and `build_llm` turns it into `--tools`.
+  //
+  // It sits in Config for the same reason `listen_timeout` does — the session
+  // is constructed from Config — but unlike that one it cannot be pushed down
+  // as a level afterwards: `--allowedTools` is fixed when the child process
+  // starts, so a change here reaches Claude at the next launch and not before.
+  // The settings surface says so in as many words rather than appearing to do
+  // nothing, which is the failure M1f.2 spent a paragraph avoiding.
+  //
+  // **Workers never read this.** `WorkerPool::spawn` passes "default" and
+  // keeps every built-in tool whatever is ticked here.
+  ToolPolicy tools;
+
   bool worker_bypass = true;   // AII_WORKER_BYPASS: workers skip permission prompts
                                // (nothing in this app can answer one, so a worker
                                // that asks would hang). Set to 0 to make them ask
