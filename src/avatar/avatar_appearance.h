@@ -72,9 +72,20 @@ class AvatarAppearance {
 
   Frame update(bool wanted, bool loader_on_screen, float dt);
 
-  // Whether the band is still needed at all -- showing, or on the way out.
-  // The window's height follows this, and it has to stay true across the
-  // frame the pop-in starts on, when the alpha is still 0.
+  // Whether the avatar is on screen at all -- showing, or on the way out.
+  //
+  // **The window's height no longer follows this** (user, 18 Sep 2026). It
+  // used to, and that was the flicker: the band was reserved only while the
+  // avatar had alpha, so every appearance was also a window resize, and a
+  // geometry change a frame away from an alpha change on a per-pixel-alpha
+  // surface is a visible flash. The band is reserved by *mode* now -- see
+  // `nextBand` in main.cpp -- so the avatar fades into and out of an empty
+  // region that was already the right size. Nothing here changed: this object
+  // still owns only the alpha and the arrival edge, which is one fewer thing
+  // than it owned before.
+  //
+  // Kept as the honest answer to "is the avatar on screen", for a caller that
+  // needs to know without inspecting the alpha.
   bool present() const { return showing_ || fade_ > 0.0f; }
 
  private:
