@@ -51,7 +51,10 @@ line reports progress.
 Ask for work to be done ("start a worker called build in C:\myrepo that runs the tests") and the
 assistant spawns a separate Claude Code instance with file and command tools in that directory.
 Each worker appears as a line in the panel with its state and what it is doing; when one finishes,
-its one-sentence summary is spoken. Say "pause the build worker" to interrupt one; the Pause button
+its one-sentence summary goes to the panel and the transcript verbatim, and the assistant itself
+says out loud what it amounts to — in the language the conversation is being held in, rather than
+reading a sentence that was written to be read. A worker that failed or was stopped keeps its
+plain canned line. Say "pause the build worker" to interrupt one; the Pause button
 interrupts the reply in flight and every running worker.
 
 The assistant drives this by ending a reply with a fenced block that is displayed but never spoken

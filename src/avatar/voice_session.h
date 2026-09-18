@@ -288,8 +288,12 @@ class VoiceSession {
   // in the language this conversation is being held in. Same client, same
   // session id, so it is the same conversation rather than a fresh one.
   // Frame loop only, and only with the floor already taken.
-  void start_injected_turn(std::string sent);
-  void run_turn(std::string text, bool is_injected);
+  // M2c.1. `fallback` is what is spoken if the turn itself fails — the raw
+  // report, already written and already in the user's language, so a model
+  // call that does not come back still cannot lose the news. Empty means "no
+  // raw copy exists", and the canned Msg::ScheduledReportLost is used.
+  void start_injected_turn(std::string sent, std::string fallback);
+  void run_turn(std::string text, bool is_injected, std::string fallback = std::string());
   void run_commands(const std::string& reply_text);
   // Speak a line from the app itself (worker reports) and show it.
   void announce(const std::string& text);
@@ -306,7 +310,14 @@ class VoiceSession {
   bool flush_injected_turns();
   // M2b.4. Queue one report for the conversational instance. Any thread — a
   // worker thread is where a scheduled worker's report arrives.
-  void queue_injected_turn(std::string sent);
+  // M2c.1: `fallback` rides with it; see start_injected_turn().
+  void queue_injected_turn(std::string sent, std::string fallback = std::string());
+  // M2c.1. Queue a *live* worker's finished report for the conversational
+  // instance. Unlike queue_injected_turn() this holds the raw report rather
+  // than a composed turn, because several of them that arrive together are
+  // merged into one turn at flush time rather than becoming one model call
+  // each. Any thread — the worker pool's report thread is where these arrive.
+  void queue_worker_report(std::string shown, std::string spoken);
   // M2b.4. True if `name` was a worker a schedule started, and forgets it.
   // M2b.5: `phrased` comes back with it, because the list now holds every
   // schedule-started worker — visibility and cancellation want all of them —
@@ -325,6 +336,10 @@ class VoiceSession {
   std::string pending_context() const;
   // M2b.4. The text handed to Claude when a scheduled worker finishes.
   static std::string scheduled_report_prompt(WorkerPool::State state, const std::string& shown);
+  // M2c.1. The text handed to Claude when one or more *live* workers finish.
+  // Takes the whole batch, because two workers finishing in the same gap are
+  // one thing to say, not two turns talking over each other.
+  static std::string live_report_prompt(const std::vector<std::string>& shown);
   void set_state(State s);
   // The same, for callers that already hold mutex_ because they are publishing
   // a state change together with the text that goes with it. Both overloads
@@ -466,7 +481,20 @@ class VoiceSession {
   // each: the text handed to the conversational instance. Kept separate from
   // pending_announce_ because the two cost different things and take the floor
   // differently — an announcement is instant, a turn spends usage and seconds.
-  std::vector<std::string> pending_turns_;
+  //
+  // M2c.1 turned the string into a record. Two fields were added and each is
+  // there for one of the two failure modes this queue has: `fallback` is what
+  // is said if the turn does not come back, so a model call can never swallow
+  // a report; `report` (with `live_worker`) holds the raw sentence instead of
+  // a composed turn, so a batch of live reports that arrived together can be
+  // merged into a single turn when the floor finally comes free.
+  struct PendingTurn {
+    std::string sent;      // the composed turn; empty for a live worker report
+    std::string report;    // the raw `shown` line, for a live worker report
+    std::string fallback;  // spoken verbatim if the turn fails
+    bool live_worker = false;
+  };
+  std::vector<PendingTurn> pending_turns_;
   // M2b.4. Workers this session started *from a schedule*, by name. Their
   // completion is reported by an injected turn instead of the canned sentence
   // a live worker gets, which is what makes a Japanese conversation hear
