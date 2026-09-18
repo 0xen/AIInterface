@@ -127,6 +127,12 @@ class VoiceSession {
   void talk_pressed();
   void talk_released(bool over_button, bool held);
   bool mic_open() const { return mic_open_; }
+  // M2c.2. A finished report is waiting for a voice. Any thread. It exists for
+  // the harness (`--say-on-report`): the moment a report lands is the moment
+  // the riding path has to be entered to be observed at all, and from outside
+  // the process that moment is otherwise invisible until it has already been
+  // spoken. Nothing in the app's own behaviour reads it.
+  bool reports_waiting() const;
   // A Talk press is down and this session is recording for it (M1b.3). Frame
   // loop only, like mic_open(). It is what the microphone button draws its
   // "dictating" face from, and the panel has no other way to tell a hold from
@@ -242,6 +248,22 @@ class VoiceSession {
   static const char* state_name(State s);
 
  private:
+  // M2c.1/M2c.2. One report waiting for a voice. Defined here rather than
+  // beside `pending_turns_` because a batch of these now travels *into*
+  // run_turn() as well as sitting in the queue — see rider_reports().
+  //
+  // Two fields exist for the two failure modes this queue has: `fallback` is
+  // what is said if the turn does not come back, so a model call can never
+  // swallow a report; `report` (with `live_worker`) holds the raw sentence
+  // instead of a composed turn, so a batch that arrived together can be merged
+  // into a single turn when the floor finally comes free.
+  struct PendingTurn {
+    std::string sent;      // the composed turn; empty for a live worker report
+    std::string report;    // the raw `shown` line, for a live worker report
+    std::string fallback;  // spoken verbatim if the turn fails
+    bool live_worker = false;
+  };
+
   void load();
   // What the user asked for, and what can actually be delivered right now.
   //
@@ -293,7 +315,22 @@ class VoiceSession {
   // call that does not come back still cannot lose the news. Empty means "no
   // raw copy exists", and the canned Msg::ScheduledReportLost is used.
   void start_injected_turn(std::string sent, std::string fallback);
-  void run_turn(std::string text, bool is_injected, std::string fallback = std::string());
+  // M2c.2. `rider` is a batch of finished live-worker reports the user's own
+  // turn is carrying, so the answer and the aside are one reply instead of two
+  // utterances. Empty on every other path, including every injected turn.
+  void run_turn(std::string text, bool is_injected, std::string fallback = std::string(),
+                std::vector<PendingTurn> rider = std::vector<PendingTurn>());
+  // M2c.2. Take the live-worker reports that are ready *right now*, for the
+  // user turn that is about to start. Exactly the batch flush_injected_turns()
+  // would have taken — the leading run of live reports — so a scheduled report
+  // sitting in front of them keeps its place and nothing is reordered. Empty
+  // is the ordinary answer and costs the turn nothing.
+  std::vector<PendingTurn> take_riding_reports();
+  // M2c.2. Put a rider back at the head of the queue when the turn carrying it
+  // did not speak: cancelled, or failed. This is the whole of "nothing is
+  // lost" on the rider path — the report goes back to being an ordinary queued
+  // report and the next gap delivers it on its own, exactly as before.
+  void requeue_riding_reports(std::vector<PendingTurn> rider);
   void run_commands(const std::string& reply_text);
   // Speak a line from the app itself (worker reports) and show it.
   void announce(const std::string& text);
@@ -340,6 +377,10 @@ class VoiceSession {
   // Takes the whole batch, because two workers finishing in the same gap are
   // one thing to say, not two turns talking over each other.
   static std::string live_report_prompt(const std::vector<std::string>& shown);
+  // M2c.2. The same facts as live_report_prompt(), framed as an aside to be
+  // added to the end of an answer the user is waiting for rather than as a
+  // reply of its own.
+  static std::string rider_report_prompt(const std::vector<std::string>& shown);
   void set_state(State s);
   // The same, for callers that already hold mutex_ because they are publishing
   // a state change together with the text that goes with it. Both overloads
@@ -482,18 +523,8 @@ class VoiceSession {
   // pending_announce_ because the two cost different things and take the floor
   // differently — an announcement is instant, a turn spends usage and seconds.
   //
-  // M2c.1 turned the string into a record. Two fields were added and each is
-  // there for one of the two failure modes this queue has: `fallback` is what
-  // is said if the turn does not come back, so a model call can never swallow
-  // a report; `report` (with `live_worker`) holds the raw sentence instead of
-  // a composed turn, so a batch of live reports that arrived together can be
-  // merged into a single turn when the floor finally comes free.
-  struct PendingTurn {
-    std::string sent;      // the composed turn; empty for a live worker report
-    std::string report;    // the raw `shown` line, for a live worker report
-    std::string fallback;  // spoken verbatim if the turn fails
-    bool live_worker = false;
-  };
+  // The record itself is declared at the top of this section, because a batch
+  // of them now rides into run_turn() as well as waiting here.
   std::vector<PendingTurn> pending_turns_;
   // M2b.4. Workers this session started *from a schedule*, by name. Their
   // completion is reported by an injected turn instead of the canned sentence
