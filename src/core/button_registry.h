@@ -87,7 +87,8 @@ struct ButtonAction {
 // letting it pick from the built-in ones would only produce two cogs.
 // M5.1 adds `Prompts`, the inspector's page-of-text icon. A glyph is a name
 // here and a grid in src/avatar/pixel_icons.cpp; nothing in this header draws.
-enum class ButtonGlyph { Label, Cog, Folder, Prompts };
+// M9.1 adds `Workers`, the worker strip's figure.
+enum class ButtonGlyph { Label, Cog, Folder, Prompts, Workers };
 
 struct ToolbarButton {
   std::string id;

@@ -117,6 +117,8 @@
 #include "voice_session.h"
 #include "watermark.h"
 #include "win_text_input.h"
+#include "worker_strip_window.h"
+#include "worker_window.h"
 
 using namespace rend;
 
@@ -322,6 +324,18 @@ int main(int /*argc*/, char** /*argv*/) {
     // --inspector: open the prompt inspector on the first frame, as if the
     // sidebar button had been clicked. Nothing else about it differs.
     bool inspectorOpen = false;
+    // M9: `--workers` opens the worker strip on the first frame, and
+    // `--watch-worker <name>` opens that worker's chat window the moment a
+    // worker by that name appears in the pool. Same hatch as --inspector, for
+    // the same stated reason: the strip is otherwise reachable only by a click
+    // on a 48 px window whose position depends on the panel's height, and a
+    // worker's window only by a second click on a column that does not exist
+    // until a worker is running — three things to arrange where one screenshot
+    // was wanted. Neither flag fakes anything: --workers sets the same latch
+    // the button's callback sets, and --watch-worker sets the same latch the
+    // icon's click sets, once the real worker is really there.
+    bool workersOpen = false;
+    std::vector<std::string> watchWorkers;
     std::vector<std::pair<double, int>> listenTimeoutAt;
     int cancelRaceReps = 0;
     // M2b.5. Seconds of Idle between one --say and the next. Two is enough to
@@ -425,6 +439,11 @@ int main(int /*argc*/, char** /*argv*/) {
             // one was wanted. Same shape as --settings above: it poses the UI,
             // it does not fake anything inside it.
             else if (a == L"--inspector") inspectorOpen = true;
+            else if (a == L"--workers") workersOpen = true;
+            else if (a == L"--watch-worker" && i + 1 < wargc) {
+                workersOpen = true;  // the strip is where the window is opened from
+                watchWorkers.push_back(utf8FromWide(wargv[++i]));
+            }
             else if (a == L"--settings") settingsOpen = true;
             else if (a == L"--settings-timing") { settingsOpen = true; settingsScrollTiming = true; }
             else if (a == L"--listen-timeout-at" && i + 1 < wargc) {
@@ -1193,6 +1212,73 @@ int main(int /*argc*/, char** /*argv*/) {
             log::warn("no inspector button: {}", buttonError);
     }
 
+    // ---- M9: the workers button, the worker strip, and N worker windows ----
+    //
+    // Three layers, and each one only *asks* the layer below it:
+    //
+    //  1. A sidebar button, registered here exactly as the inspector's is and
+    //     for the same two reasons — a button is not a piece of the strip (with
+    //     no strip the registry hands it to the panel's toolbar row, which
+    //     dispatches Invoke identically), and the strip sizes itself at
+    //     create() from the buttons it is about to draw.
+    //  2. The **worker strip**: a second 48 px column, left of the first, one
+    //     icon per worker. Created and destroyed by the click, like the
+    //     inspector, which is why a second click closes it.
+    //  3. A **worker window** per watched worker, opened from an icon in that
+    //     column and placed to the left of the widget.
+    //
+    // Every one of those creations and destructions happens in the frame loop
+    // between windows, never inside anyone's ImGui frame: building GPU objects
+    // and an ImGui context with a half-built frame on the stack is the one
+    // mistake in this area that produces a bare access violation somewhere
+    // unrelated.
+    //
+    // **Nothing here opens unbidden and nothing here is persisted.** Not the
+    // strip's open state, not which windows were open, not where they were.
+    // That is a standing instruction, and it is also the only honest default:
+    // a worker window restored at startup would be a window about a worker that
+    // no longer exists.
+    bool workersToggle = workersOpen;  // --workers: the same latch the click sets
+    std::unique_ptr<aii::WorkerStripWindow> workerStrip;
+    // The rows the strip was sized and docked with at the top of *this* frame,
+    // rebuilt from the session's snapshot at the bottom of it. One frame of lag
+    // on a worker appearing, deliberately: the snapshot is taken well after the
+    // geometry block, and drawing a row the window was not sized for clips it.
+    std::vector<aii::WorkerStripRow> stripRows;
+
+    // One window per worker, and the same window for a second click on the same
+    // icon — that is what makes the icon a toggle rather than a window factory.
+    // `slot` is the column it was given, kept across a live worker's whole life
+    // so that a window closed and reopened comes back where it was.
+    struct OpenWorker {
+        std::string name;
+        int slot = 0;
+        std::unique_ptr<aii::WorkerWindow> window;
+    };
+    std::vector<OpenWorker> workerWindows;
+    // The cap, and it is not a layout bound: each ImGui context carries its own
+    // font atlas (Segoe UI plus ~3000 Japanese glyphs), so every one of these
+    // windows is a real texture and a real descriptor heap. Four side by side
+    // is already 1472 px of screen; past that they would have to overlap, which
+    // is the arrangement this rule exists to avoid.
+    constexpr int kWorkerWindowsMax = 4;
+    constexpr int kWorkerWinW = 360;  // the widget's own width: a sibling, not a cousin
+    constexpr int kWorkerWinH = 520;
+    constexpr int kWorkerWinGap = 8;
+    // Where the strips end and the worker windows begin, recomputed each frame
+    // in the geometry block below.
+    int dockEdge = 0;
+    {
+        aii::ButtonAction open;
+        open.kind = aii::ButtonActionKind::Invoke;
+        open.callback = [&workersToggle] { workersToggle = true; };
+        std::string buttonError;
+        if (!aii::ButtonRegistry::instance().add_app_button(
+                "workers", aii::ButtonGlyph::Workers, "Active workers",
+                aii::ButtonSurface::Sidebar, std::move(open), &buttonError))
+            log::warn("no workers button: {}", buttonError);
+    }
+
     std::unique_ptr<aii::SidebarWindow> sidebar;
     if (transparent && hwnd && ui) {
         // Set *before* create(), not after: the strip sizes itself from the
@@ -1212,6 +1298,25 @@ int main(int /*argc*/, char** /*argv*/) {
     // so the strip and the tooltip it hands back both read the same numbers.
     RECT widgetRect{};
     if (hwnd) GetWindowRect(hwnd, &widgetRect);
+
+    // M9. Worker windows tile **leftward** from whatever is left of the widget,
+    // one slot each, so two of them never stack exactly on top of each other.
+    // The slot is chosen when the window opens and the window may then be
+    // dragged anywhere; nothing drags it back. Declared here, after widgetRect,
+    // because that is what it measures from.
+    const auto workerSlotGeometry = [&](int slot) {
+        aii::WorkerGeometry g;
+        g.w = static_cast<unsigned>(kWorkerWinW);
+        g.h = static_cast<unsigned>(kWorkerWinH);
+        g.x = dockEdge - (slot + 1) * (kWorkerWinW + kWorkerWinGap);
+        // Bottom-aligned with the widget, which is itself pinned to the bottom
+        // right: a row of windows sharing one baseline reads as a set, and a
+        // row sharing a *top* edge would not, because the widget's top moves
+        // every time the chat opens.
+        g.y = widgetRect.bottom - kWorkerWinH;
+        g.placed = true;
+        return g;
+    };
 
     while (running) {
         // ---- the window's geometry, before a single one of this frame's
@@ -1305,7 +1410,27 @@ int main(int /*argc*/, char** /*argv*/) {
         // the work area changed or the watermark margin was recomputed, and
         // SidebarWindow::dock() is a no-op when nothing has actually moved.
         if (hwnd) GetWindowRect(hwnd, &widgetRect);
-        if (sidebar) sidebar->dock(widgetRect, band);
+        dockEdge = widgetRect.left;
+        if (sidebar) {
+            sidebar->dock(widgetRect, band);
+            dockEdge = sidebar->left();
+        }
+        // M9: the worker strip is part of this same block, and for the same
+        // reason — it is docked against the panel's top edge, which moves 265 px
+        // when the chat opens, and a strip docked later in the frame arrives one
+        // present behind as a visible slide.
+        //
+        // Sized and docked from the rows the *previous* frame's snapshot built
+        // (see stripRows). The snapshot is taken well below this point, and
+        // drawing a row the window has not been sized for clips it against a
+        // client rect that is still a button short — so the strip is one frame
+        // late on a worker appearing, which is 16 ms, rather than one frame
+        // wrong, which is a half-drawn icon.
+        if (workerStrip) {
+            workerStrip->set_rows(stripRows);
+            workerStrip->dock(widgetRect, band, dockEdge);
+            dockEdge = workerStrip->left();
+        }
 
         // Which half of the input owns the keyboard this frame. The panel now
         // has a text field, so the hotkeys below have to stand down while it
@@ -1827,6 +1952,132 @@ int main(int /*argc*/, char** /*argv*/) {
                     uiState.refusal_left = 2.5f;
                 }
             }
+            // ---- M9: the worker strip and the worker windows ----
+            //
+            // All three layers' creations and destructions are answered here,
+            // between the strip's frame and the widget's, which is the only
+            // place in this loop where a GPU object may be built or torn down
+            // and an ImGui context switched — nobody's frame is open across
+            // this block.
+            //
+            // **N ImGui contexts.** There are now four window types and up to
+            // four worker windows, so between five and eight contexts can be
+            // live at once. That is not, by itself, the hazard: the hazard is
+            // *assuming* which one is current, because CreateContext() restores
+            // the previously current context before it returns. Every entry
+            // point below makes its own context current first (ImGuiLayer does
+            // it in make_current(), which moves the D3D12 backend's `g_state`
+            // with it), and creating a window here leaves that new context
+            // current — which is harmless precisely because the next thing to
+            // touch ImGui, whichever window it belongs to, says so first.
+            //
+            // `--watch-worker` is answered first, and only once the named
+            // worker is really in the pool: it sets the same latch the icon's
+            // click sets and then forgets the name, so it opens one window and
+            // not one per frame.
+            std::string toggleWorker;
+            if (!watchWorkers.empty()) {
+                for (auto it = watchWorkers.begin(); it != watchWorkers.end(); ++it) {
+                    const bool present = std::any_of(
+                        snap.workers.begin(), snap.workers.end(),
+                        [&](const aii::WorkerPool::Snapshot& w) { return w.name == *it; });
+                    if (!present) continue;
+                    toggleWorker = *it;
+                    watchWorkers.erase(it);
+                    break;
+                }
+            }
+            if (workersToggle) {
+                workersToggle = false;
+                if (workerStrip) {
+                    // A second press closes the column. The worker windows it
+                    // opened stay: the strip is the index, and each window has
+                    // its own close box and its own reason to be on screen.
+                    // Closing the index is not a statement about the documents.
+                    workerStrip.reset();
+                } else {
+                    std::string stripError;
+                    workerStrip = aii::WorkerStripWindow::create(*backend, *instance, *device,
+                                                                 kFontPx, &stripError);
+                    // Survivable: the button stays and the next click tries
+                    // again. It is shown by the next frame's dock(), which is
+                    // also the first thing that knows where it belongs — one
+                    // frame hidden rather than one frame in SDL's corner.
+                    if (!workerStrip) log::warn("no worker strip: {}", stripError);
+                }
+            }
+            if (workerStrip) {
+                const aii::WorkerStripResult ws = workerStrip->draw(dt);
+                if (!ws.toggled.empty()) toggleWorker = ws.toggled;
+            }
+            if (!toggleWorker.empty()) {
+                const auto at = std::find_if(
+                    workerWindows.begin(), workerWindows.end(),
+                    [&](const OpenWorker& o) { return o.name == toggleWorker; });
+                if (at != workerWindows.end()) {
+                    // **One window per worker.** A second click on the same
+                    // icon closes the window it opened rather than making
+                    // another one, which is the inspector's rule and the only
+                    // one that makes an icon read as a toggle.
+                    workerWindows.erase(at);
+                } else if (static_cast<int>(workerWindows.size()) >= kWorkerWindowsMax) {
+                    // The same reserved row the toolbar's folder uses when its
+                    // path has gone away: the answer to a click belongs beside
+                    // the click, not in a log nobody is reading.
+                    uiState.refusal = "Four worker windows at once is the limit";
+                    uiState.refusal_left = 2.5f;
+                } else {
+                    // The lowest free column, so closing the middle of three
+                    // windows and opening a fourth fills the gap rather than
+                    // starting a fifth column off the left of the screen.
+                    int slot = 0;
+                    while (std::any_of(workerWindows.begin(), workerWindows.end(),
+                                       [&](const OpenWorker& o) { return o.slot == slot; }))
+                        ++slot;
+                    std::string workerError;
+                    auto win = aii::WorkerWindow::create(*backend, *instance, *device, kFontPx,
+                                                         toggleWorker, workerSlotGeometry(slot),
+                                                         &workerError);
+                    if (!win)
+                        log::warn("no window for worker {}: {}", toggleWorker, workerError);
+                    else
+                        workerWindows.push_back({toggleWorker, slot, std::move(win)});
+                }
+            }
+            // Each open window's own frame, each handed *this frame's* row out
+            // of the snapshot the session already took under the pool's mutex.
+            // Handed, never reached for: WorkerPool is written from each
+            // worker's own thread, and a window that read it directly would be
+            // reading it mid-write. A null row means the worker has left the
+            // pool — the window is told, and decides for itself what to say.
+            for (std::size_t i = 0; i < workerWindows.size();) {
+                const aii::WorkerPool::Snapshot* live = nullptr;
+                for (const aii::WorkerPool::Snapshot& w : snap.workers)
+                    if (w.name == workerWindows[i].name) {
+                        live = &w;
+                        break;
+                    }
+                if (workerWindows[i].window->draw(dt, live))
+                    ++i;
+                else
+                    workerWindows.erase(workerWindows.begin() + static_cast<std::ptrdiff_t>(i));
+            }
+            // What the strip will be sized and docked with at the top of the
+            // next frame. Built here, at the bottom of this one, because this
+            // is the first point at which both halves of a row are known: the
+            // pool's state, and whether its window is open.
+            stripRows.clear();
+            for (const aii::WorkerPool::Snapshot& w : snap.workers) {
+                aii::WorkerStripRow row;
+                row.name = w.name;
+                row.state = w.state;
+                row.activity = w.activity;
+                row.window_open = std::any_of(
+                    workerWindows.begin(), workerWindows.end(),
+                    [&](const OpenWorker& o) { return o.name == w.name; });
+                stripRows.push_back(std::move(row));
+            }
+
             // M5.1: the inspector's own life, answered here — between the
             // strip's frame and the widget's, which is the only place a window
             // may be created or destroyed. The toggle was set by the button's
@@ -1964,6 +2215,16 @@ int main(int /*argc*/, char** /*argv*/) {
             // region rather than a popup. Here it lands immediately right of
             // the icon it names, which is where a flyout label belongs.
             if (sidebar) sidebar->draw_tooltip_into_widget(widgetRect);
+            // M9: the worker strip's hover label, by the same mechanism and for
+            // the same reason — it is 48 px wide and an ImGui tooltip is a
+            // floating window clamped to its own viewport. It lands in the
+            // widget rather than beside the icon that raised it, which is two
+            // columns to the right; that is further than the primary strip's
+            // label travels, and still the only place in this app wide enough
+            // to letter "scout [Working] / Read(notes.txt)" without cutting it
+            // off. Only one of the two strips can be hovered at a time, so the
+            // two labels cannot collide.
+            if (workerStrip) workerStrip->draw_tooltip_into_widget(widgetRect);
             // Follow the panel's own height. Only the borderless window gets
             // resized: the decorated fallback has a frame to account for and
             // exists for debugging, where a fixed size is easier to reason about.
@@ -2034,6 +2295,15 @@ int main(int /*argc*/, char** /*argv*/) {
         raceThread.join();
     }
     sidebar.reset();
+    // M9's windows with it, and before the device they draw on is touched by
+    // anything else in this teardown. The worker windows go first: each one is
+    // a real window on the user's desktop, and an orphan left behind by an exit
+    // — normal, Esc, a close, or a `break` out of the loop above — is the worst
+    // outcome this feature has, multiplied by four. Nothing is written down on
+    // the way out, deliberately: no open-state and no geometry is persisted, so
+    // a fresh run starts with the desktop it started with.
+    workerWindows.clear();
+    workerStrip.reset();
     // And the inspector with it, for the same reason and with one addition:
     // where it was is written down first. The frame loop already mirrors that
     // every frame, so this only catches a window moved on the very last one.

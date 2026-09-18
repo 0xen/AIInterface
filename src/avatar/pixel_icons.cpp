@@ -63,6 +63,28 @@ constexpr IconRows kIconPrompts = {
     ".............",
 };
 
+// M9.1: the workers button. A figure — round head, shoulders, arms out — drawn
+// as a solid block in the same negative-space idiom the folder and the page
+// use, because a 1-cell outline is 2 px at this scale and reads as a smudge
+// beside the cog's chunky teeth. The arms are part of the silhouette rather
+// than detail inside it: at 26 px the outline is the whole of what the eye
+// gets, and a figure with its arms in is a bust, not a worker.
+constexpr IconRows kIconWorkers = {
+    ".............",
+    "....#####....",
+    "...#######...",
+    "...##...##...",
+    "...#######...",
+    "....#####....",
+    ".....###.....",
+    "..#########..",
+    ".###########.",
+    "###..###..###",
+    "##...###...##",
+    ".....###.....",
+    "....##.##....",
+};
+
 }  // namespace
 
 void draw_icon(ImDrawList* dl, const char* const* rows, ImVec2 p, ImU32 ink, ImU32 mark,
@@ -83,6 +105,7 @@ const char* const* icon_for_glyph(ButtonGlyph glyph) {
     case ButtonGlyph::Cog: return kIconCog;
     case ButtonGlyph::Folder: return kIconFolder;
     case ButtonGlyph::Prompts: return kIconPrompts;
+    case ButtonGlyph::Workers: return kIconWorkers;
     default: return nullptr;
   }
 }
