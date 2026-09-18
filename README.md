@@ -2,9 +2,9 @@
 
 Voice interface to Claude for Windows 11, in C++. Two executables share one core:
 
-- `avatar`: a small transparent always-on-top window in the bottom-right corner (a spinning
-  cube stands in for the avatar) with the transcript, a usage readout and Talk / Silence /
-  Pause buttons. Built on the sibling Renderer engine.
+- `avatar`: a small transparent always-on-top window in the bottom-right corner (a 16x16
+  black-and-white pixel slime that reacts to the session) with the transcript, a usage
+  readout and Talk / Silence / Pause buttons. Built on the sibling Renderer engine.
 - `voiceloop`: the same loop as a console push-to-talk program (milestone 1).
 
 Speech recognition and synthesis run locally on the CPU; Claude runs through the locally
