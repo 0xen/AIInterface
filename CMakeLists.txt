@@ -166,6 +166,17 @@ if(AII_BUILD_TESTS)
     target_compile_options(prompt_body_test PRIVATE /utf-8 /W4)
   endif()
   aii_copy_runtime_dlls(prompt_body_test)
+
+  # ---- prompt_tools_test: the prompt describes the grant that was made ----
+  # Same shape as prompt_body_test, and the same care with AII_PROMPTS_DIR --
+  # except that this one seeds the *real* assets/prompts into its temp store,
+  # because the property it checks is about the shipped prose.
+  add_executable(prompt_tools_test tests/prompt_tools_test.cpp)
+  target_link_libraries(prompt_tools_test PRIVATE aii_core)
+  if(MSVC)
+    target_compile_options(prompt_tools_test PRIVATE /utf-8 /W4)
+  endif()
+  aii_copy_runtime_dlls(prompt_tools_test)
 endif()
 
 # ---- avatar: the corner window on the Renderer engine (sibling checkout) ----

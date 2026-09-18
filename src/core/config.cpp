@@ -1,5 +1,6 @@
 #include "core/config.h"
 
+#include <cstdio>
 #include <cstdlib>
 
 namespace aii {
@@ -42,6 +43,33 @@ Config Config::from_env() {
   // behaves exactly as it did before M1f.
   c.listen_timeout = (float)std::atof(env_or("AII_LISTEN_TIMEOUT", "60").c_str());
   c.worker_bypass = env_or("AII_WORKER_BYPASS", "1") != "0";
+  // M3.9. The window reads the tool policy out of settings.json, where the
+  // tick boxes write it; voiceloop has no settings.json, so this is how the
+  // headless twin is run in a configuration other than the table's default —
+  // and it is what `--dump-system-prompt` is driven by, since the prompt now
+  // describes the grant. A comma-separated list of group keys, `none` for an
+  // empty grant, unset for the defaults:
+  //
+  //     AII_TOOLS=web            AII_TOOLS=web,file_read            AII_TOOLS=none
+  //
+  // A key that is in the list but not offered stays off: `tool_group_active`
+  // has the last word here as everywhere else, so this cannot grant what the
+  // greyed-out row refuses.
+  if (const std::string spec = env_or("AII_TOOLS", ""); !spec.empty()) {
+    for (int i = 0; i < kToolGroupCount; ++i) c.tools.on[i] = false;
+    std::string key;
+    const auto take = [&] {
+      if (key.empty() || key == "none") return;
+      bool found = false;
+      for (int i = 0; i < kToolGroupCount; ++i)
+        if (key == tool_group(i).key) { c.tools.on[i] = true; found = true; }
+      if (!found) std::fprintf(stderr, "[tools] AII_TOOLS: no tool group called `%s`\n", key.c_str());
+    };
+    for (const char ch : spec) {
+      if (ch == ',' || ch == ' ') { take(); key.clear(); } else key += ch;
+    }
+    take();
+  }
 
   c.models_dir = AII_MODELS_DIR;
   c.stt_dir = c.models_dir + "/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11";

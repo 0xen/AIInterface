@@ -21,6 +21,13 @@
 //        AII_STT_LANG       recogniser language override (default: derived from AII_LANGS)
 //
 //        AII_PROMPTS_DIR    prompt store location (default %APPDATA%\AIInterface\prompts)
+//        AII_TOOLS          which tool groups the conversational instance gets:
+//                           a comma-separated list of group keys (web, file_read,
+//                           file_write), or `none`. Default: the table's defaults in
+//                           core/tool_policy.h. In the window this comes from the
+//                           Tools section of Settings instead. It changes the system
+//                           prompt as well as the command line, so a dump taken with
+//                           it set is what that configuration really sends.
 //
 // Modes: --say "<text>"    one typed turn through Claude, spoken, then exit.
 //                          Repeatable: several --say run as consecutive turns
@@ -105,13 +112,21 @@ int main(int argc, char** argv) {
     }
     if (wargv) LocalFree(wargv);
   }
+  const bool scripted = !say_texts.empty() || !speak_text.empty();
+
+  const aii::Config cfg = aii::Config::from_env();
+
   // M3.2's own regression test, and the only way to see the composed prompt
   // without reading it out of a running process. It writes the exact bytes
   // that become `--system-prompt`, opened in binary so nothing here turns an
   // LF into a CRLF — the file is meant to be diffed, and a diff that reports
   // every line as changed would be worse than no test at all.
+  //
+  // M3.9: it now reads the config first, because the prompt depends on the
+  // tool policy — `AII_TOOLS` is how this dump is taken in a configuration
+  // other than the default one.
   if (!dump_prompt.empty()) {
-    const std::string& composed = aii::system_prompt();
+    const std::string& composed = aii::system_prompt(cfg.tools);
     FILE* f = nullptr;
     if (fopen_s(&f, dump_prompt.c_str(), "wb") != 0 || !f) {
       std::fprintf(stderr, "cannot write %s\n", dump_prompt.c_str());
@@ -122,9 +137,6 @@ int main(int argc, char** argv) {
     std::printf("wrote %zu bytes to %s\n", composed.size(), dump_prompt.c_str());
     return 0;
   }
-  const bool scripted = !say_texts.empty() || !speak_text.empty();
-
-  const aii::Config cfg = aii::Config::from_env();
   const int early_words = cfg.early_words;  // 0 = wait for full sentences
   std::printf("voiceloop  backend=%s effort=%s\n", cfg.backend.c_str(), cfg.effort.c_str());
 

@@ -63,13 +63,18 @@ bool ToolPolicy::operator==(const ToolPolicy& o) const {
   return true;
 }
 
+// `offered` gates the *value*, not just the control. A row that is greyed out
+// must not be able to grant its tools through a hand-edited settings.json
+// either, or the greying is decoration.
+bool tool_group_active(const ToolPolicy& p, int id) {
+  if (id < 0 || id >= kToolGroupCount) return false;
+  return p.on[id] && kGroups[id].offered;
+}
+
 std::string tool_list(const ToolPolicy& p) {
   std::string out;
   for (int i = 0; i < kToolGroupCount; ++i) {
-    // `offered` gates the *value*, not just the control. A row that is greyed
-    // out must not be able to grant its tools through a hand-edited
-    // settings.json either, or the greying is decoration.
-    if (!p.on[i] || !kGroups[i].offered) continue;
+    if (!tool_group_active(p, i)) continue;
     if (!out.empty()) out += ',';
     out += kGroups[i].tools;
   }
@@ -79,7 +84,7 @@ std::string tool_list(const ToolPolicy& p) {
 std::string tool_summary(const ToolPolicy& p) {
   std::string out;
   for (int i = 0; i < kToolGroupCount; ++i) {
-    if (!p.on[i] || !kGroups[i].offered) continue;
+    if (!tool_group_active(p, i)) continue;
     if (!out.empty()) out += ", ";
     out += kGroups[i].label;
   }
