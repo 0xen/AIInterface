@@ -110,8 +110,23 @@ class AvatarAppearance {
   // which is the same behaviour a caller that has never heard of exits gets.
   void hold_exit(float seconds);
 
-  // Whether the band is still needed at all -- showing, leaving, or holding
+  // Whether the avatar is on screen at all -- showing, leaving, or holding
   // still while an exit clip plays in it.
+  //
+  // **The window's height no longer follows this** (user, 18 Sep 2026). It
+  // used to, and that was the flicker: the band was reserved only while the
+  // avatar had alpha, so every appearance was also a window resize, and a
+  // geometry change a frame away from an alpha change on a per-pixel-alpha
+  // surface is a visible flash. The band is reserved by *mode* now -- see
+  // `nextBand` in main.cpp -- so the avatar fades into and out of an empty
+  // region that was already the right size, and M2.3c's exit clip plays in a
+  // band that was never going to be taken out from under it. Nothing here
+  // changed: this object still owns the alpha and the two edges, which is one
+  // fewer thing than it owned before.
+  //
+  // Kept as the honest answer to "is the avatar on screen", for a caller that
+  // needs to know without inspecting the alpha. It stays true across the exit
+  // hold for that reason, even though no window geometry reads it any more.
   bool present() const { return showing_ || exit_left_ > 0.0f || fade_ > 0.0f; }
 
  private:

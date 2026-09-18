@@ -341,6 +341,10 @@ int main(int /*argc*/, char** /*argv*/) {
     // are, for the same stated reason: a state that cannot be posed cannot be
     // looked at.
     std::string messageArg;
+    // Diagnostic only: one log line per interesting frame across an appearance,
+    // naming every quantity that could put the band and the alpha on different
+    // frames, plus the window and client rects DWM actually composites.
+    bool traceBand = false;
     {
         // Wide command line so Japanese survives (argv is ANSI-mangled).
         int wargc = 0;
@@ -348,6 +352,7 @@ int main(int /*argc*/, char** /*argv*/) {
         for (int i = 1; wargv && i < wargc; ++i) {
             const std::wstring a = wargv[i];
             if (a == L"--opaque") opaque = true;
+            else if (a == L"--trace-band") traceBand = true;
             else if (a == L"--vulkan") vulkan = true;
             else if (a == L"--no-voice") voiceEnabled = false;
             else if (a == L"--seconds" && i + 1 < wargc) seconds = _wtof(wargv[++i]);
@@ -1076,6 +1081,10 @@ int main(int /*argc*/, char** /*argv*/) {
     // The panel's own height, i.e. what it last asked for less the band it was
     // drawn with. Adding a band to it is what the window has to become.
     std::uint32_t panelH = 0;
+    std::uint64_t frameNo = 0;
+    float lastTracedAlpha = -1.0f;
+    std::uint32_t lastTracedBand = 9999;
+    std::string lastTracedClip;
     bool running = true;
     std::size_t nextSay = 0;
     // A settle before the next turn goes in: Idle is reached the moment the
@@ -1576,6 +1585,158 @@ int main(int /*argc*/, char** /*argv*/) {
                 settings.set_string("avatar", "colour", colourToHex(avatarSource.custom_colour()));
         }
 
+        // ---- the loading overlay's clock, and the avatar's appearance ----
+        //
+        // Both are settled *here*, above the controller, and that ordering is
+        // load-bearing (fixed 18 Sep 2026). It used to be below: `appear()`
+        // was called after `controller.update()` had already run for the
+        // frame, so the entrance was consumed a frame late and the first
+        // frame the avatar was drawn on showed **the clip it was playing when
+        // it was last on screen** — a whole, ordinary-looking slime — before
+        // the entrance took over on the next one. Measured: at the summon
+        // frame the trace read `alpha=0.11 clip=think`, and one frame later
+        // `alpha=0.40 clip=wake`. That single normal-looking frame is what the
+        // user reported as the avatar "coming back for one frame" as it
+        // flickered, and it happened on every appearance, in both modes.
+        //
+        // With the order reversed the appearance edge reaches the controller
+        // in the same frame it is raised, so the entrance's own first frame is
+        // the first frame with any alpha on it, and nothing else is ever seen.
+        //
+        // With --no-voice there is no session and the snapshot stays Loading,
+        // which is the long window the animation is tuned in.
+        if (snap.state == aii::VoiceSession::State::Loading) {
+            handoff = 0.0f;
+            // Only while there is one: the session clears the stage name as
+            // the last stage completes, a frame or two before it leaves
+            // Loading, so taking it unconditionally would freeze an empty
+            // caption and the loading screen would lose its label first.
+            if (!snap.load_stage.empty()) loaderStage = snap.load_stage;
+            loaderProgress = snap.load_progress;
+        } else if (handoff < 1.0f) {
+            // The bar runs to full as the loader leaves rather than stopping
+            // wherever the last stage left it; the caption holds that stage.
+            loaderProgress = 1.0f;
+            handoff = std::min(1.0f, handoff + dt / kHandoffSeconds);
+        }
+        // Staggered rather than strictly complementary. An even crossfade puts
+        // the loader's cubes and the avatar both at half strength through the
+        // middle, which reads as two overlaid images rather than one handing
+        // over; the loader is most of the way out before the avatar has any
+        // real presence, and the two still coexist across the middle third.
+        const float loaderAlpha = 1.0f - smoothstep(0.00f, 0.62f, handoff);
+        loading = loaderAlpha > 0.0f;
+
+        // M7.2: the one place the avatar appears. Every path that can put it
+        // on screen — the loader handing over at startup, the mode switched in
+        // settings, a turn starting in "shown when talking", hold-to-dictate
+        // letting go — is `avatarWanted` by the time it reaches here, and none
+        // of them is named below.
+        //
+        // The state is clamped to Loading for as long as the loader still has
+        // opacity, exactly as the panel's copy is further down: while that
+        // overlay owns the window no mode wants the avatar, and the two gates
+        // then say the same thing. It is written out here rather than taken
+        // from `snap` because `snap` is deliberately *not* clamped until after
+        // the controller has read it.
+        //
+        // The M1.5 handoff no longer multiplies into this. That product was
+        // the bug: it fed the avatar in across the loader's own 0.42 s
+        // dissolve, so the entrance M2.4 fired on the same frame played under
+        // a scrim and was finished before the band was opaque. Now the loader
+        // leaves first and the avatar is summoned into the space it left.
+        const bool avatarWanted = aii::avatar_visible(
+            uiState.avatar_mode,
+            loading ? aii::VoiceSession::State::Loading : snap.state);
+        const aii::AvatarAppearance::Frame appeared =
+            appearance.update(avatarWanted, loading, dt);
+        avatarAlpha = appeared.alpha;
+        // The whole of the summon: an arrival plays an entrance, and this is
+        // the only line in the program that starts one. It is deliberately
+        // outside the `controllerOwnsAvatar` test's block but inside its
+        // condition — a run pinned to `--clip` has no policy to ask.
+        if (appeared.summoned && controllerOwnsAvatar) {
+            controller.appear();
+            log::info("avatar: summoned at {:.2f}s (pop {:.0f} ms)", t,
+                      aii::AvatarAppearance::kPopSeconds * 1000.0f);
+        }
+        // M2.3c, and the mirror of it: a departure plays an exit, and the alpha
+        // is held at full for exactly as long as that takes. The controller is
+        // asked how long rather than told, because only the definition knows
+        // -- an avatar with no exit art answers 0 and the departure goes back
+        // to M1.6's dissolve, which is what every avatar did before this line.
+        //
+        // It sits *above* the controller for the same reason the summon does,
+        // and the two edges are now symmetric in their placement as well as in
+        // their contract. The asymmetry is inside the controller, not here:
+        // `appear()` only arms a pending entrance that `update()` consumes,
+        // while `depart()` starts its one-shot outright and returns its length
+        // in the same call. Below the controller that made no difference to the
+        // *band* -- which M2.3c held through `present()` -- but it did put the
+        // exit's own first frame a frame late, exactly as the entrance was,
+        // and it left `depart()`'s suspension of the dwell floor to be spent by
+        // the *next* frame's update() rather than by the frame that started the
+        // exit. Raised here, the departure edge reaches the controller in the
+        // frame it is raised: update() runs afterwards with the exit one-shot
+        // already current, Yield::Exit keeps it there, and the floor is
+        // suspended for the frame it was written for.
+        if (appeared.dismissed) {
+            const float exit_len = controllerOwnsAvatar ? controller.depart() : 0.0f;
+            appearance.hold_exit(exit_len);
+            log::info("avatar: dismissed at {:.2f}s (exit {:.0f} ms, fade {:.0f} ms)", t,
+                      exit_len * 1000.0f,
+                      (exit_len > 0.0f ? aii::AvatarAppearance::kLeaveAfterExitSeconds
+                                       : aii::AvatarAppearance::kLeaveSeconds) *
+                          1000.0f);
+        }
+        // ---- the band's height follows the *mode*, not the moment ----
+        //
+        // (user, 18 Sep 2026: "stop resizing the window when the AI is no
+        // longer visible. Keep it fully sized, but just don't show the avatar.
+        // Just show an empty region.")
+        //
+        // This is the flicker fix, and it is a fix rather than a preference.
+        // The band used to be reserved only while the avatar had any alpha, so
+        // an appearance was also a *resize*: the window grew 260 px as the
+        // alpha started rising and shrank again as it reached zero. On a
+        // borderless window DWM composites with per-pixel alpha, a geometry
+        // change and an alpha change a frame apart is a visible flash, and in
+        // `when_talking` it happened four times a turn — the avatar is wanted
+        // for Listening, not for the Thinking pause, and wanted again for
+        // Speaking, so a single exchange grew, shrank, grew and shrank the
+        // window inside a couple of seconds.
+        //
+        // Reserving it by mode removes the whole class: in `always` and
+        // `when_talking` the band is 260 px of window for as long as that mode
+        // is selected and the avatar simply fades in and out of an empty
+        // region that was already there. In `hidden` it is 0 px, permanently —
+        // the mode is the user saying they do not want the space, and the only
+        // thing that changes it is them changing the mode, which is a
+        // deliberate act and not a frame anyone is watching for a flash.
+        //
+        // The loading screen still forces it: that overlay covers the whole
+        // window and is centred in it, so `hidden` gives the 260 px back when
+        // the loader leaves rather than shrinking the window out from under
+        // it. That is one resize, at startup, and it is unchanged.
+        //
+        // This subsumes M2.3c's reason for widening `present()`. That was the
+        // band's only defence against being taken away mid-exit -- the clip
+        // needs the 260 px for its whole length and a height that followed the
+        // alpha would have started shrinking as the departure began. Reserving
+        // by mode makes the defence unnecessary rather than removing it: in
+        // `always` and `when_talking` the band the exit plays in was never
+        // going anywhere, and in `hidden` there is no avatar to depart. The
+        // hold itself is unchanged and still lives where it belongs, in
+        // AvatarAppearance's alpha -- `present()` is simply no longer what
+        // this line reads.
+        //
+        // The resize itself, when a mode change does cause one, still goes
+        // through pendingH and lands at the top of the next frame — never from
+        // inside this one (M1.4) — and through `PresentationTarget::setSize`
+        // in placeInCorner, never a raw SetWindowPos.
+        nextBand =
+            (loading || uiState.avatar_mode != aii::AvatarVisibility::Hidden) ? kAvatarH : 0;
+
         avatarSource.update(dt);
         if (avatarSource.take_status_change()) {
             if (avatarSource.status_ok()) log::info("{}", avatarSource.status());
@@ -1613,30 +1774,13 @@ int main(int /*argc*/, char** /*argv*/) {
         // and they cannot corrupt the art.
         bus.stamp_cells(grid);
 
-        // ---- the loading overlay, and the handoff out of it ----
-        // With --no-voice there is no session and the snapshot stays Loading,
-        // which is the long window the animation is tuned in.
-        if (snap.state == aii::VoiceSession::State::Loading) {
-            handoff = 0.0f;
-            // Only while there is one: the session clears the stage name as
-            // the last stage completes, a frame or two before it leaves
-            // Loading, so taking it unconditionally would freeze an empty
-            // caption and the loading screen would lose its label first.
-            if (!snap.load_stage.empty()) loaderStage = snap.load_stage;
-            loaderProgress = snap.load_progress;
-        } else if (handoff < 1.0f) {
-            // The bar runs to full as the loader leaves rather than stopping
-            // wherever the last stage left it; the caption holds that stage.
-            loaderProgress = 1.0f;
-            handoff = std::min(1.0f, handoff + dt / kHandoffSeconds);
-        }
-        // Staggered rather than strictly complementary. An even crossfade puts
-        // the loader's cubes and the avatar both at half strength through the
-        // middle, which reads as two overlaid images rather than one handing
-        // over; the loader is most of the way out before the avatar has any
-        // real presence, and the two still coexist across the middle third.
-        const float loaderAlpha = 1.0f - smoothstep(0.00f, 0.62f, handoff);
-        loading = loaderAlpha > 0.0f;
+        // ---- the loading overlay's own drawing ----
+        // The handoff's clock, `loading`, the avatar's alpha and the band are
+        // all settled above the controller now; see the block there. What is
+        // left here is the loader's push constants and the snapshot the *panel*
+        // is given, both of which have to happen after the controller has read
+        // the unclamped snapshot.
+        //
         // From here down the snapshot says Loading for as long as the loader is
         // still on screen, which is what avatar_ui.h already documents the panel
         // being given: the panel's loading layout is keyed off snap.state, but
@@ -1650,62 +1794,6 @@ int main(int /*argc*/, char** /*argv*/) {
         // --say all read the snapshot before it.
         if (loading) snap.state = aii::VoiceSession::State::Loading;
 
-        // M7.2: the one place the avatar appears. Every path that can put it
-        // on screen — the loader handing over at startup, the mode switched in
-        // settings, a turn starting in "shown when talking", hold-to-dictate
-        // letting go — is `avatarWanted` by the time it reaches here, and none
-        // of them is named below. `snap.state` is read *after* the clamp above
-        // on purpose: while the loading screen still has opacity the session
-        // reads as Loading, so no mode wants the avatar and the two gates say
-        // the same thing.
-        //
-        // The M1.5 handoff no longer multiplies into this. That product was
-        // the bug: it fed the avatar in across the loader's own 0.42 s
-        // dissolve, so the entrance M2.4 fired on the same frame played under
-        // a scrim and was finished before the band was opaque. Now the loader
-        // leaves first and the avatar is summoned into the space it left.
-        const bool avatarWanted = aii::avatar_visible(uiState.avatar_mode, snap.state);
-        const aii::AvatarAppearance::Frame appeared =
-            appearance.update(avatarWanted, loading, dt);
-        avatarAlpha = appeared.alpha;
-        // The whole of the summon: an arrival plays an entrance, and this is
-        // the only line in the program that starts one. It is deliberately
-        // outside the `controllerOwnsAvatar` test's block but inside its
-        // condition — a run pinned to `--clip` has no policy to ask.
-        if (appeared.summoned && controllerOwnsAvatar) {
-            controller.appear();
-            log::info("avatar: summoned at {:.2f}s (pop {:.0f} ms)", t,
-                      aii::AvatarAppearance::kPopSeconds * 1000.0f);
-        }
-        // M2.3c, and the mirror of it: a departure plays an exit, and the band
-        // is held open for exactly as long as that takes. The controller is
-        // asked how long rather than told, because only the definition knows
-        // -- an avatar with no exit art answers 0 and the band goes back to
-        // M1.6's dissolve, which is what every avatar did before this line.
-        if (appeared.dismissed) {
-            const float exit_len = controllerOwnsAvatar ? controller.depart() : 0.0f;
-            appearance.hold_exit(exit_len);
-            log::info("avatar: dismissed at {:.2f}s (exit {:.0f} ms, fade {:.0f} ms)", t,
-                      exit_len * 1000.0f,
-                      (exit_len > 0.0f ? aii::AvatarAppearance::kLeaveAfterExitSeconds
-                                       : aii::AvatarAppearance::kLeaveSeconds) *
-                          1000.0f);
-        }
-        // The band is reserved while anything might still draw in it, and
-        // always while the loading screen is up: that overlay covers the whole
-        // window and is centred in it, so a mode that hides the avatar gives
-        // the 260 px back when the loader leaves rather than shrinking the
-        // window out from under it. The resize itself goes through pendingH and
-        // lands at the top of the next frame — never from inside this one (M1.4).
-        //
-        // What the band *will* be. It is not used until the top of the next
-        // frame, where it is applied together with the window height that goes
-        // with it — see `band` above the event pump. The band moves every
-        // control in the panel by 260 px, so laying the panel out against a new
-        // band while the window still has the old height puts every control
-        // that far from where it is on screen; that mismatch is what made a
-        // click on Talk read as hold-to-dictate (see the note at `band`).
-        nextBand = (loading || appearance.present()) ? kAvatarH : 0;
         if (loading) loaderPush = aii::loader_push(t, width, height, loaderAlpha);
         // The panel is released on the first frame of the handoff, not held for
         // it: its one discrete change (the usage row, the state line, the live
@@ -1903,6 +1991,29 @@ int main(int /*argc*/, char** /*argv*/) {
         // region — after the slot has been waited on, so the GPU is no longer
         // reading it. The band is what the scale and the centring are worked
         // out against, so it is passed rather than assumed.
+        if (traceBand) {
+            RECT wr{}, cr{};
+            if (hwnd) { GetWindowRect(hwnd, &wr); GetClientRect(hwnd, &cr); }
+            const bool interesting = avatarAlpha != lastTracedAlpha || band != lastTracedBand ||
+                                     pendingH != 0 || nextBand != band ||
+                                     controller.clip() != lastTracedClip;
+            if (interesting) {
+                log::info("[band] f={} t={:.3f} dt={:.4f} state={} wanted={} loading={} "
+                          "alpha={:.4f} clip={} why={} band={} next={} h={} pendingH={} winH={} "
+                          "win={}x{} client={}x{} winTop={}",
+                          frameNo, t, dt, static_cast<int>(snap.state), avatarWanted ? 1 : 0,
+                          loading ? 1 : 0, avatarAlpha, controller.clip(), controller.reason(),
+                          band, nextBand, height, pendingH, windowH,
+                          static_cast<int>(wr.right - wr.left), static_cast<int>(wr.bottom - wr.top),
+                          static_cast<int>(cr.right - cr.left), static_cast<int>(cr.bottom - cr.top),
+                          static_cast<int>(wr.top));
+            }
+            lastTracedClip = controller.clip();
+            lastTracedAlpha = avatarAlpha;
+            lastTracedBand = band;
+        }
+        ++frameNo;
+
         avatarRenderer->write_slot(slot, grid, width, kAvatarH, avatarAlpha);
 
         if (auto r = renderer->drawFrame(nullptr); !r) {
