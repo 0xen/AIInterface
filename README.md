@@ -1,11 +1,15 @@
 # AIInterface
 
-Voice interface to Claude for Windows 11, in C++. Two executables share one core:
+Voice interface to Claude for Windows 11, in C++. The program is `avatar`:
 
 - `avatar`: a small transparent always-on-top window in the bottom-right corner (a 16x16
   black-and-white pixel slime that reacts to the session) with the transcript, a usage
   readout and Talk / Silence / Pause buttons. Built on the sibling Renderer engine.
-- `voiceloop`: the same loop as a console push-to-talk program (milestone 1).
+  **A default build produces this and nothing else.**
+
+`voiceloop` — the same loop as a console push-to-talk program (milestone 1, confirmed
+working) — and the unit tests are development targets, off by default; see
+"Building the development targets".
 
 Speech recognition and synthesis run locally on the CPU; Claude runs through the locally
 installed Claude Code CLI on your subscription (no API key needed). No audio is ever written
@@ -18,15 +22,43 @@ Plan: `PROJECT_OUTLINE.md`. Research: `docs/`. Engine experiments and evidence: 
 Requires Visual Studio 2022, CMake 3.24+, the Claude Code CLI signed in to your subscription,
 the prebuilt engines and models described in the next section (about 1.3 GB, none of it in git),
 and for `avatar` the Renderer engine checked out beside this repo (`..\Renderer`, or set
-`AII_RENDERER_DIR`) plus the Vulkan SDK (its `dxc` compiles the shaders). Pass
-`-DAII_BUILD_AVATAR=OFF` to build only `voiceloop`.
+`AII_RENDERER_DIR`) plus the Vulkan SDK (its `dxc` compiles the shaders).
 
 ```
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release --target avatar voiceloop
+cmake --build build --config Release
 ```
 
-Everything lands in `build\bin\Release\` next to `rend.dll` and the engine DLLs.
+`avatar.exe` lands in `build\bin\Release\` next to `rend.dll` and the engine DLLs, and it is
+the only executable there: the tests and `voiceloop` are behind the options below.
+
+### Building the development targets
+
+| Option | Default | Builds |
+|---|---|---|
+| `AII_BUILD_TESTS` | OFF | the seven unit tests in `tests\` (`schedule_test`, `clip_utf8_test`, `app_strings_test`, `failure_reason_test`, `prompt_body_test`, `worker_report_test`, `avatar_children_test`) |
+| `AII_BUILD_VOICELOOP` | OFF | `voiceloop`, the milestone-1 console loop |
+| `AII_BUILD_AVATAR` | ON | the app itself |
+| `AII_BUILD_SCRIPTS` | ON | the in-process Python script host (M2.6) |
+
+```
+cmake -S . -B build -DAII_BUILD_TESTS=ON
+cmake --build build --config Release
+build\bin\Release\schedule_test.exe && build\bin\Release\clip_utf8_test.exe && ^
+build\bin\Release\app_strings_test.exe && build\bin\Release\failure_reason_test.exe && ^
+build\bin\Release\prompt_body_test.exe && build\bin\Release\avatar_children_test.exe
+```
+
+Each of those six prints its cases and exits non-zero on failure; run them after touching
+anything they cover. (`worker_report_test` is a manual harness — it spawns a real Claude
+child, so it takes arguments: `worker_report_test <name> <cwd> <task...>`.) Turn the option
+back off with `cmake -S . -B build -DAII_BUILD_TESTS=OFF` — it is cached, so it stays on
+until you do. Executables built while an option was on are **not** removed when it goes off;
+delete `build\bin\Release\` to clear them.
+
+The spikes in `spikes\` are separate CMake projects with their own build directories
+(`stt_test`, `mic_stt`, `codeswitch_bench`); nothing in the main build refers to them, so they
+are never built from here.
 
 ## Avatar window
 
@@ -157,10 +189,13 @@ Install Claude Code and sign in once so `%USERPROFILE%\.local\bin\claude.exe` ex
 the abandoned ZONOS2 experiment; see `spikes\README.md`. `kokoro-multi-lang-v1_1` and the
 SenseVoice model were only used as cross-checks during the spikes.
 
-## Run
+## Run the console loop (`voiceloop`)
+
+Not built by default. Configure with `-DAII_BUILD_VOICELOOP=ON` first (see
+"Building the development targets"), then:
 
 ```
-build\Release\voiceloop.exe
+build\bin\Release\voiceloop.exe
 ```
 
 | Key | Action |
