@@ -580,7 +580,7 @@ std::vector<PromptRow> cli_context_rows() {
       // CLI writes into the context, and a reader asking "what is in Claude's
       // head" should not have to infer it from the fact that answers sometimes
       // come back current.
-      "Web search and fetch tool definitions",
+      "Tool definitions for whatever is ticked in Settings > Tools",
       "Working directory",
       "Git status of the working directory",
       "Platform and OS version",

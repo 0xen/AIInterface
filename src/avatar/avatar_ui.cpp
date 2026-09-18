@@ -851,6 +851,101 @@ void listen_timeout_section(AvatarUiState& state) {
   }
 }
 
+// ---- M3.8: what the one you talk to is allowed to do ------------------------
+//
+// The user asked for this section in so many words: "create a subsection
+// called Tools, where the user can toggle tools on and off - file access, web
+// searches". Three things had to be decided to build it, and all three are
+// visible on screen rather than only in the code.
+//
+// **The grouping.** The CLI's built-in set is twenty-eight tools (measured,
+// not read off `--help`; the list is in core/tool_policy.h). A tick box each
+// would be a wall of jargon nobody can have an opinion about, and one switch
+// for all of them would put `Bash` behind the same gesture as `WebSearch`. So
+// they are grouped as a person groups them — internet, reading my files,
+// changing my files — and the rest are withheld and *said* to be withheld,
+// because "what else can it do" is the question that started this.
+//
+// **Writing is not offered yet.** An enabled tool here is *granted*, not
+// offered: `--permission-prompts none` means there is no confirmation step,
+// because nothing in this app can answer one. Reading without asking is a
+// thing a person can weigh. Creating and overwriting files without asking, in
+// whatever directory the app was launched from, is a thing they should be
+// asked about first — and they have not been. So the row exists, is off, is
+// greyed, and says exactly what it would do. `kFileWritingOffered` turns it on
+// when they answer.
+//
+// **A toggle cannot reach the running Claude.** `--allowedTools` is fixed when
+// the child process starts. The honest options were: restart it and replay the
+// conversation (M3.6, unbuilt), restart it and lose the conversation, or wait
+// for the next launch. This is the third, and the entire reason the section
+// has an amber line in it: a setting that appears to do nothing is the worst
+// failure a setting has, and this one genuinely cannot do anything until the
+// app restarts. It therefore never pretends. The line names what is in force
+// *now* and what a restart would change it to, and it appears the instant a
+// box is ticked rather than being a permanent disclaimer nobody reads.
+void tools_section(AvatarUiState& state, const AvatarOptions& options) {
+  // M3.8's pose flag; see AvatarUiState::settings_scroll_tools. Held rather
+  // than applied once, exactly as Timing's is, and taken *before* the heading
+  // so that the section's own name is in the frame rather than one pixel above
+  // it — the point of the flag is a capture in which the thing is identifiable.
+  if (state.settings_scroll_tools) ImGui::SetScrollHereY(0.0f);
+  settings_heading("Tools");
+
+  for (int i = 0; i < kToolGroupCount; ++i) {
+    const ToolGroup& g = tool_group(i);
+    settings_row(g.label);
+    ImGui::BeginDisabled(!g.offered || !options.tools_supported);
+    ImGui::Checkbox((std::string("##tool_") + g.key).c_str(), &state.tools.on[i]);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+      if (!options.tools_supported)
+        ImGui::SetTooltip("This run is on the API backend, which is not the\n"
+                          "Claude Code CLI and has no tools at all.");
+      else if (!g.offered)
+        ImGui::SetTooltip("Not offered yet, and off.\n\nA tool switched on here runs without asking "
+                          "you\nfirst - there is no confirmation step, because\nnothing in this "
+                          "window could answer one. That is\nsurvivable for reading a file and is "
+                          "not\nsurvivable for overwriting one, so this stays with\nthe workers "
+                          "until you say otherwise.\n\n%s",
+                          g.tip_on);
+      else
+        ImGui::SetTooltip("%s", state.tools.on[i] ? g.tip_on : g.tip_off);
+    }
+    // The warning belongs under the row it is about, not in a footnote: a
+    // greyed control with no visible reason reads as a bug.
+    if (g.risky) {
+      ImGui::PushStyleColor(ImGuiCol_Text, warn());
+      ImGui::TextWrapped("Writing is a worker's job for now: a tool switched on here is granted, "
+                         "not offered, so Claude would create and overwrite files with no "
+                         "confirmation and no undo.");
+      ImGui::PopStyleColor();
+    }
+  }
+
+  ImGui::PushStyleColor(ImGuiCol_Text, dim());
+  ImGui::TextWrapped("%s", kToolsWithheld);
+  ImGui::PopStyleColor();
+
+  // The honest part. Two cases, and the surface is never silent about either.
+  if (!options.tools_supported) {
+    ImGui::PushStyleColor(ImGuiCol_Text, dim());
+    ImGui::TextWrapped("Not in use this run: the API backend has no tools.");
+    ImGui::PopStyleColor();
+  } else if (state.tools != options.tools_in_force) {
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("Saved, and it reaches Claude when you next start the app. Right now Claude "
+                       "still holds what it was launched with: %s. The tools are fixed when Claude "
+                       "starts and cannot be changed under a conversation that is already running.",
+                       tool_summary(options.tools_in_force).c_str());
+    ImGui::PopStyleColor();
+  } else {
+    ImGui::PushStyleColor(ImGuiCol_Text, dim());
+    ImGui::TextWrapped("In force now: %s.", tool_summary(state.tools).c_str());
+    ImGui::PopStyleColor();
+  }
+}
+
 void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ui_color(0.055f, 0.063f, 0.082f));
   ImGui::BeginChild("##settings", ImVec2(0.0f, kChatHeight), ImGuiChildFlags_None, 0);
@@ -928,6 +1023,11 @@ void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
     ImGui::SetTooltip("Python, in this process, over the app bus.\n"
                       "%%APPDATA%%\\AIInterface\\scripts\\*.py runs at startup;\n"
                       "nothing below that directory is scanned.");
+
+  // M3.8. Above Timing rather than below it: this is the section that decides
+  // what Claude can do to the user's machine, and it does not belong under a
+  // heading about endpointing.
+  tools_section(state, options);
 
   settings_heading("Voice");
   ImGui::TextColored(dim(), "Which voice speaks each language: M8.");

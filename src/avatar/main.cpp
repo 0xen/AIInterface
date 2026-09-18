@@ -50,6 +50,8 @@
 //     --settings  open the settings surface at startup, and
 //     --settings-timing  the same, held scrolled to the Timing section, which
 //                 is below the fold of a surface that scrolls (M1f.2).
+//     --settings-tools  the same, held scrolled to the Tools section (M3.8),
+//                 which is likewise below the fold.
 //     --listen-timeout-at S:V  at S seconds, write V seconds into the
 //                 auto-listen control's own fields, exactly as a hand on it
 //                 would; V of 0 is "never". How "a change reaches a
@@ -321,6 +323,11 @@ int main(int /*argc*/, char** /*argv*/) {
     // latched. `V` of 0 is never, matching the file and the mechanism.
     bool settingsOpen = false;
     bool settingsScrollTiming = false;
+    // M3.8's pose flag, and the copy of the tool policy the child was launched
+    // with. `toolsInForce` is written once, beside the tick boxes it is
+    // compared against, and never again — it is what "in force" means.
+    bool settingsScrollTools = false;
+    aii::ToolPolicy toolsInForce;
     // --inspector: open the prompt inspector on the first frame, as if the
     // sidebar button had been clicked. Nothing else about it differs.
     bool inspectorOpen = false;
@@ -446,6 +453,7 @@ int main(int /*argc*/, char** /*argv*/) {
             }
             else if (a == L"--settings") settingsOpen = true;
             else if (a == L"--settings-timing") { settingsOpen = true; settingsScrollTiming = true; }
+            else if (a == L"--settings-tools") { settingsOpen = true; settingsScrollTools = true; }
             else if (a == L"--listen-timeout-at" && i + 1 < wargc) {
                 const std::wstring spec = wargv[++i];
                 const size_t colon = spec.find(L':');
@@ -533,6 +541,23 @@ int main(int /*argc*/, char** /*argv*/) {
     const float defaultListenTimeout = voiceCfg.listen_timeout;
     voiceCfg.listen_timeout =
         settings.get_float("timing", "listen_timeout", voiceCfg.listen_timeout);
+    // M3.8. The Tools toggles, read here for the strongest version of the
+    // language line's reason: this one *is* built into the session. The list
+    // becomes `--tools`/`--allowedTools` on the `claude` child's command line
+    // in build_llm, so it has to be settled before the session is constructed
+    // — there is no later.
+    //
+    // One key per group, defaulting to the group's own default, so a file that
+    // has never seen this section and a file with one key hand-deleted both
+    // land on the same place, and a key a future version adds is a non-event.
+    for (int i = 0; i < aii::kToolGroupCount; ++i) {
+        const aii::ToolGroup& g = aii::tool_group(i);
+        voiceCfg.tools.on[i] = settings.get_bool("tools", g.key, voiceCfg.tools.on[i]);
+    }
+    log::info("[tools] conversational instance: {} ({})",
+              aii::tool_summary(voiceCfg.tools),
+              aii::tool_list(voiceCfg.tools).empty() ? std::string("--tools \"\"")
+                                                     : aii::tool_list(voiceCfg.tools));
 
     // The voice loop loads its engines in the background while the window comes up.
     std::unique_ptr<aii::VoiceSession> session;
@@ -876,6 +901,14 @@ int main(int /*argc*/, char** /*argv*/) {
     // the surface at all.
     if (settingsOpen) uiState.settings_open = true;
     uiState.settings_scroll_timing = settingsScrollTiming;
+    uiState.settings_scroll_tools = settingsScrollTools;
+    // M3.8. Same idea again, and here it is the whole feature: the tick boxes
+    // are seeded from the value the session was actually built with, and
+    // `toolsInForce` keeps a copy of it that nothing ever writes to. The
+    // section draws the difference between the two, which is the only honest
+    // thing it can do until a toggle can reach a running child (M3.6).
+    uiState.tools = voiceCfg.tools;
+    toolsInForce = voiceCfg.tools;
     log::info("[listen-timeout] setting: {} ({:.1f} s configured, default {:.1f} s)",
               uiState.listen_timeout_on ? std::to_string(uiState.listen_timeout_sec) + " s"
                                         : std::string("never"),
@@ -2142,6 +2175,12 @@ int main(int /*argc*/, char** /*argv*/) {
             avatarOptions.japanese_voice = snap.japanese_voice;
             avatarOptions.japanese_voice_error = snap.japanese_voice_error;
             avatarOptions.stt_language = aii::stt_language_for(snap.effective_langs);
+            // M3.8. What the child was launched with, beside what the boxes
+            // say. Unlike every other pair above it these cannot be reconciled
+            // mid-run — `--allowedTools` is fixed at process start — so the
+            // surface's job is to show the gap and name the restart.
+            avatarOptions.tools_in_force = toolsInForce;
+            avatarOptions.tools_supported = voiceCfg.backend != "api";
             const aii::AvatarUiResult r =
                 aii::draw_avatar_ui(uiState, snap, avatarOptions, session != nullptr,
                                     session && session->mic_open(),
@@ -2200,6 +2239,12 @@ int main(int /*argc*/, char** /*argv*/) {
             // The same expression that was pushed into the session above, so
             // what is remembered and what is running cannot diverge.
             settings.set_float("timing", "listen_timeout", aii::listen_timeout_seconds(uiState));
+            // M3.8. One boolean per group, under "tools". Written every frame
+            // like the rest and debounced like the rest; the file is the only
+            // place a change to these can go, since the running child cannot
+            // take one.
+            for (int i = 0; i < aii::kToolGroupCount; ++i)
+                settings.set_bool("tools", aii::tool_group(i).key, uiState.tools.on[i]);
             // The scrim and the caption belong to the loader, not the panel:
             // the loading screen has to look the same whether or not there is
             // anything underneath it. The foreground draw list puts them over
