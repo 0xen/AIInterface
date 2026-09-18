@@ -97,7 +97,7 @@ bool WorkerPool::spawn(const std::string& name, const std::string& cwd, const st
   o.exe = exe_;
   o.system_prompt = kWorkerPrompt;
   o.effort = "medium";
-  o.tools = true;
+  o.tools = "default";  // every built-in tool; the conversational instance gets two
   o.cwd = cwd;
   o.bypass_permissions = bypass_;  // nothing here can answer a permission prompt
   // Deliberately NOT suppress_cli_context (M3.5): a worker is a coding agent

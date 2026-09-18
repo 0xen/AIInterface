@@ -258,6 +258,21 @@ void VoiceSession::load() {
 
   enter(0);
   if (!build_llm(cfg_, eng_, logger, &err)) return fail(err);
+  // M3.7. A web search adds seconds to a turn in which the microphone is shut
+  // and nothing is spoken, and from outside that is indistinguishable from the
+  // app having died. The avatar already covers the shape of it — the turn is
+  // `Thinking`, so the thought bubble goes up on its own once the delay passes
+  // — but the bubble says "still here", not "looking something up", and it is
+  // the same bubble a two-second reply raises. This is the line that says
+  // which. It is only ever set mid-turn; `run_turn` puts "ready." back at the
+  // end, and a turn with no tool call never touches it.
+  if (eng_.llm) {
+    eng_.llm->set_on_activity([this](const std::string& what) {
+      const bool web = what == "WebSearch" || what == "WebFetch";
+      rend::log::info("[tool] {}", what);
+      set_status(web ? "searching the web..." : "thinking... (" + what + ")");
+    });
+  }
   enter(1);
   if (!build_stt(cfg_, eng_, logger, &err)) return fail(err);
   enter(2);

@@ -22,11 +22,24 @@ class ClaudeCodeClient final : public LlmClient {
     std::string system_prompt;  // replaces Claude Code's default system prompt
     std::string model;          // empty = the CLI's configured default
     std::string effort = "low";
-    bool tools = false;         // false = `--tools ""` (pure chat)
+    // Which built-in tools this instance gets, and — because the two cannot be
+    // chosen independently here — how permission is settled for them. Nothing
+    // in this app can answer a permission prompt, so every shape below has to
+    // end at "runs" or "denied", never at "asks".
+    //   ""         `--tools ""`: no tools at all. Nothing can prompt.
+    //   "default"  every built-in tool; the flag is omitted entirely, which is
+    //              what workers ran on before this was a string. Pair with
+    //              `bypass_permissions`.
+    //   a list     exactly those tools, e.g. "WebSearch,WebFetch" — and the
+    //              same list is passed to `--allowedTools`, with
+    //              `--permission-prompts none` behind it. See start().
+    std::string tools;
     std::string cwd;            // working directory for the child (empty = inherit)
-    // Tool-enabled instances only: skip the CLI's permission prompts, which
+    // `tools == "default"` only: skip the CLI's permission prompts, which
     // nothing can answer from this app. Leave false for anything that touches
-    // a directory the user has not agreed to hand over.
+    // a directory the user has not agreed to hand over. A named tool list does
+    // not use this — it pre-approves its own tools by name instead, so the
+    // blanket bypass never has to be handed to an instance the user talks to.
     bool bypass_permissions = false;
     // M3.5. `--system-prompt` replaces the CLI's *default* prompt and suppresses
     // nothing the CLI discovers for itself: measured against 2.1.273, the
@@ -36,9 +49,13 @@ class ClaudeCodeClient final : public LlmClient {
     //
     // It is an option and not the default because the two kinds of instance
     // want opposite things. The conversational one must run on *our* prompts
-    // alone and loses nothing by it — it has no tools, so the MCP servers,
-    // hooks, plugins and custom agents `--safe-mode` also disables were never
-    // reachable from it. A worker wants all of those, and wants the
+    // alone. It used to lose nothing by it, having no tools at all; since M3.7
+    // gave it `WebSearch`/`WebFetch` this flag is load-bearing a second way,
+    // and measured so: `--tools` names members of the *built-in* set only, so
+    // the user's MCP servers still attach their tools alongside a named
+    // allowlist. Without this flag the same two-tool instance reported nine
+    // extra `mcp__...` tools it had no business holding. `--safe-mode` is what
+    // keeps them out. A worker wants all of those, and wants the
     // `CLAUDE.md` of the repo it was pointed at, which is exactly the file
     // that belongs in a coding agent's context. So: conversational on,
     // workers off.
@@ -51,16 +68,12 @@ class ClaudeCodeClient final : public LlmClient {
     bool suppress_cli_context = false;
   };
 
-  // What a tool-enabled instance is doing, as it happens: "read main.cpp",
-  // "bash: cmake --build ...". Called on the reader thread.
-  using ActivityFn = std::function<void(const std::string& what)>;
-
   explicit ClaudeCodeClient(Options opt) : opt_(std::move(opt)) {}
   ~ClaudeCodeClient() override;
 
   bool start(std::string* error);
-  // Set before the first turn; safe to leave unset.
-  void set_on_activity(ActivityFn fn);
+  // Called on the reader thread. See LlmClient::set_on_activity.
+  void set_on_activity(ActivityFn fn) override;
   const char* name() const override { return "claude-code"; }
   ChatResult turn(const std::string& user_text, const DeltaFn& on_delta,
                   std::atomic<bool>* cancel = nullptr) override;

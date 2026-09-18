@@ -84,8 +84,32 @@ bool ClaudeCodeClient::start(std::string* error) {
                     " --include-partial-messages --no-session-persistence";
   if (!opt_.effort.empty()) cmd += " --effort " + opt_.effort;
   if (!opt_.model.empty()) cmd += " --model " + quote_arg(opt_.model);
-  if (!opt_.tools) cmd += " --tools \"\"";
-  if (opt_.tools && opt_.bypass_permissions) cmd += " --permission-mode bypassPermissions";
+  // Tools, and the permission flags that have to travel with them. See
+  // Options::tools. The rule this encodes is that no configuration reachable
+  // from here may leave the CLI *asking*: nothing in this app can answer, and a
+  // question nobody answers is a conversation frozen forever.
+  //
+  // M3.7, measured against 2.1.275 rather than read off `--help`, which says
+  // nothing about any of it: **both** `WebSearch` and `WebFetch` need
+  // permission. Naming them in `--tools` only makes them exist; each one's
+  // first call comes back as a `permission_denials` entry and the model
+  // apologises that it has not been allowed to search. `--allowedTools` with
+  // the same names is what actually grants them, and it grants `WebFetch` for
+  // every domain — the per-domain approval the interactive CLI asks for does
+  // not reappear here. A cross-host redirect is handed back to the model as
+  // data ("REDIRECT DETECTED"), never as a prompt, and `file://` is refused by
+  // URL validation, so `WebFetch` buys no local reach.
+  //
+  // `--permission-prompts none` is the backstop for everything not on that
+  // list: anything that would prompt is denied outright. In stream-json mode
+  // the CLI never sent a permission `control_request` to this host even
+  // without it — it denied and carried on — but that is the SDK deciding we
+  // have no handler, not a promise, and this turns the promise into a flag.
+  if (opt_.tools != "default") cmd += " --tools " + quote_arg(opt_.tools);
+  if (!opt_.tools.empty() && opt_.tools != "default")
+    cmd += " --allowedTools " + quote_arg(opt_.tools) + " --permission-prompts none";
+  if (opt_.tools == "default" && opt_.bypass_permissions)
+    cmd += " --permission-mode bypassPermissions";
   if (!opt_.system_prompt.empty()) cmd += " --system-prompt " + quote_arg(opt_.system_prompt);
   // See Options::suppress_cli_context. Two flags because they suppress two
   // different things: --safe-mode takes the project CLAUDE.md and the user's

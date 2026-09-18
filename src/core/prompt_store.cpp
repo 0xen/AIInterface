@@ -575,6 +575,12 @@ std::vector<PromptRow> cli_context_rows() {
   // lie. The row's job is to stop the list above it being read as complete.
   static const char* const kItems[] = {
       "Harness preamble (tool and safety instructions)",
+      // M3.7. Not irreducible like the rest of this list — this app chose it,
+      // in engines.cpp — but it is delivered the same way, as tool schemas the
+      // CLI writes into the context, and a reader asking "what is in Claude's
+      // head" should not have to infer it from the fact that answers sometimes
+      // come back current.
+      "Web search and fetch tool definitions",
       "Working directory",
       "Git status of the working directory",
       "Platform and OS version",

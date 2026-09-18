@@ -35,10 +35,20 @@ struct UsageStats {
 
 using DeltaFn = std::function<void(const std::string&)>;
 
+// What a tool-enabled instance is doing, as it happens: "WebSearch",
+// "bash: cmake --build ...". Called from the backend's reader thread, mid-turn.
+using ActivityFn = std::function<void(const std::string& what)>;
+
 class LlmClient {
  public:
   virtual ~LlmClient() = default;
   virtual const char* name() const = 0;
+  // Set before the first turn; safe to leave unset, and a backend with no
+  // tools never calls it. It exists on the interface rather than on the one
+  // backend that reports activity because the caller that most needs it — the
+  // voice loop, which has to explain a silent several-second turn — holds an
+  // `LlmClient`, not a `ClaudeCodeClient`.
+  virtual void set_on_activity(ActivityFn /*fn*/) {}
   // Blocks until the reply is complete. on_delta may be called from another thread.
   virtual ChatResult turn(const std::string& user_text, const DeltaFn& on_delta,
                           std::atomic<bool>* cancel = nullptr) = 0;

@@ -22,6 +22,11 @@ void say(const LogFn& log, const std::string& s) {
   if (log) log(s);
 }
 
+// The whole of what the conversational instance may do. Kept here, next to the
+// only place that sets it, so that widening it is a visible edit to one line
+// rather than a flag appearing somewhere far away.
+const char kConversationalTools[] = "WebSearch,WebFetch";
+
 }  // namespace
 
 bool build_llm(const Config& cfg, Engines& out, const LogFn& log, std::string* error) {
@@ -41,10 +46,18 @@ bool build_llm(const Config& cfg, Engines& out, const LogFn& log, std::string* e
   o.system_prompt = system_prompt();
   o.model = cfg.model_override;
   o.effort = cfg.effort;
-  o.tools = false;
+  // M3.7. The one thing the instance the user talks to can do for itself.
+  // Web only, and named rather than filtered: everything that writes, builds
+  // or touches a file is still a worker's job, and `--tools` with an explicit
+  // list is the CLI's own allowlist, so nothing is opted out of — it is opted
+  // in to, two entries at a time. `ClaudeCodeClient::start` turns this list
+  // into the permission flags that go with it; see the comment there for why
+  // it cannot be set without them.
+  o.tools = kConversationalTools;
   // The conversational instance runs on this app's prompts and nothing the CLI
   // found for itself (M3.5). Workers deliberately keep everything — see
-  // WorkerPool::spawn, which does not set this.
+  // WorkerPool::spawn, which does not set this. With tools on this also keeps
+  // the user's MCP servers out, which `--tools` by itself does not do.
   o.suppress_cli_context = true;
   auto cc = std::make_unique<ClaudeCodeClient>(o);
   std::string err;
@@ -53,7 +66,8 @@ bool build_llm(const Config& cfg, Engines& out, const LogFn& log, std::string* e
     return false;
   }
   say(log, "claude code launched  " + fmt_secs(t) + "  (" +
-               (cfg.model_override.empty() ? "default model" : cfg.model_override) + ")");
+               (cfg.model_override.empty() ? "default model" : cfg.model_override) + ", tools: " +
+               kConversationalTools + ")");
   out.llm = std::move(cc);
   return true;
 }
