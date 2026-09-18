@@ -166,6 +166,58 @@ struct Schedule {
   double seconds_until(std::chrono::steady_clock::time_point now) const;
 };
 
+// M2b.2. One schedule request, in the fields whoever wrote it wrote them in:
+// the ```aii``` block's `in= say= task= cwd= name= label= grade=`, and the
+// bus's `schedule.create` message, which carries the same names deliberately.
+// It exists so that the two doors into this book cannot drift apart -- the
+// absolute-`cwd` rule, the defaulting of `label` and `report`, and above all
+// **the rule that turns a shape into a grade** are policy, and policy written
+// twice is policy that disagrees with itself the second time somebody edits
+// one copy of it.
+struct ScheduleRequest {
+  std::string in;     // the delay, as parse_delay() reads it
+  std::string say;    // the exact words to speak when it fires
+  std::string task;   // work for a deferred worker; makes the kind "worker"
+  std::string cwd;    // where that worker runs. Required, and absolute.
+  std::string name;   // the worker's name
+  std::string label;  // short human words for the pending list
+  std::string grade;  // "fixed"/"phrased"; empty means "take it from the shape"
+};
+
+// Why a request was refused. The *words* are not here: the ```aii``` block
+// speaks its refusals in the user's own register through `app_text()`, and the
+// bus writes one line into the log for a script to read, because a script is
+// not a person and being spoken at is not an error report. One enum, two
+// vocabularies -- the same division of labour the rest of this file keeps.
+enum class ScheduleRefusal {
+  None,
+  Delay,           // no in=, or one parse_delay() would not take
+  NoFolder,        // work to do and no cwd= to do it in
+  RelativeFolder,  // a cwd= that is not absolute
+  NothingToDo,     // neither say= nor task=
+};
+
+// A short, fixed reason string for the log and for the bus's refusal line.
+// Never spoken; `app_text()` owns everything the user hears.
+const char* to_string(ScheduleRefusal why);
+
+// Maps a request onto an action, a grade and a delay in seconds. It does
+// **not** touch the book: the caller creates, so the caller owns the id, the
+// book's own refusal ("full") and what it says about either.
+//
+// **The shape is the grade, and `grade=` overrides it.** A request carrying
+// words is `Fixed` -- instant, no usage, cannot race a live turn. One carrying
+// work is `Phrased`, because a sentence written ten minutes early cannot
+// report a result nobody had yet. That rule is what lets the conversational
+// instance pick the grade correctly by answering a question about the request
+// rather than by setting a label it has no stake in (M2b.3), which is why
+// `grade=` is kept out of its prompt. **A script has no shape to signal with**
+// -- no conversation, no register, and "do the work and then just say this
+// line" is a perfectly ordinary thing for a script to want -- so the bus states
+// `grade=` outright, and this is the one place it is honoured.
+ScheduleRefusal build_schedule(const ScheduleRequest& r, ScheduleAction* action,
+                               ReportGrade* grade, double* seconds, std::string* detail);
+
 // The book. Process-wide like `AppBus` and `ButtonRegistry`, and for the same
 // reason: its producers are the frame loop, the turn thread (an ```aii```
 // block runs there) and a script thread, and one store behind one mutex is

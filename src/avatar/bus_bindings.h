@@ -23,10 +23,56 @@
 //   toolbar.clear  -> ButtonRegistry::clear_registered
 //   script.status  -> the Scripts line in the settings surface (M2.6)
 //   script.log     -> one [py] line in the app's log
+//   schedule.create -> build_schedule() + ScheduleBook::create (M2b.2)
+//   schedule.cancel -> VoiceSession::cancel_schedule, the AI's own two lookups
+//   schedule.list   -> VoiceSession::pending_items, back out as events
 //
-// **Adding a family is a data change.** `AppBus::add_family("task", handler)`
-// and one function; M2.6's `script` family was exactly that — two lines here
-// and nothing at all in `app_bus.*` — and M2b's scheduled tasks are next.
+// **Adding a family is a data change.** `AppBus::add_family("schedule",
+// handler)` and one function; M2.6's `script` family was exactly that — two
+// lines here and nothing at all in `app_bus.*` — and M2b.2's was the same.
+//
+// ## The schedule family (M2b.2), and why it is called `schedule`
+//
+// `app_bus.h` sketched this family as `task`. It is `schedule`, because `task=`
+// is already a *field* of a schedule — the instruction a deferred worker
+// carries — and `{"t":"task.create","task":"..."}` would name two different
+// things with one word on one line. Everything else in this feature is called
+// schedule: the primitive, the book, the ```aii``` verb, the log prefix.
+//
+//   {"t":"schedule.create","in":"10m","say":"tea is ready"}
+//   {"t":"schedule.create","in":"30m","task":"build main and say if it broke",
+//    "cwd":"C:\\github\\AIInterface","name":"build","grade":"phrased"}
+//   {"t":"schedule.cancel","id":3}
+//   {"t":"schedule.list"}
+//
+// and back out:
+//
+//   {"t":"schedule.created","id":3,"kind":"timer","grade":"fixed","in":600.0}
+//   {"t":"schedule.refused","reason":"could not read the delay"}
+//   {"t":"schedule.cancelled","id":3,"ok":true}
+//   {"t":"schedule.pending","id":3,"kind":"timer","label":"tea","in":540.0}
+//   {"t":"schedule.list","count":1}
+//   {"t":"schedule.fired","id":3,"kind":"timer","grade":"fixed"}
+//
+// **`grade=` is the point of this family, not an extra.** M2b.3 gives the
+// conversational instance two *shapes* — `say=` or `task=`+`cwd=` — and keeps
+// `grade=` out of its prompt on purpose, so it picks the report grade by
+// answering a question about the request rather than by setting a label. A
+// script has no shape to signal with and no register to be judged in, so it
+// says the grade outright and `build_schedule()` honours it. A script can
+// therefore express everything the ```aii``` verb can and one thing it cannot:
+// a `Fixed` worker — do the work, then say exactly this — which
+// `deliver_schedule()` was already written to accept.
+//
+// **The reply rides the one event queue like everything else.** `created`,
+// `cancelled` and the `pending` rows are published, not returned, because
+// there is no return path on a bus — and `AppBus::drain_events()` empties the
+// queue for whoever calls it first. Two *scripts* are fine: `aii_pyhost`
+// drains once and fans out to a per-thread cursor. A script racing `--bus-out`
+// is not, and that is the bus's known shape, not this family's: nothing here
+// makes it worse. An `echo` field is copied from the request onto `created`
+// and `refused` so a script that shares the bus can recognise its own replies
+// without matching on content.
 //
 // Everything with a lease on it — clip, sprite, cells — expires. A script that
 // dies mid-performance leaves the avatar back under the C++ policy within
@@ -86,6 +132,11 @@ class BusBindings {
     AvatarSource* source = nullptr;
     AvatarController* controller = nullptr;
     AvatarUiState* ui = nullptr;
+    // M2b.2. Null on a run with no voice (`--no-voice`). Creating a schedule
+    // still works without it — the book is its own singleton — but cancelling
+    // one that has already started a worker, and listing those workers, are
+    // the session's to answer, so both degrade to the book alone and say so.
+    VoiceSession* session = nullptr;
     // --avatar pointed at a directory, or --clip/--sprite pinned the art. Both
     // mean the command line is holding the avatar for a look at it, and a
     // script must not quietly take it back.
@@ -137,6 +188,7 @@ class BusBindings {
   void on_theme(const BusMessage& m, std::string* error);
   void on_toolbar(const BusMessage& m, std::string* error);
   void on_script(const BusMessage& m, std::string* error);
+  void on_schedule(const BusMessage& m, std::string* error);
   float lease_from(const BusMessage& m) const;
 
   Context ctx_;

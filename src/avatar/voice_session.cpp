@@ -1446,6 +1446,88 @@ void VoiceSession::request_cancel(std::vector<std::uint64_t> ids) {
   for (std::uint64_t id : ids) pending_cancels_.push_back(id);
 }
 
+// M2b.2. One id, cancelled, with nothing said about it. Lifted out of
+// apply_cancels() unchanged so the bus and the ```aii``` verb cancel through
+// exactly the same two lookups in the same order; the sentence stays behind in
+// apply_cancels(), because only one of the two callers has already promised
+// the user out loud that this worked.
+bool VoiceSession::cancel_schedule(std::uint64_t id) {
+  // The book first. This is the ordinary case and it is exact: ids are
+  // monotonic and never reused, so a cancel that arrives after the schedule
+  // fired is a clean miss and can never take somebody else's timer with it.
+  if (ScheduleBook::instance().cancel(id)) {
+    log("[schedule] cancelled id=" + std::to_string(id));
+    return true;
+  }
+  // Then the workers a schedule already started. Killing one of these is the
+  // honest meaning of "cancel that" when the thing has moved on from being a
+  // timer to being work in progress: the user asked for it, it has not
+  // reported, and they have changed their mind.
+  std::string kill;
+  bool handled = false;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    for (auto it = scheduled_workers_.begin(); it != scheduled_workers_.end(); ++it) {
+      if (it->id != id) continue;
+      handled = true;
+      if (it->running) {
+        kill = it->name;
+        scheduled_workers_.erase(it);
+      } else {
+        // Still inside spawn(). Marked rather than erased: deliver_schedule()
+        // is holding this record's other end and will stop the process the
+        // moment it exists. Reported as stopped because it will be, and the
+        // frame loop is the only thread that can act on it either way.
+        it->cancelled = true;
+      }
+      break;
+    }
+  }
+  if (!handled) {
+    log("[schedule] nothing to cancel for id=" + std::to_string(id));
+    return false;
+  }
+  // Recorded before the stop, not after: stop() joins the worker thread and
+  // the report runs inside that join, so a mark set afterwards would arrive
+  // too late to suppress the very report it exists to suppress.
+  if (!kill.empty()) {
+    silence_worker(kill);
+    if (workers_) workers_->stop(kill);
+  }
+  log("[schedule] cancelled id=" + std::to_string(id) + " by stopping the work it started");
+  return true;
+}
+
+// M2b.2. The same three sources pending_context() reads, handed back as data
+// for the bus to publish. It is deliberately *not* refactored into the shared
+// body of pending_context(): that function's product is a paragraph of English
+// aimed at the model, with hedged units and an instruction about ids, and none
+// of that belongs on a wire a script reads.
+std::vector<VoiceSession::PendingItem> VoiceSession::pending_items() const {
+  const auto now = std::chrono::steady_clock::now();
+  std::vector<PendingItem> out;
+  for (const Schedule& s : ScheduleBook::instance().list()) {
+    PendingItem it;
+    it.id = s.id;
+    it.kind = s.action.kind;
+    it.label = s.action.label.empty() ? s.action.name : s.action.label;
+    it.phrased = s.grade == ReportGrade::Phrased;
+    it.seconds = s.seconds_until(now);
+    out.push_back(std::move(it));
+  }
+  std::lock_guard<std::mutex> l(mutex_);
+  for (const ScheduledWorker& w : scheduled_workers_) {
+    PendingItem it;
+    it.id = w.id;
+    it.kind = "running";
+    it.label = w.label;
+    it.phrased = w.phrased;
+    it.seconds = std::chrono::duration<double>(now - w.started).count();
+    out.push_back(std::move(it));
+  }
+  return out;
+}
+
 void VoiceSession::apply_cancels() {
   std::vector<std::uint64_t> ids;
   {
@@ -1455,54 +1537,12 @@ void VoiceSession::apply_cancels() {
   }
   int stopped = 0, missed = 0;
   for (std::uint64_t id : ids) {
-    // The book first. This is the ordinary case and it is exact: ids are
-    // monotonic and never reused, so a cancel that arrives after the schedule
-    // fired is a clean miss and can never take somebody else's timer with it.
-    if (ScheduleBook::instance().cancel(id)) {
-      log("[schedule] cancelled id=" + std::to_string(id));
+    if (cancel_schedule(id)) {
       ++stopped;
       continue;
     }
-    // Then the workers a schedule already started. Killing one of these is the
-    // honest meaning of "cancel that" when the thing has moved on from being a
-    // timer to being work in progress: the user asked for it, it has not
-    // reported, and they have changed their mind.
-    std::string kill;
-    bool handled = false;
-    {
-      std::lock_guard<std::mutex> l(mutex_);
-      for (auto it = scheduled_workers_.begin(); it != scheduled_workers_.end(); ++it) {
-        if (it->id != id) continue;
-        handled = true;
-        if (it->running) {
-          kill = it->name;
-          scheduled_workers_.erase(it);
-        } else {
-          // Still inside spawn(). Marked rather than erased: deliver_schedule()
-          // is holding this record's other end and will stop the process the
-          // moment it exists. Reported as stopped because it will be, and the
-          // frame loop is the only thread that can act on it either way.
-          it->cancelled = true;
-        }
-        break;
-      }
-    }
-    if (handled) {
-      // Recorded before the stop, not after: stop() joins the worker thread and
-      // the report runs inside that join, so a mark set afterwards would arrive
-      // too late to suppress the very report it exists to suppress.
-      if (!kill.empty()) {
-        silence_worker(kill);
-        if (workers_) workers_->stop(kill);
-      }
-      log("[schedule] cancelled id=" + std::to_string(id) + " by stopping the work it started");
-      ++stopped;
-      continue;
-    }
-    log("[schedule] nothing to cancel for id=" + std::to_string(id));
     ++missed;
   }
-  if (missed == 0) return;
   // **A cancel that misses must be heard.** This is the failure the whole task
   // exists to avoid: the model has already said "done, cancelled" out loud by
   // the time this block runs, so a miss that only reached the log would leave
@@ -1711,51 +1751,29 @@ namespace {
 //
 // Returns an empty string on success, or the sentence to say.
 std::string create_schedule(const Command& c, std::string* detail) {
-  double seconds = 0.0;
-  if (!parse_delay(c.in, &seconds)) {
-    *detail = c.in.empty() ? "no in= given" : ("could not read in=\"" + c.in + "\"");
-    return app_text(Msg::RefuseDelay);
-  }
-
+  // M2b.2. The mapping itself now lives in `build_schedule()`, beside the book,
+  // because the bus is a second door onto the same policy and the shape-is-the-
+  // grade rule is the part that must not be written twice. What stays here is
+  // the half that is this door's alone: the *words*. A refusal the model
+  // triggered is spoken in the user's register; the bus's is a line in the log.
+  ScheduleRequest req;
+  req.in = c.in;
+  req.say = c.say;
+  req.task = c.task;
+  req.cwd = c.cwd;
+  req.name = c.name;
+  req.label = c.label;
+  req.grade = c.grade;
   ScheduleAction action;
-  action.label = c.label;
-  // The shape *is* the grade. A line carrying words to say is a fixed report
-  // — instant, no usage, cannot race a live turn. A line carrying work is a
-  // phrased one, because a sentence written ten minutes early cannot report a
-  // result nobody had yet. `grade=` overrides only if something set it
-  // deliberately, which today is the bus (M2b.2), not the model.
-  if (!c.task.empty()) {
-    action.kind = "worker";
-    action.task = c.task;
-    action.name = c.name.empty() ? std::string("task") : c.name;
-    // Captured now and never re-resolved: the deferred worker runs with
-    // permissions bypassed in the folder it was promised, possibly while the
-    // user is away from the desk. Refused rather than defaulted — the process
-    // working directory is almost never the one that was meant, and a worker
-    // that ran there would be a surprise ten minutes after the conversation
-    // that could have caught it.
-    if (c.cwd.empty()) {
-      *detail = "no cwd= on a scheduled worker";
-      return app_text(Msg::RefuseNoFolder);
-    }
-    if (!std::filesystem::path(c.cwd).is_absolute()) {
-      *detail = "cwd=\"" + c.cwd + "\" is not an absolute path";
-      return app_text(Msg::RefuseRelativeFolder);
-    }
-    if (action.label.empty()) action.label = action.name;
-    if (action.report.empty()) action.report = c.say.empty() ? action.label : c.say;
-  } else if (!c.say.empty()) {
-    action.kind = "timer";
-    action.report = c.say;
-    if (action.label.empty()) action.label = c.say;
-  } else {
-    *detail = "neither say= nor task= given";
-    return app_text(Msg::RefuseNothingToDo);
+  ReportGrade grade = ReportGrade::Fixed;
+  double seconds = 0.0;
+  switch (build_schedule(req, &action, &grade, &seconds, detail)) {
+    case ScheduleRefusal::Delay: return app_text(Msg::RefuseDelay);
+    case ScheduleRefusal::NoFolder: return app_text(Msg::RefuseNoFolder);
+    case ScheduleRefusal::RelativeFolder: return app_text(Msg::RefuseRelativeFolder);
+    case ScheduleRefusal::NothingToDo: return app_text(Msg::RefuseNothingToDo);
+    case ScheduleRefusal::None: break;
   }
-  action.cwd = c.cwd.empty() ? std::filesystem::current_path().string() : c.cwd;
-
-  ReportGrade grade = action.kind == "worker" ? ReportGrade::Phrased : ReportGrade::Fixed;
-  if (!c.grade.empty()) grade = grade_from_string(c.grade);
 
   std::string err;
   const std::uint64_t id = ScheduleBook::instance().create(

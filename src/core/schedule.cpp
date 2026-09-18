@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <utility>
 
 #include "core/text_util.h"
@@ -90,6 +91,74 @@ const char* to_string(ReportGrade grade) {
 
 ReportGrade grade_from_string(const std::string& s) {
   return s == "phrased" ? ReportGrade::Phrased : ReportGrade::Fixed;
+}
+
+const char* to_string(ScheduleRefusal why) {
+  switch (why) {
+    case ScheduleRefusal::Delay: return "could not read the delay";
+    case ScheduleRefusal::NoFolder: return "work to do and no cwd to do it in";
+    case ScheduleRefusal::RelativeFolder: return "cwd is not an absolute path";
+    case ScheduleRefusal::NothingToDo: return "neither say nor task";
+    case ScheduleRefusal::None: break;
+  }
+  return "ok";
+}
+
+// M2b.2. The one mapping from "what was asked for" to "what the book holds",
+// shared by the ```aii``` verb and the bus. Everything here was M2b.3's, moved
+// rather than copied: the second copy is the bug.
+ScheduleRefusal build_schedule(const ScheduleRequest& r, ScheduleAction* action,
+                               ReportGrade* out_grade, double* out_seconds,
+                               std::string* detail) {
+  const auto say = [detail](std::string text) {
+    if (detail) *detail = std::move(text);
+  };
+  double seconds = 0.0;
+  if (!parse_delay(r.in, &seconds)) {
+    say(r.in.empty() ? "no in= given" : ("could not read in=\"" + r.in + "\""));
+    return ScheduleRefusal::Delay;
+  }
+
+  ScheduleAction a;
+  a.label = r.label;
+  if (!r.task.empty()) {
+    a.kind = "worker";
+    a.task = r.task;
+    a.name = r.name.empty() ? std::string("task") : r.name;
+    // Captured now and never re-resolved: the deferred worker runs with
+    // permissions bypassed in the folder it was promised, possibly while the
+    // user is away from the desk. Refused rather than defaulted -- the process
+    // working directory is almost never the one that was meant, and a worker
+    // that ran there would be a surprise ten minutes after the conversation
+    // that could have caught it. A script gets exactly the same rule: it is
+    // the *deferral* that makes a defaulted folder dangerous, not who asked.
+    if (r.cwd.empty()) {
+      say("no cwd= on a scheduled worker");
+      return ScheduleRefusal::NoFolder;
+    }
+    if (!std::filesystem::path(r.cwd).is_absolute()) {
+      say("cwd=\"" + r.cwd + "\" is not an absolute path");
+      return ScheduleRefusal::RelativeFolder;
+    }
+    if (a.label.empty()) a.label = a.name;
+    if (a.report.empty()) a.report = r.say.empty() ? a.label : r.say;
+  } else if (!r.say.empty()) {
+    a.kind = "timer";
+    a.report = r.say;
+    if (a.label.empty()) a.label = r.say;
+  } else {
+    say("neither say= nor task= given");
+    return ScheduleRefusal::NothingToDo;
+  }
+  a.cwd = r.cwd.empty() ? std::filesystem::current_path().string() : r.cwd;
+
+  ReportGrade grade = a.kind == "worker" ? ReportGrade::Phrased : ReportGrade::Fixed;
+  if (!r.grade.empty()) grade = grade_from_string(r.grade);
+
+  if (action) *action = std::move(a);
+  if (out_grade) *out_grade = grade;
+  if (out_seconds) *out_seconds = seconds;
+  return ScheduleRefusal::None;
 }
 
 double Schedule::seconds_until(std::chrono::steady_clock::time_point now) const {

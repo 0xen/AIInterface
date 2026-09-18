@@ -892,6 +892,11 @@ int main(int /*argc*/, char** /*argv*/) {
         bc.avatar_pinned = !controllerOwnsAvatar;
         bc.dir_override = !avatarDirOverride.empty();
         bc.publish_text = busText;
+        // M2b.2. The schedule family cancels and lists through the session,
+        // because a schedule that has already fired is a running worker and
+        // only the session knows about those. Null on a --no-voice run, which
+        // the handler answers from the book alone.
+        bc.session = session.get();
         bus.install(bc);
     }
     aii::BusFileHatch busFiles;
@@ -1468,6 +1473,17 @@ int main(int /*argc*/, char** /*argv*/) {
                     s.id, s.action.kind, aii::to_string(s.grade),
                     std::chrono::duration<double, std::milli>(fireNow - s.due).count(),
                     onLoop ? "yes" : "NO", s.action.cwd, s.action.report);
+                // M2b.2. Published before it is delivered, and published
+                // whether or not anything is listening, like every other event
+                // on the bus. A script that scheduled something has no other
+                // way to know it happened: the report is spoken at the user,
+                // not sent back to the program that asked for it.
+                aii::AppBus::instance().publish(aii::BusLine("schedule.fired")
+                                                    .num("id", static_cast<double>(s.id), 0)
+                                                    .str("kind", s.action.kind)
+                                                    .str("grade", aii::to_string(s.grade))
+                                                    .str("label", s.action.label)
+                                                    .done());
                 if (session) session->deliver_schedule(s);
                 else log::warn("[schedule] no voice session: nothing to report through");
             }
