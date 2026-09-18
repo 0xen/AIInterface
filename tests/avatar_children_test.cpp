@@ -1,5 +1,7 @@
-// avatar_children_test (M7.5): the departing child and the returning merge,
-// driven straight at AvatarController with hand-written snapshots.
+// avatar_children_test (M7.5): the departing child (`child_depart`) and the
+// returning one (`child_merge`) -- not M2.3c's `depart`, which is the whole
+// avatar leaving the band -- driven straight at AvatarController with
+// hand-written snapshots.
 //
 // The window is not needed to see any of this and should not be used for it.
 // Everything M7.5 has to get right is decided inside `AvatarController::update()`,
@@ -106,11 +108,13 @@ int main(int argc, char** argv) {
   // clip_length() returns 0 for a clip the definition does not declare and
   // start_oneshot() then quietly does nothing, so a missing file would make
   // every case below pass by never animating at all.
-  check(def.find_trigger("depart") != nullptr, "the definition declares a `depart` trigger");
-  check(def.find_trigger("merge") != nullptr, "the definition declares a `merge` trigger");
-  if (const aii::AvatarTrigger* t = def.find_trigger("depart")) {
+  check(def.find_trigger("child_depart") != nullptr,
+        "the definition declares a `child_depart` trigger");
+  check(def.find_trigger("child_merge") != nullptr,
+        "the definition declares a `child_merge` trigger");
+  if (const aii::AvatarTrigger* t = def.find_trigger("child_depart")) {
     check(t->variants.size() >= 2,
-          "`depart` has " + std::to_string(t->variants.size()) +
+          "`child_depart` has " + std::to_string(t->variants.size()) +
               " variants, so it cannot read as a loop");
   }
 
@@ -121,13 +125,13 @@ int main(int argc, char** argv) {
     Run r{ctl, {}};
     r.frames(30, {});
     r.frames(kSettle, {worker("a", aii::WorkerPool::State::Working)});
-    check(r.saw("depart"), "a worker starting sends a child: " + r.trail());
-    check(r.seen.back() != "depart", "and the departure ends on its own");
+    check(r.saw("child_depart"), "a worker starting sends a child: " + r.trail());
+    check(r.seen.back() != "child_depart", "and the departure ends on its own");
     Run back{ctl, {}};
     back.frames(kSettle, {worker("a", aii::WorkerPool::State::Done)});
-    check(back.saw("merge"), "a worker reporting brings one home: " + back.trail());
+    check(back.saw("child_merge"), "a worker reporting brings one home: " + back.trail());
     check(back.saw("happy"), "and `happy` follows the arrival rather than replacing it");
-    check(back.seen.back() != "merge" && back.seen.back() != "happy",
+    check(back.seen.back() != "child_merge" && back.seen.back() != "happy",
           "and both end on their own");
   }
 
@@ -140,7 +144,7 @@ int main(int argc, char** argv) {
     r.frames(kSettle, {worker("a", aii::WorkerPool::State::Working),
                        worker("b", aii::WorkerPool::State::Working),
                        worker("c", aii::WorkerPool::State::Working)});
-    const int departs = r.count("depart");
+    const int departs = r.count("child_depart");
     check(departs == 1,
           "three workers starting on one frame send one child, not three (got " +
               std::to_string(departs) + "): " + r.trail());
@@ -158,13 +162,14 @@ int main(int argc, char** argv) {
     Run out{ctl, {}};
     out.frames(30, {});
     out.frames(kSettle, {worker("a", aii::WorkerPool::State::Working)});
-    check(out.saw("depart"), "the child leaves with the worker");
+    check(out.saw("child_depart"), "the child leaves with the worker");
     Run dead{ctl, {}};
     // Longer than kSettle: this case plays two clips back to back, and
     // `confused` carries the question mark, which holds the 0.80 s sprite
     // floor on the way out.
     dead.frames(kSettle * 3, {worker("a", aii::WorkerPool::State::Failed)});
-    check(dead.saw("merge"), "a worker that dies without reporting still returns it: " +
+    check(dead.saw("child_merge"),
+          "a worker that dies without reporting still returns it: " +
                                  dead.trail());
     check(dead.saw("confused"), "and the news it brings back is `confused`, not `happy`");
     check(dead.seen.back() == "idle" || dead.seen.back() == "blink",
@@ -182,7 +187,7 @@ int main(int argc, char** argv) {
     Run r{ctl, {}};
     r.frames(30, {});
     r.frames(kSettle, {});
-    check(!r.saw("depart") && !r.saw("merge"),
+    check(!r.saw("child_depart") && !r.saw("child_merge"),
           "a spawn that fails animates nothing: " + r.trail());
   }
 
@@ -195,7 +200,8 @@ int main(int argc, char** argv) {
     ctl.note_definition(def);
     Run r{ctl, {}};
     r.frames(kSettle, {worker("a", aii::WorkerPool::State::Working)});
-    check(!r.saw("depart"), "a worker already in flight at startup sends nobody: " + r.trail());
+    check(!r.saw("child_depart"),
+          "a worker already in flight at startup sends nobody: " + r.trail());
   }
 
   std::printf("\n%s\n", failures ? "FAILURES" : "all good");

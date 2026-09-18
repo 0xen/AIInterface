@@ -121,6 +121,20 @@ class AvatarController {
   // restarts, because two arrivals are two arrivals.
   void appear();
 
+  // M2.3c. The avatar is leaving: play an exit, and say how long the band has
+  // to stay up for it. Zero means this definition declares no exit art, and
+  // the caller should fall back to the plain dissolve.
+  //
+  // The counterpart of appear() in every respect, including that it is not
+  // this object's decision -- AvatarAppearance owns the band and therefore
+  // owns when the avatar is going. The returned length is the trigger's, which
+  // M7.1 measures as its *longest* variant: the choice of variant happens in
+  // the source at play time and has not been made when this returns, and a
+  // hold shorter than the clip would cut the departure off, while one that is
+  // too long merely holds an empty frame -- which by the exit contract is
+  // exactly nothing on screen.
+  float depart();
+
   // Clip lengths for the one-shots, taken from the definition rather than
   // guessed, and re-taken on every hot reload so retiming `happy.txt` retimes
   // how long the policy gives it.
@@ -221,6 +235,17 @@ class AvatarController {
     // here -- capture itself was never gated on the avatar, so this is about
     // what the slime is doing and nothing else.
     Entrance,
+    // M2.3c's exit: yields to nothing at all.
+    //
+    // Not stubbornness -- there is nothing left for it to yield *to*. The
+    // avatar is leaving because the band is being taken away, and the one
+    // thing that could reasonably interrupt a departure is the avatar being
+    // wanted again, which does not arrive here as a state to be pre-empted by:
+    // it arrives as a summon, and a summon starts an entrance one-shot that
+    // replaces this one outright. Letting the microphone cancel the exit as
+    // well would leave the slime standing in a band that is about to be
+    // removed, which is the dissolve with extra steps.
+    Exit,
   };
 
   struct Timing {
@@ -229,9 +254,10 @@ class AvatarController {
   };
 
   void start_oneshot(const char* clip, Yield yield);
-  // M7.5. A one-shot with another one booked behind it: `merge` then `happy`.
+  // M7.5. A one-shot with another one booked behind it: `child_merge` then
+  // `happy`.
   // If the definition has no art for `clip` the follow-up is started on its
-  // own, so an avatar that declares no `merge` still reacts to a finished
+  // own, so an avatar that declares no `child_merge` still reacts to a
   // worker exactly as it did before this milestone existed.
   void start_reaction(const char* clip, const char* follow, Yield yield);
   float clip_length(const char* clip, float fallback) const;
@@ -268,9 +294,11 @@ class AvatarController {
   // which only update() is holding. The cost is that the clip's first frame
   // lands one frame into an eighty-millisecond reveal.
   bool appear_pending_ = false;
-  // True for the single update() that starts an entrance: the dwell floors
-  // are suspended for it, because they exist to stop the *visible* clip
-  // flapping and the avatar was not visible.
+  // True for the single update() that starts an entrance or (M2.3c) an exit:
+  // the dwell floors are suspended for it. For an entrance because they exist
+  // to stop the *visible* clip flapping and the avatar was not visible; for an
+  // exit because the band is held open for a fixed length, so a floor would
+  // not delay the departure, it would shorten it.
   bool entered_first_frame_ = false;
 
   // The script's lease: which clip and how much of it is left.
@@ -333,13 +361,13 @@ class AvatarController {
   // finished and the flag is free. The alternative, a queue, would keep
   // playing departures after the thing they described had already finished.
   int running_ = 0;
-  bool pending_depart_ = false;
-  bool pending_merge_ = false;
-  // The reaction the pending merge is carrying: `happy` for a worker that
-  // reported, `confused` for one that fell over. It rides with the merge
+  bool pending_child_depart_ = false;
+  bool pending_child_merge_ = false;
+  // The reaction the pending `child_merge` is carrying: `happy` for a worker
+  // that reported, `confused` for one that fell over. It rides with the merge
   // rather than firing beside it so the two are one animation in sequence and
   // not two fighting over the same frame.
-  const char* merge_follow_ = nullptr;
+  const char* child_merge_follow_ = nullptr;
 
   bool ctx_high_ = false;
   float frustrated_wait_ = 0.0f;

@@ -1,7 +1,8 @@
-# merge: the worker has reported, and the child comes home. depart.txt run
-# backwards in substance if not in frames -- in by the same upper-left corner
-# it left by, the same three sizes as it closes, the same bud at the shoulder,
-# and then it is absorbed and the body takes the weight before settling.
+# child_merge: the worker has reported, and the child comes home.
+# child_depart.txt run backwards in substance if not in frames -- in by the
+# same upper-left corner it left by, the same three sizes as it closes, the
+# same bud at the shoulder, and then it is absorbed and the body takes the
+# weight before settling.
 # 14 fps, loop=false, 0.93 s.
 #
 # That symmetry is the whole job of this clip. A departure and a return that
@@ -53,7 +54,7 @@ o##.............
 ################
 ################
 
-# touching: the same bud depart.txt pinched off, in reverse
+# touching: the same bud child_depart.txt pinched off, in reverse
 @frame hold=2
 ................
 .###............

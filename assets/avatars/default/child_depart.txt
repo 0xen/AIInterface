@@ -1,0 +1,148 @@
+# child_depart: a worker has been sent off. A bud swells on the left shoulder,
+# pinches off into a child slime, and drifts up and out past the top-left
+# corner; the parent watches it go. 14 fps, loop=false, 1.0 s.
+#
+# The *child* leaves here, not the avatar. M2.3c's `depart` is the whole slime
+# walking out of the band, and it ends on an empty frame; this one ends on
+# idle, because the parent is still standing there when it is over. They are
+# separate triggers for exactly that reason -- `child_depart` and `child_merge`
+# are the worker pair, `depart` is the avatar's own exit.
+#
+# Everything is in the base layer and nothing is in @overlay, which is the
+# opposite of what the sprite accessories do and is deliberate. The overlay
+# exists so an accessory never destroys the body art underneath it; the child
+# never passes over the body -- it lives in the empty corridor above the left
+# shoulder, x0-x3 of rows 0-2, which the resting drawings leave clear -- so
+# there is nothing to protect, and one drawing per frame is easier to read in
+# a diff than two.
+#
+# It leaves by the upper *left* on purpose. The right of the grid is where
+# every accessory hangs (the thought bubble, the zZz, the mute cross), so a
+# child going that way would walk into whichever one comes back up when the
+# clip ends; and wake_slide already made the left the road the slime arrives
+# by. Things come and go from the left here.
+#
+# The child leaves the 16x16 grid, not the band: a cell outside the grid is
+# simply not drawn, which is what makes leaving free. With no accessory up
+# the body is centred in a 22-cell stage, so the child winks out about three
+# cells short of the band's own edge -- at 16 px a cell that is a shrinking
+# blob at the corner, which is the read that matters.
+#
+# The last frame is idle.txt's first frame, cell for cell. Same contract the
+# two entrances keep: a one-shot holds its last drawing until the policy asks
+# for another clip, so ending anywhere else would leave the slime resting in
+# a pose the breathe does not start from.
+
+# anticipation: crouched, eyes gone left, the shoulder swelling
+@frame hold=3
+................
+................
+....########....
+..###oo#######..
+.###o#########..
+.#############..
+.#############..
+.##oo####oo####.
+.##oo####oo####.
+###oo####oo#####
+################
+#####o##o#######
+######oo########
+################
+################
+################
+
+# the bud, pinched off and still attached at the neck
+@frame hold=2
+................
+.###............
+.###########....
+..###oo#######..
+..##o#########..
+..############..
+..############..
+.##oo####oo####.
+.##oo####oo####.
+###oo####oo#####
+################
+#####o##o#######
+######oo########
+################
+################
+################
+
+# free of it, one cell of daylight between them
+@frame hold=2
+o##.............
+###.............
+###.########....
+..###oo#######..
+..##o#########..
+..############..
+..############..
+.##oo####oo####.
+.##oo####oo####.
+###oo####oo#####
+################
+#####o##o#######
+######oo########
+################
+################
+################
+
+# half off the corner
+@frame hold=2
+o#..............
+##..............
+....########....
+..###oo#######..
+..##o#########..
+..############..
+..############..
+.##oo####oo####.
+.##oo####oo####.
+###oo####oo#####
+################
+#####o##o#######
+######oo########
+################
+################
+################
+
+# gone. the parent rises and is still looking after it
+@frame hold=2
+................
+.....######.....
+...##oo######...
+..##o#########..
+..############..
+..############..
+..#oo####oo###..
+.##oo####oo####.
+.##oo####oo####.
+.##############.
+#####o##o#######
+######oo########
+################
+################
+################
+.##############.
+
+# idle.txt's first frame
+@frame hold=3
+................
+.....######.....
+...##oo######...
+..##o#########..
+..############..
+..############..
+..##oo####oo##..
+.###oo####oo###.
+.###oo####oo###.
+.##############.
+######o##o######
+#######oo#######
+################
+################
+################
+.##############.

@@ -96,7 +96,7 @@ void AvatarController::start_oneshot(const char* clip, Yield yield) {
   // Every one-shot starts with nothing booked behind it; start_reaction() is
   // the only thing that books one, and it does so immediately after this.
   // Clearing here rather than trusting the previous reaction to have been
-  // consumed means a `merge` cut short by a `confused` cannot drag its
+  // consumed means a `child_merge` cut short by a `confused` cannot drag its
   // `happy` along behind the clip that replaced it.
   oneshot_follow_.clear();
 }
@@ -109,11 +109,35 @@ void AvatarController::start_reaction(const char* clip, const char* follow, Yiel
   }
   // `clip` is art this definition does not have. Play the follow-up on its
   // own rather than nothing: the reaction to a finished worker predates this
-  // milestone and an avatar that never gained a `merge` still owes it.
+  // milestone and an avatar that never gained a `child_merge` still owes it.
   if (follow) start_oneshot(follow, yield);
 }
 
 void AvatarController::appear() { appear_pending_ = true; }
+
+float AvatarController::depart() {
+  // The trigger name rather than a clip name, exactly as the entrance uses
+  // "wake": M7.1 picks between `depart` and `depart_fling`, and a definition
+  // that declares only one of them -- or neither -- needs no special case
+  // here, because find_trigger() answers for a group of one and clip_length()
+  // answers 0 for a group of none.
+  //
+  // `depart` is the *avatar's own* exit and not M7.5's `child_depart`, which
+  // is the blob that leaves when a worker spawns. The two were drawn under the
+  // same word by two milestones at once; they are separate triggers now so
+  // that neither can ever select the other's art.
+  const float len = clip_length("depart", 0.0f);
+  if (len <= 0.0f) return 0.0f;
+  start_oneshot("depart", Yield::Exit);
+  // The floor is suspended for the frame that starts the exit, for the mirror
+  // of the reason it is suspended for an entrance. The dwell floors exist to
+  // stop the visible clip flapping; here the band is already being held open
+  // for a fixed length and every millisecond the floor delayed the exit by
+  // would be a millisecond cut off its end, so the floor would not prevent a
+  // flap, it would truncate a departure.
+  entered_first_frame_ = true;
+  return len;
+}
 
 bool AvatarController::request_clip(const std::string& clip, float seconds,
                                     std::string* error) {
@@ -241,15 +265,15 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
     // `happy` still holds the floor through the spoken report, which was
     // always the point of it; it just starts a second later, behind the
     // arrival it is reacting to.
-    if (w.state == WorkerPool::State::Done) merge_follow_ = "happy";
+    if (w.state == WorkerPool::State::Done) child_merge_follow_ = "happy";
     // A worker that fell over is the same news as a turn that fell over, and
     // the avatar has one vocabulary for it.
-    else if (w.state == WorkerPool::State::Failed) merge_follow_ = "confused";
+    else if (w.state == WorkerPool::State::Failed) child_merge_follow_ = "confused";
     else continue;
     // Either way the child is back. Set here as well as by the count below,
     // because a worker that reports and is removed from the list on the same
     // frame would otherwise be a fall nobody saw.
-    pending_merge_ = true;
+    pending_child_merge_ = true;
   }
   // Names are forgotten when the pool forgets them; otherwise a long session
   // accumulates one map entry per worker that ever ran.
@@ -260,23 +284,26 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
       it = present ? std::next(it) : worker_state_.erase(it);
     }
   }
-  if (running > running_) pending_depart_ = true;
-  if (running < running_) pending_merge_ = true;
+  if (running > running_) pending_child_depart_ = true;
+  if (running < running_) pending_child_merge_ = true;
   running_ = running;
   // One at a time, and a return before a departure: a merge is tied to a
   // sentence the user is hearing right now, a departure is tied to work that
   // has already started without it.
   if (oneshot_left_ <= 0.0f) {
-    if (pending_merge_) {
-      pending_merge_ = false;
-      const char* carried = merge_follow_;
-      merge_follow_ = nullptr;
-      start_reaction("merge", carried, Yield::ToMic);
-    } else if (pending_depart_) {
-      pending_depart_ = false;
-      // The trigger name, not a clip name, so M7.1 picks which departure this
-      // one is and a third drawing is a line of JSON rather than a line here.
-      start_reaction("depart", nullptr, Yield::ToMic);
+    if (pending_child_merge_) {
+      pending_child_merge_ = false;
+      const char* carried = child_merge_follow_;
+      child_merge_follow_ = nullptr;
+      start_reaction("child_merge", carried, Yield::ToMic);
+    } else if (pending_child_depart_) {
+      pending_child_depart_ = false;
+      // The trigger name, not a clip name, so M7.1 picks which of the child
+      // departures this one is and a third drawing is a line of JSON rather
+      // than a line here. `child_depart`, not M2.3c's `depart`: that one is
+      // the whole avatar leaving the band, and a worker spawning must never
+      // be able to reach it.
+      start_reaction("child_depart", nullptr, Yield::ToMic);
     }
   }
 
@@ -363,12 +390,18 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
         // the reason it began; only a later one takes it.
         preempt = at_mic && !oneshot_from_mic_;
         break;
+      case Yield::Exit:
+        // Nothing. See Yield::Exit: the avatar is going, and being wanted
+        // again arrives as a summon that replaces this one-shot rather than as
+        // a state that pre-empts it.
+        preempt = false;
+        break;
     }
     if (preempt || oneshot_left_ <= 0.0f) {
       const bool finished = !preempt;
       oneshot_left_ = 0.0f;
       oneshot_.clear();
-      // M7.5. The clip booked behind this one — `merge` hands over to `happy`
+      // M7.5. The clip booked behind this one — `child_merge` hands over to `happy`
       // without a frame of something else in between, which is what makes the
       // arrival and the reaction to it one animation. A one-shot that was
       // pre-empted hands over to nobody: the microphone took the avatar, and
@@ -461,15 +494,16 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
     // to the same exception — an accessory that is up has already cost a body
     // slide and is not torn down early for anybody.
     //
-    // M7.5's `merge` is urgent for the third version of the same reason. The
+    // M7.5's `child_merge` is urgent for the third version of the same reason. The
     // child coming home and the sentence the worker's report is being read
     // out in are one event to the user, and the speech does not wait for the
     // floor — so a merge held back a third of a second is a merge that lands
     // after "Finished" and reads as a reaction to it rather than as the same
-    // thing. `depart` is deliberately *not* on this list: nothing is being
+    // thing. `child_depart` is deliberately *not* on this list: nothing is
+    // being
     // said over it, and the spawn it decorates has already happened.
     const bool urgent =
-        (std::strcmp(want, "listen") == 0 || std::strcmp(want, "merge") == 0 ||
+        (std::strcmp(want, "listen") == 0 || std::strcmp(want, "child_merge") == 0 ||
          std::strcmp(why, "script") == 0) &&
         avatar_clip_sprite(current_) == nullptr;
     // Blink is exempt at both ends. It is shorter than the floor by design,

@@ -56,11 +56,26 @@ class AvatarAppearance {
   // slower display.
   static constexpr float kPopSeconds = 0.08f;
 
-  // Leaving keeps M1.6's 0.16 s. Symmetry would be wrong here and the
-  // asymmetry is the point: an arrival has 0.8-1.9 s of authored animation
-  // behind it and a departure has none yet (M2.3c owns the exit clip), so
-  // snapping out in five frames would be the glitch the pop-in is not.
+  // M2.3c. There are now two leave fades, and which one runs depends on
+  // whether there was any art behind the departure.
+  //
+  // `kLeaveSeconds` is M1.6's original and it is the *fallback*: an avatar
+  // whose definition declares no exit clip has nothing to watch leave, so it
+  // still dissolves over a tenth of a second exactly as it did, and M7.2's
+  // reasoning for that number is untouched for the case it was written about.
+  //
+  // `kLeaveAfterExitSeconds` is what runs behind a real exit clip, and it is
+  // the pop-in's number because it now has the pop-in's job and no other. The
+  // exit's last frame is empty by contract, so by the time this ramp starts
+  // there is nothing on screen to dissolve: the animation made the avatar
+  // absent, and all the ramp is still good for is the one case where the clip
+  // did *not* finish -- a departure cut short by the app closing or by the
+  // band being taken some other way -- where a body is still drawn and a hard
+  // cut would read as a dropped frame. Five frames covers that, and running
+  // the old 0.16 s here would instead put a tenth of a second of empty band on
+  // screen after every normal exit, waiting for nothing.
   static constexpr float kLeaveSeconds = 0.16f;
+  static constexpr float kLeaveAfterExitSeconds = kPopSeconds;
 
   struct Frame {
     float alpha = 0.0f;
@@ -68,18 +83,52 @@ class AvatarAppearance {
     // appearance event: whoever consumes it is the only thing that gets to
     // decide what an arrival looks like.
     bool summoned = false;
+    // M2.3c, and the exact mirror of `summoned`: true on the single frame the
+    // avatar starts leaving. Whoever consumes it is the only thing that gets
+    // to decide what a departure looks like, and it must answer with
+    // hold_exit() on that same frame -- see there for why the alpha does not
+    // move until it has.
+    bool dismissed = false;
   };
 
   Frame update(bool wanted, bool loader_on_screen, float dt);
 
-  // Whether the band is still needed at all -- showing, or on the way out.
-  // The window's height follows this, and it has to stay true across the
-  // frame the pop-in starts on, when the alpha is still 0.
-  bool present() const { return showing_ || fade_ > 0.0f; }
+  // M2.3c. The answer to a `dismissed` frame: keep the band at full opacity
+  // for `seconds` so an exit clip can play in it, then fade.
+  //
+  // `seconds <= 0` means "no exit art", and that is not an error -- it is
+  // every avatar definition written before this milestone, and the M1.6
+  // dissolve is still the right thing for one. The fade then starts
+  // immediately and takes kLeaveSeconds, which is byte-for-byte what M7.2
+  // did.
+  //
+  // It has to be a second call rather than an argument to update() because
+  // only the controller can say how long the departure is, and the controller
+  // has not chosen a variant until it is told the avatar is going. So update()
+  // freezes the alpha on the dismissed frame and waits exactly one frame for
+  // this; if it never comes, the frame after resumes as the no-art case,
+  // which is the same behaviour a caller that has never heard of exits gets.
+  void hold_exit(float seconds);
+
+  // Whether the band is still needed at all -- showing, leaving, or holding
+  // still while an exit clip plays in it.
+  bool present() const { return showing_ || exit_left_ > 0.0f || fade_ > 0.0f; }
 
  private:
+  // The one place the linear fade becomes the eased alpha, so every early
+  // return out of update() leaves by the same door.
+  Frame finish(Frame out) const;
+
   bool showing_ = false;
   float fade_ = 0.0f;  // linear 0..1; the Frame's alpha is this, eased
+  // The exit clip's remaining length. While it is positive the alpha is
+  // pinned at 1 and the band stays reserved.
+  float exit_left_ = 0.0f;
+  // Set on the dismissed frame, cleared by hold_exit() or by the next update()
+  // if nobody answered.
+  bool awaiting_exit_ = false;
+  // Which of the two leave fades this departure gets.
+  bool exit_had_art_ = false;
 };
 
 }  // namespace aii
