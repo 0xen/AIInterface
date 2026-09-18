@@ -282,6 +282,40 @@ class AvatarController {
   // one-shot is pre-empted instead of finishing: whatever took it away has a
   // better claim than a reaction that had not started yet.
   std::string oneshot_follow_;
+  // M2.3c, the residual exit flash (user, 18 Sep 2026): an exit one-shot that
+  // has run out **keeps its clip** instead of handing the avatar back to the
+  // ambient policy, and this is the latch that says so.
+  //
+  // The bug it deletes is the same shape as the flicker that was just fixed
+  // above -- an animation finishing before the disappearance commits, and
+  // something ordinary drawn in the gap. `oneshot_left_` and `exit_left_` are
+  // both started at the exit trigger's length on the dismissed frame, but they
+  // are decremented from different frames: `depart()` now runs *above* the
+  // controller, so update() takes a dt off the one-shot on the dismissed frame
+  // itself while AvatarAppearance returns early on that frame and starts
+  // counting on the next. The controller therefore finishes one frame sooner,
+  // the ambient branch answered `idle`, and the whole slime was drawn again at
+  // alpha 1.0 for ~2 frames after the departure had visually finished --
+  // measured at f=501..502, with the fade starting at f=503.
+  //
+  // Holding is the fix rather than lining the two clocks up because it needs
+  // no agreement between them. An exit clip is `loop: false` and its last
+  // frame is *empty by contract* (see avatar.json's `_clips` note and the head
+  // of depart.txt), precisely so that the animation, and not the compositor,
+  // makes the avatar absent -- and AvatarSource::advance_clip already holds a
+  // non-looping clip's last drawing forever. So "keep playing the exit" is
+  // exactly "keep drawing nothing", for as long as nobody has anything better
+  // to draw. Whatever the two clocks do relative to each other -- a frame
+  // apart, a stall, a dt clamp, a variant shorter than the trigger's longest
+  // -- there is no window in which the controller has run out of exit and has
+  // to name a clip, because it names the exit.
+  //
+  // What replaces it is the one thing that can: another one-shot. In practice
+  // that is the entrance, which is the only way the avatar comes back
+  // (AvatarAppearance::summoned -> appear() -> start_oneshot("wake")), and
+  // start_oneshot() clears this for every caller without any of them knowing
+  // it exists.
+  bool oneshot_holds_ = false;
   // Yield::Entrance's memory: the microphone was already open when this
   // entrance began, so it is the cause and not an interruption. Cleared the
   // moment the session leaves Listening, after which the next Listening is

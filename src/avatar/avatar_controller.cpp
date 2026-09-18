@@ -93,6 +93,9 @@ void AvatarController::start_oneshot(const char* clip, Yield yield) {
   oneshot_ = clip;
   oneshot_left_ = len;
   oneshot_yield_ = yield;
+  // A new one-shot is the only thing that takes a held exit away, and every
+  // caller does it by simply being one -- see `oneshot_holds_`.
+  oneshot_holds_ = false;
   // Every one-shot starts with nothing booked behind it; start_reaction() is
   // the only thing that books one, and it does so immediately after this.
   // Clearing here rather than trusting the previous reaction to have been
@@ -378,8 +381,8 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
   }
 
   // ---- reactions outrank the ambient state, for as long as they last ----
-  if (oneshot_left_ > 0.0f) {
-    oneshot_left_ -= dt;
+  if (oneshot_left_ > 0.0f || oneshot_holds_) {
+    if (oneshot_left_ > 0.0f) oneshot_left_ -= dt;
     const bool at_mic = snap.state == VoiceSession::State::Listening;
     bool preempt = at_mic;
     switch (oneshot_yield_) {
@@ -397,7 +400,17 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
         preempt = false;
         break;
     }
-    if (preempt || oneshot_left_ <= 0.0f) {
+    // M2.3c. An exit that has run out does not end: it holds its last drawing,
+    // which the contract says is empty, until something else asks for the
+    // avatar. The alternative -- letting it expire into the ambient branch --
+    // puts `idle` on screen for however many frames the band's own hold has
+    // left, and that is the residual flash. See `oneshot_holds_`.
+    if (oneshot_yield_ == Yield::Exit && oneshot_left_ <= 0.0f) {
+      oneshot_left_ = 0.0f;
+      oneshot_holds_ = true;
+      want = oneshot_.c_str();
+      why = "exit";
+    } else if (preempt || oneshot_left_ <= 0.0f) {
       const bool finished = !preempt;
       oneshot_left_ = 0.0f;
       oneshot_.clear();
