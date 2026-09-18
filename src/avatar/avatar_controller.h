@@ -229,6 +229,11 @@ class AvatarController {
   };
 
   void start_oneshot(const char* clip, Yield yield);
+  // M7.5. A one-shot with another one booked behind it: `merge` then `happy`.
+  // If the definition has no art for `clip` the follow-up is started on its
+  // own, so an avatar that declares no `merge` still reacts to a finished
+  // worker exactly as it did before this milestone existed.
+  void start_reaction(const char* clip, const char* follow, Yield yield);
   float clip_length(const char* clip, float fallback) const;
   float roll_blink_wait();
 
@@ -247,6 +252,10 @@ class AvatarController {
   std::string oneshot_;
   float oneshot_left_ = 0.0f;
   Yield oneshot_yield_ = Yield::ToMic;
+  // What plays the instant `oneshot_` finishes, if anything. Dropped if the
+  // one-shot is pre-empted instead of finishing: whatever took it away has a
+  // better claim than a reaction that had not started yet.
+  std::string oneshot_follow_;
   // Yield::Entrance's memory: the microphone was already open when this
   // entrance began, so it is the cause and not an interruption. Cleared the
   // moment the session leaves Listening, after which the next Listening is
@@ -291,6 +300,46 @@ class AvatarController {
   bool dozed_ = false;
   unsigned last_timeout_seq_ = 0;
   std::map<std::string, WorkerPool::State> worker_state_;
+
+  // ---- M7.5: the child slime that leaves with a worker and comes back -----
+  //
+  // **Children are counted, not named.** `running_` is the number of workers
+  // in the snapshot that are Starting or Working, recomputed from scratch
+  // every frame; a rise in it sends a child, a fall brings one home. Nothing
+  // in the band ties a blob to a worker — the panel's rows already do that
+  // job, with the name and the activity line — so identity here would be a
+  // claim the art cannot make good on.
+  //
+  // **Counting from a level rather than from edges is what makes a stranded
+  // child impossible**, and it is the answer to the failure the milestone
+  // names by hand. There is no persistent "a child is away" drawing to get
+  // stuck: the departure and the return are each a one-shot that plays and
+  // ends, and what is off screen between them is nothing at all. On top of
+  // that, every way a worker can stop being a worker is a fall in this
+  // number and therefore a return — it reported, it fell over, it was
+  // paused, it died without saying anything, the pool dropped it. A spawn
+  // that never starts never raises the count and so never sends anybody, and
+  // an app that closes with three workers running has no state to leak,
+  // because the count lives only in this object and this object goes with the
+  // window.
+  //
+  // **Overlapping workers do not overlap animations.** At most one departure
+  // or return is on screen at a time; the two flags below are booleans and
+  // not counters, so several workers spawning on one frame send one child
+  // between them and several reporting on one frame bring one home. Workers
+  // that start or finish far enough apart to be separate moments — which is
+  // nearly always, since a report arrives with a sentence of speech attached
+  // — still get an animation each, because by then the previous one has
+  // finished and the flag is free. The alternative, a queue, would keep
+  // playing departures after the thing they described had already finished.
+  int running_ = 0;
+  bool pending_depart_ = false;
+  bool pending_merge_ = false;
+  // The reaction the pending merge is carrying: `happy` for a worker that
+  // reported, `confused` for one that fell over. It rides with the merge
+  // rather than firing beside it so the two are one animation in sequence and
+  // not two fighting over the same frame.
+  const char* merge_follow_ = nullptr;
 
   bool ctx_high_ = false;
   float frustrated_wait_ = 0.0f;

@@ -1,0 +1,112 @@
+# depart_fling: the other way a worker gets sent off (the second variant
+# behind the `depart` trigger). Where depart.txt buds slowly and watches the
+# child drift away, this one is a *throw*: the slime squats, snaps upright and
+# the child is off the top of the grid in two frames, and then the body recoils
+# from its own effort. 16 fps, loop=false, 0.56 s against depart's 1.0.
+#
+# The two have to differ in shape, not just in speed -- that is the lesson
+# wake_slide was drawn to -- so one of them is a deliberate act and the other
+# is something the body does. Spawn several tasks in a session and they
+# alternate, which is the whole reason the trigger exists.
+#
+# There is no face on the flick frame. A body moving that fast is a shape, and
+# eyes on it read as a drawing being dragged rather than as motion; wake_slide
+# withholds them for the same three frames and the same reason.
+#
+# Ends on idle.txt's first frame, as every one-shot here does.
+
+# the squat: down low, wound up, looking where it is about to throw
+@frame hold=2
+................
+................
+................
+....########....
+..############..
+.##############.
+.##oo####oo####.
+.##oo####oo####.
+###oo####oo#####
+################
+#####o##o#######
+######oo########
+################
+################
+################
+################
+
+# the snap: stretched tall and leaning after it, the child already a streak
+# at the top edge
+@frame hold=1
+.###............
+................
+...#######......
+..########......
+..#########.....
+..##########....
+..##########....
+.###########....
+.############...
+.#############..
+.##############.
+################
+################
+################
+################
+################
+
+# gone. still up on its toes, eyes back and still turned that way
+@frame hold=1
+................
+................
+.....######.....
+...##oo######...
+..############..
+..############..
+..############..
+..#oo####oo###..
+.##oo####oo####.
+.##############.
+.##############.
+######o##o######
+#######oo#######
+################
+################
+################
+
+# the recoil, flat and facing front again
+@frame hold=2
+................
+................
+................
+....########....
+..############..
+.##############.
+.###oo####oo###.
+.###oo####oo###.
+####oo####oo####
+################
+######o##o######
+#######oo#######
+################
+################
+################
+################
+
+# idle.txt's first frame
+@frame hold=3
+................
+.....######.....
+...##oo######...
+..##o#########..
+..############..
+..############..
+..##oo####oo##..
+.###oo####oo###.
+.###oo####oo###.
+.##############.
+######o##o######
+#######oo#######
+################
+################
+################
+.##############.

@@ -181,4 +181,24 @@ if(AII_BUILD_AVATAR)
     add_subdirectory(src/pyhost)
   endif()
   add_subdirectory(src/avatar)
+
+  # ---- avatar_children_test: M7.5's child slime, without a window -----------
+  # Inside the avatar block because avatar_def.h reaches AvatarGrid in
+  # avatar_renderer.h, so the engine's headers have to be on the path; nothing
+  # here draws, and no window is opened. AvatarController is a pure function of
+  # a VoiceSession::Snapshot plus its own timers, so a hand-written worker list
+  # run at a fixed 60 Hz reproduces exactly what a real pool makes the policy
+  # do — in milliseconds, instead of minutes of real Claude child processes.
+  add_executable(avatar_children_test tests/avatar_children_test.cpp
+                                      src/avatar/avatar_controller.cpp
+                                      src/avatar/avatar_def.cpp
+                                      src/avatar/avatar_renderer.cpp)
+  target_include_directories(avatar_children_test PRIVATE src src/avatar)
+  target_link_libraries(avatar_children_test PRIVATE aii_core rend::engine)
+  target_compile_definitions(avatar_children_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+    AII_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets")
+  if(MSVC)
+    target_compile_options(avatar_children_test PRIVATE /utf-8 /W4 /wd4996)
+  endif()
+  aii_copy_runtime_dlls(avatar_children_test)
 endif()

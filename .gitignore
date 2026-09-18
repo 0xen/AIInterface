@@ -20,3 +20,6 @@ spikes/stt/testdata/
 *.lib
 *.obj
 spikes/**/*.log
+
+# Agent worktrees: isolated checkouts, never part of the repo
+.claude/worktrees/

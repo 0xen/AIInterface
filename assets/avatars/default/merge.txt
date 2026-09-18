@@ -1,0 +1,130 @@
+# merge: the worker has reported, and the child comes home. depart.txt run
+# backwards in substance if not in frames -- in by the same upper-left corner
+# it left by, the same three sizes as it closes, the same bud at the shoulder,
+# and then it is absorbed and the body takes the weight before settling.
+# 14 fps, loop=false, 0.93 s.
+#
+# That symmetry is the whole job of this clip. A departure and a return that
+# do not share a road and a silhouette are two animations; sharing them is
+# what makes the second one read as the first one *finishing*.
+#
+# It is followed by `happy` (or by `confused`, if what came back was a worker
+# that fell over), which the controller starts the moment this ends, so the
+# clip does not have to carry the reaction as well as the arrival -- and both
+# of them run under the spoken summary rather than in front of it.
+#
+# Ends on idle.txt's first frame.
+
+# a speck at the corner, and the parent has noticed
+@frame hold=2
+o#..............
+##..............
+....########....
+..###oo#######..
+..##o#########..
+..############..
+..############..
+.##oo####oo####.
+.##oo####oo####.
+###oo####oo#####
+################
+#####o##o#######
+######oo########
+################
+################
+################
+
+# close, one cell of daylight left
+@frame hold=2
+o##.............
+###.............
+###.########....
+..###oo#######..
+..##o#########..
+..############..
+..############..
+.##oo####oo####.
+.##oo####oo####.
+###oo####oo#####
+################
+#####o##o#######
+######oo########
+################
+################
+################
+
+# touching: the same bud depart.txt pinched off, in reverse
+@frame hold=2
+................
+.###............
+.###########....
+..###oo#######..
+..##o#########..
+..############..
+..############..
+.##oo####oo####.
+.##oo####oo####.
+###oo####oo#####
+################
+#####o##o#######
+######oo########
+################
+################
+################
+
+# absorbed. the shoulder is still carrying it and the eyes come front
+@frame hold=2
+................
+................
+....########....
+..###oo#######..
+.###o#########..
+.#############..
+.#############..
+.###oo####oo###.
+.###oo####oo###.
+####oo####oo####
+################
+######o##o######
+#######oo#######
+################
+################
+################
+
+# the weight settles through the body
+@frame hold=2
+................
+................
+....########....
+..###oo#######..
+..##o#########..
+..############..
+..############..
+.###oo####oo###.
+.###oo####oo###.
+####oo####oo####
+################
+######o##o######
+#######oo#######
+################
+################
+################
+
+# idle.txt's first frame
+@frame hold=3
+................
+.....######.....
+...##oo######...
+..##o#########..
+..############..
+..############..
+..##oo####oo##..
+.###oo####oo###.
+.###oo####oo###.
+.##############.
+######o##o######
+#######oo#######
+################
+################
+################
+.##############.
