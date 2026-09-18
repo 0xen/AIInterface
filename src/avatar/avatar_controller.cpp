@@ -96,6 +96,25 @@ void AvatarController::start_oneshot(const char* clip, Yield yield) {
 
 void AvatarController::appear() { appear_pending_ = true; }
 
+float AvatarController::depart() {
+  // The trigger name rather than a clip name, exactly as the entrance uses
+  // "wake": M7.1 picks between `depart` and `depart_fling`, and a definition
+  // that declares only one of them -- or neither -- needs no special case
+  // here, because find_trigger() answers for a group of one and clip_length()
+  // answers 0 for a group of none.
+  const float len = clip_length("depart", 0.0f);
+  if (len <= 0.0f) return 0.0f;
+  start_oneshot("depart", Yield::Exit);
+  // The floor is suspended for the frame that starts the exit, for the mirror
+  // of the reason it is suspended for an entrance. The dwell floors exist to
+  // stop the visible clip flapping; here the band is already being held open
+  // for a fixed length and every millisecond the floor delayed the exit by
+  // would be a millisecond cut off its end, so the floor would not prevent a
+  // flap, it would truncate a departure.
+  entered_first_frame_ = true;
+  return len;
+}
+
 bool AvatarController::request_clip(const std::string& clip, float seconds,
                                     std::string* error) {
   if (clip.empty()) {
@@ -292,6 +311,12 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
         // The microphone that was already open when this entrance began is
         // the reason it began; only a later one takes it.
         preempt = at_mic && !oneshot_from_mic_;
+        break;
+      case Yield::Exit:
+        // Nothing. See Yield::Exit: the avatar is going, and being wanted
+        // again arrives as a summon that replaces this one-shot rather than as
+        // a state that pre-empts it.
+        preempt = false;
         break;
     }
     if (preempt || oneshot_left_ <= 0.0f) {

@@ -1661,6 +1661,20 @@ int main(int /*argc*/, char** /*argv*/) {
             log::info("avatar: summoned at {:.2f}s (pop {:.0f} ms)", t,
                       aii::AvatarAppearance::kPopSeconds * 1000.0f);
         }
+        // M2.3c, and the mirror of it: a departure plays an exit, and the band
+        // is held open for exactly as long as that takes. The controller is
+        // asked how long rather than told, because only the definition knows
+        // -- an avatar with no exit art answers 0 and the band goes back to
+        // M1.6's dissolve, which is what every avatar did before this line.
+        if (appeared.dismissed) {
+            const float exit_len = controllerOwnsAvatar ? controller.depart() : 0.0f;
+            appearance.hold_exit(exit_len);
+            log::info("avatar: dismissed at {:.2f}s (exit {:.0f} ms, fade {:.0f} ms)", t,
+                      exit_len * 1000.0f,
+                      (exit_len > 0.0f ? aii::AvatarAppearance::kLeaveAfterExitSeconds
+                                       : aii::AvatarAppearance::kLeaveSeconds) *
+                          1000.0f);
+        }
         // The band is reserved while anything might still draw in it, and
         // always while the loading screen is up: that overlay covers the whole
         // window and is centred in it, so a mode that hides the avatar gives
