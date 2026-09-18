@@ -37,6 +37,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/tool_policy.h"
+
 namespace aii {
 
 // Which pool a prompt belongs to. Only `Global` participates in composition;
@@ -184,15 +186,61 @@ std::filesystem::path local_prompt_path();
 // whitespace trimmed. Empty when the file is empty or unreadable.
 std::string local_prompt();
 
+// ------------------------------------------------- M3.9: what the model is told it has
+//
+// The prompt has to describe the grant the user actually made. M3.9 put the
+// conversational instance's tools behind tick boxes (`core/tool_policy.h`),
+// and `system/workers.md` still opened with "You can search the web yourself,
+// with two tools" and "These are your only tools" — true of exactly one of the
+// eight settings, and a lie in the others in both directions: it promised a
+// search the model no longer had, and said nothing about the file tools it now
+// did have.
+//
+// So the prose stays in the Markdown and the *choosing* happens here. A body
+// may carry conditional sections, in the one syntax a person recognises
+// without being taught it:
+//
+//     {{#web}}kept when Web search is on{{/web}}
+//     {{^web}}kept when it is off{{/web}}
+//
+// The keys are the tool groups' `key` fields — `web`, `file_read`,
+// `file_write` — plus `tools`, which is true when *any* group is in force and
+// is how "You have no tools of your own" gets said without three nested
+// negations. Sections nest. The test a key applies is `tool_group_active()`,
+// the same call `tool_list()` makes to build `--allowedTools`, so the sentence
+// the model reads and the tools it is handed cannot drift apart: adding a
+// group to the table gives the prose a key for free.
+//
+// **Why not generate the paragraph in C++.** It was the obvious shape and it
+// is the wrong one here. These bodies are prose the user is invited to rewrite
+// (that is the whole of M3.1's one-file-per-prompt design), and a paragraph
+// assembled from string literals in a .cpp would be the one paragraph they
+// could not touch — while reading, in the file, as a hole. This way the
+// variants sit side by side in the Markdown where they can be edited and
+// diffed, and the code knows only the flag names.
+//
+// An unknown key keeps its section and is reported through `problems()`: a
+// typo should make the prompt slightly wrong out loud, not silently delete a
+// paragraph. Unbalanced tags are reported the same way. Blank runs left behind
+// by a dropped paragraph are collapsed, so a prompt with a section missing is
+// byte-identical to the same prompt written without it.
+std::string expand_tool_sections(const std::string& text, const ToolPolicy& policy,
+                                 std::vector<std::string>* problems = nullptr);
+
 // The composed system prompt for this process, computed once on first use:
-// the `system` graph, then `pre-prompt.md`.
+// the `system` graph, its conditional sections resolved against `policy`, then
+// `pre-prompt.md`.
 //
 // A function and not a `const char* const` any more: it reads files, so it
 // cannot be a static initialiser, and it is cached because `build_llm` asks
 // for it and so does anything that wants to show it. Every caller in one
 // process therefore sees the same bytes, which is the property prompt caching
-// is built on.
-const std::string& system_prompt();
+// is built on — and still does, because the policy cannot change inside a
+// running process: `--allowedTools` is fixed when the child starts, so a tick
+// box reaches Claude at the next launch and not before. The cache is keyed on
+// the policy anyway rather than trusting that, since a test may compose
+// several in one process, and it is rebuilt on the rare miss.
+const std::string& system_prompt(const ToolPolicy& policy);
 
 // M3.3 / M3.4: the lazy half of the store.
 //

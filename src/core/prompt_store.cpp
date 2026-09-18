@@ -535,24 +535,143 @@ std::string local_prompt() {
   return trim_end(trim_front(strip_html_comments(text)));
 }
 
-const std::string& system_prompt() {
-  static const std::string kComposed = [] {
-    PromptStore store;
-    std::string err;
-    if (!store.load(&err) && !err.empty()) std::fprintf(stderr, "[prompts] %s\n", err.c_str());
-    // This is the string that actually becomes `--system-prompt`, so a prompt
-    // that is declared and missing from it is the exact failure worth shouting
-    // about, whatever `load()` returned.
-    for (const std::string& p : store.problems()) std::fprintf(stderr, "[prompts] %s\n", p.c_str());
-    std::string composed = store.compose("system");
-    // Appended, never substituted, and last so that it has the final word.
-    if (const std::string local = local_prompt(); !local.empty()) {
-      if (!composed.empty()) composed += kSeparator;
-      composed += local;
+namespace {
+
+// Is a conditional key true? `*known` says whether it is a key at all, which
+// the caller needs in order to tell a false section from a typo.
+bool section_truth(const std::string& key, const ToolPolicy& p, bool* known) {
+  *known = true;
+  // `tools`: any group in force. Not a group itself, and the one key that is
+  // not in the table, because "you have no tools of your own" is a sentence
+  // about the whole grant rather than about any one row.
+  if (key == "tools") {
+    for (int i = 0; i < kToolGroupCount; ++i)
+      if (tool_group_active(p, i)) return true;
+    return false;
+  }
+  for (int i = 0; i < kToolGroupCount; ++i)
+    if (key == tool_group(i).key) return tool_group_active(p, i);
+  *known = false;
+  return false;
+}
+
+// Three or more newlines down to two, so that a paragraph dropped by a
+// conditional leaves no gap behind it. Nothing else about the text is touched.
+std::string collapse_blank_runs(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  std::size_t runs = 0;
+  for (const char c : s) {
+    if (c == '\n') {
+      if (++runs > 2) continue;
+    } else {
+      runs = 0;
     }
-    return composed;
-  }();
-  return kComposed;
+    out += c;
+  }
+  return out;
+}
+
+}  // namespace
+
+std::string expand_tool_sections(const std::string& text, const ToolPolicy& policy,
+                                 std::vector<std::string>* problems) {
+  const auto note = [&](const std::string& what) {
+    if (problems) problems->push_back(what);
+  };
+  // One frame per open section, holding what emission was *before* it, so a
+  // closing tag restores rather than guesses. `emit` is the conjunction of
+  // every condition currently open.
+  struct Frame {
+    std::string key;
+    bool emit_before;
+  };
+  std::vector<Frame> open;
+  bool emit = true;
+  std::string out;
+  out.reserve(text.size());
+  std::size_t i = 0;
+  while (i < text.size()) {
+    const std::size_t t = text.find("{{", i);
+    if (t == std::string::npos) {
+      if (emit) out.append(text, i, std::string::npos);
+      break;
+    }
+    if (emit) out.append(text, i, t - i);
+    const std::size_t e = text.find("}}", t + 2);
+    if (e == std::string::npos) {
+      // An unterminated `{{` is prose, not a tag: pass it through rather than
+      // swallowing the rest of the prompt.
+      if (emit) out.append(text, t, std::string::npos);
+      break;
+    }
+    const std::string tag = text.substr(t + 2, e - t - 2);
+    i = e + 2;
+    const char sigil = tag.empty() ? '\0' : tag[0];
+    if (sigil != '#' && sigil != '^' && sigil != '/') {
+      // Not a section tag at all. `{{` is rare enough in this prose that
+      // passing it through unchanged is safer than deciding it meant
+      // something.
+      if (emit) out.append(text, t, i - t);
+      continue;
+    }
+    const std::string key = tag.substr(1);
+    if (sigil == '/') {
+      if (open.empty() || open.back().key != key) {
+        note("prompt: `{{/" + key + "}}` closes a section that is not open");
+        continue;
+      }
+      emit = open.back().emit_before;
+      open.pop_back();
+      continue;
+    }
+    bool known = false;
+    const bool value = section_truth(key, policy, &known);
+    open.push_back({key, emit});
+    if (!known) {
+      note("prompt: `{{" + std::string(1, sigil) + key + "}}` is not a tool group; its text is kept as written");
+      continue;  // emission unchanged: the prose stays, the typo is reported
+    }
+    emit = emit && (sigil == '#' ? value : !value);
+  }
+  for (const Frame& f : open) note("prompt: `{{#" + f.key + "}}` is never closed");
+  return trim_end(collapse_blank_runs(out));
+}
+
+const std::string& system_prompt(const ToolPolicy& policy) {
+  // Keyed on the policy rather than computed once and for all — see the
+  // header. One process normally asks for one policy and gets the cached
+  // bytes every time after the first.
+  static ToolPolicy cached_for;
+  static std::string cached;
+  static bool have = false;
+  if (have && cached_for == policy) return cached;
+
+  PromptStore store;
+  std::string err;
+  if (!store.load(&err) && !err.empty()) std::fprintf(stderr, "[prompts] %s\n", err.c_str());
+  // This is the string that actually becomes `--system-prompt`, so a prompt
+  // that is declared and missing from it is the exact failure worth shouting
+  // about, whatever `load()` returned.
+  for (const std::string& p : store.problems()) std::fprintf(stderr, "[prompts] %s\n", p.c_str());
+  // M3.9. The store's own text first, then the conditionals resolved against
+  // what the user has actually granted. Done here and not in `compose()`
+  // because the policy is the *caller's*: the store knows the prose and this
+  // function knows the app.
+  std::vector<std::string> section_problems;
+  std::string composed = expand_tool_sections(store.compose("system"), policy, &section_problems);
+  for (const std::string& p : section_problems) std::fprintf(stderr, "[prompts] %s\n", p.c_str());
+  // Appended, never substituted, and last so that it has the final word. Not
+  // expanded: the file next to the exe is the user's own prose and nothing
+  // here rewrites it.
+  if (const std::string local = local_prompt(); !local.empty()) {
+    if (!composed.empty()) composed += kSeparator;
+    composed += local;
+  }
+  cached = std::move(composed);
+  cached_for = policy;
+  have = true;
+  return cached;
 }
 
 // ------------------------------------------------------- M5.2: the inventory

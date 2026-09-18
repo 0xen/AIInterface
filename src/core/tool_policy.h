@@ -92,6 +92,16 @@ struct ToolPolicy {
   bool operator!=(const ToolPolicy& o) const { return !(*this == o); }
 };
 
+// Is this group's grant actually in force? Ticked *and* offered — the two
+// conditions `tool_list()` applies before it writes a name onto the command
+// line, in one place so that nothing can answer the question differently.
+//
+// It exists because the system prompt has to answer it too (see
+// `core/prompt_store.h`): the sentence the model reads about what it can do
+// and the list of tools it is handed have to come from the same test, or the
+// prompt goes back to describing a grant the app is not making.
+bool tool_group_active(const ToolPolicy& p, int id);
+
 // The `--tools` / `--allowedTools` list for a policy: the enabled groups'
 // names joined with commas, in table order. **The empty string is a legal and
 // intended result** — every toggle off is `--tools ""`, a conversational

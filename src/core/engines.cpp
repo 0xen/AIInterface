@@ -33,13 +33,20 @@ bool build_llm(const Config& cfg, Engines& out, const LogFn& log, std::string* e
       return false;
     }
     const std::string model = cfg.model_override.empty() ? "claude-opus-5" : cfg.model_override;
-    out.llm = std::make_unique<ApiLlmClient>(cfg.api_key, model, cfg.effort, system_prompt());
+    // M3.9. This backend defines no tools at all — it is the raw Messages API,
+    // not the CLI — so the prompt it gets is composed against an empty policy
+    // whatever the tick boxes say. The settings surface already tells the user
+    // the section does not apply here (`tools_supported`); this is the same
+    // fact reaching the model, which used to be told it could search.
+    ToolPolicy none;
+    for (int i = 0; i < kToolGroupCount; ++i) none.on[i] = false;
+    out.llm = std::make_unique<ApiLlmClient>(cfg.api_key, model, cfg.effort, system_prompt(none));
     say(log, "api backend  model=" + model);
     return true;
   }
   ClaudeCodeClient::Options o;
   o.exe = cfg.claude_exe;
-  o.system_prompt = system_prompt();
+  o.system_prompt = system_prompt(cfg.tools);
   o.model = cfg.model_override;
   o.effort = cfg.effort;
   // M3.7, and M3.8 which put it behind a control. What the instance the user
