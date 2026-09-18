@@ -288,19 +288,21 @@ void VoiceSession::load() {
   workers_ = std::make_unique<WorkerPool>(cfg_.claude_exe, cfg_.worker_bypass);
   workers_->set_on_report([this](const std::string& name, WorkerPool::State state,
                                  const std::string& shown, const std::string& spoken) {
-    // M2b.4. A worker the user started in conversation reports the way 517c241
-    // settled: its sentence is spoken as it stands, with the name shown and
-    // not heard.
+    // M2b.4 sent a *scheduled* worker's report to the conversational instance
+    // and let a live worker's own sentence be spoken as 517c241 settled it.
+    // **M2c.1 makes the live path do the same thing**, because the argument
+    // M2b.4 made for the deferred one was never actually about the delay: a
+    // worker writes its closing sentence for a reader. It carries paths,
+    // identifiers, file names, counts and CLI phrasing, and it is written in
+    // English whatever language this conversation is being held in. None of
+    // that survives being heard. So the raw sentence keeps the two places a
+    // person can *read* it — the transcript line and the panel row, both of
+    // which are `shown` and are untouched here — and the voice gets the
+    // conversational instance's own phrasing of the same result instead.
     //
-    // A worker a *schedule* started does not, and the difference is the whole
-    // of the Phrased grade. The user asked for this ten minutes ago and may
-    // have asked in Japanese; the worker's task and its closing sentence are
-    // English, because that is what the model wrote for a fresh instance to
-    // carry out. Speaking that sentence would answer a Japanese request in
-    // English. So the transcript gets it verbatim — that part was already
-    // right — and the *voice* gets nothing yet: the sentence goes to the
-    // conversational instance instead, which is holding this conversation in
-    // whatever language it is being held in, and it says what happened.
+    // What does **not** route through the model is written below, at the two
+    // early returns: a worker that was stopped on purpose, and a worker that
+    // failed. Both already have a plain, short, localised sentence.
     // M2b.5. Stopped on purpose: the user asked for it and has already been
     // told it is stopping. The pool is right to report a cancelled turn as
     // Paused; saying so out loud, or spending a turn on it, would be the app
@@ -318,8 +320,45 @@ void VoiceSession::load() {
     // the log too, which is the one of the three that outlives the session.
     if (state == WorkerPool::State::Failed) log("[worker] " + shown);
     bool phrased = true;
-    if (!take_scheduled_worker(name, &phrased)) {
-      announce(shown, spoken);
+    const bool scheduled = take_scheduled_worker(name, &phrased);
+    // **A worker that did not finish keeps its canned line, scheduled or not.**
+    // 5ad6381 already maps every failure reason to one plain sentence in both
+    // languages ("It stopped before it finished."), and Paused has had one
+    // since 517c241. Those sentences are short, jargon-free and already in the
+    // language the app is speaking, so there is nothing for a rephrasing to
+    // improve — and there is something to lose: a turn costs seconds and usage
+    // and can itself fail, which would mean answering "the work failed" with
+    // silence. The failure path is the one place the app cannot afford a
+    // second thing that might not come back.
+    //
+    // M2b.4's Phrased grade is the deliberate exception: a *scheduled* worker
+    // that failed is still phrased, because the user asked for it ten minutes
+    // ago in a language the canned table may not be set to and is owed the
+    // report in the shape the promise was made. That behaviour is unchanged.
+    if (state != WorkerPool::State::Done) {
+      announce(shown, scheduled && phrased ? std::string() : spoken);
+      if (scheduled && phrased) queue_injected_turn(scheduled_report_prompt(state, shown), spoken);
+      return;
+    }
+    if (!scheduled) {
+      // Muted: nothing said here is going to be heard, so there is nothing for
+      // a rephrasing to be better *at*. flush_announcements() already drops
+      // the spoken copy and keeps the transcript line, which is the whole of
+      // what a muted report can be; spending a turn to write a sentence the
+      // splitter will then throw away is usage bought for nobody. This is the
+      // ordinary path, unchanged, and it is deliberately decided here rather
+      // than at the flush: the flush point is minutes later and the question
+      // "is this worth a model call?" is asked about the moment it arrived.
+      if (muted_) {
+        announce(shown, spoken);
+        return;
+      }
+      // The live path, M2c.1. The transcript keeps the worker's own words; the
+      // voice waits for the instance to say what happened. `spoken` rides
+      // along as the fallback, so the worst case is exactly the behaviour this
+      // replaced rather than silence.
+      announce(shown, "");
+      queue_worker_report(shown, spoken);
       return;
     }
     // M2b.5. Every schedule-started worker is now registered, not only the
@@ -331,7 +370,11 @@ void VoiceSession::load() {
       return;
     }
     announce(shown, "");
-    queue_injected_turn(scheduled_report_prompt(state, shown));
+    // M2c.1: the raw sentence as the fallback here too. Before this the only
+    // thing said when a report turn failed was Msg::ScheduledReportLost, which
+    // tells the user a promise was broken without telling them the outcome
+    // that was sitting right there.
+    queue_injected_turn(scheduled_report_prompt(state, shown), spoken);
   });
   // M3.3. The same store the system prompt was composed from, read a second
   // time for its lazy half. Cheap (a few small files), and it keeps the
@@ -977,7 +1020,7 @@ void VoiceSession::start_turn(std::string text) {
   });
 }
 
-void VoiceSession::start_injected_turn(std::string sent) {
+void VoiceSession::start_injected_turn(std::string sent, std::string fallback) {
   // No user line: nobody said this. The transcript already carries what the
   // worker reported (announce(shown, "") put it there the moment it arrived),
   // so the only thing missing from the record is Claude's answer, and that is
@@ -998,13 +1041,13 @@ void VoiceSession::start_injected_turn(std::string sent) {
     status_ = "thinking...";
   }
   turn_running_ = true;
-  turn_ = std::thread([this, sent = std::move(sent)] {
-    run_turn(sent, true);
+  turn_ = std::thread([this, sent = std::move(sent), fallback = std::move(fallback)] {
+    run_turn(sent, true, fallback);
     turn_running_ = false;
   });
 }
 
-void VoiceSession::run_turn(std::string text, bool is_injected) {
+void VoiceSession::run_turn(std::string text, bool is_injected, std::string fallback) {
   speech_->mark_new_reply();
   // The one place a reply becomes sound, and therefore the only place mute can
   // honestly be applied. Clearing the queue alone (what silence() used to do)
@@ -1117,13 +1160,24 @@ void VoiceSession::run_turn(std::string text, bool is_injected) {
     }
   }
   if (injected_turn_failed) {
-    // Says nothing about what failed, on purpose: the user is being told that
-    // a promise was not kept, and a client error string is jargon they cannot
-    // act on. The status line and the log have the reason. Named nothing —
-    // no worker, no folder, no error code — the same rule the worker report
-    // and every other canned line in this app follow.
-    log("[schedule] the report turn failed: " + r.error);
-    announce(app_text(Msg::ScheduledReportLost));
+    // **M2c.1. The fallback is the raw report, and the canned line is what is
+    // left when there is not one.**
+    //
+    // Everything that routes a result through the model arrives here holding
+    // the sentence it was going to say before it decided to ask for a better
+    // one. That sentence is already written, already localised by the string
+    // table, and already correct — it is only *worse*, not wrong. So a model
+    // call that does not come back costs the user the phrasing and nothing
+    // else, which is the property that makes routing reports through a turn
+    // safe to do at all. Silence here would not be a degraded report; it
+    // would be the app forgetting it had been asked to do something.
+    //
+    // Msg::ScheduledReportLost stays for the callers that have no raw copy —
+    // a bare reminder, which never had words of its own to fall back to. It
+    // says nothing about what failed, on purpose: a client error string is
+    // jargon the user cannot act on, and the status line and the log have it.
+    log("[report] the report turn failed: " + r.error);
+    announce(fallback.empty() ? app_text(Msg::ScheduledReportLost) : fallback);
     return;
   }
   if (!r.ok) return;
@@ -1234,10 +1288,23 @@ bool VoiceSession::flush_announcements() {
 // nothing, where a turn costs seconds and subscription usage, so the thing
 // that can be said now is said now.
 
-void VoiceSession::queue_injected_turn(std::string sent) {
+void VoiceSession::queue_injected_turn(std::string sent, std::string fallback) {
   if (sent.empty()) return;
+  PendingTurn t;
+  t.sent = std::move(sent);
+  t.fallback = std::move(fallback);
   std::lock_guard<std::mutex> l(mutex_);
-  pending_turns_.push_back(std::move(sent));
+  pending_turns_.push_back(std::move(t));
+}
+
+void VoiceSession::queue_worker_report(std::string shown, std::string spoken) {
+  if (shown.empty()) return;
+  PendingTurn t;
+  t.report = std::move(shown);
+  t.fallback = std::move(spoken);
+  t.live_worker = true;
+  std::lock_guard<std::mutex> l(mutex_);
+  pending_turns_.push_back(std::move(t));
 }
 
 bool VoiceSession::flush_injected_turns() {
@@ -1246,16 +1313,43 @@ bool VoiceSession::flush_injected_turns() {
   // only ever cleared by the turn thread itself and only ever set here and in
   // start_turn(), which is also frame loop only.
   if (turn_running_) return false;
-  std::string sent;
+  std::string sent, fallback;
   {
     std::lock_guard<std::mutex> l(mutex_);
     if (pending_turns_.empty()) return false;
-    // One at a time. Two reports that came due together are two turns, not one
-    // turn describing both: the second is started from the Idle the first one
-    // returns to, so the user hears them as two things because they were two
-    // things.
-    sent = std::move(pending_turns_.front());
-    pending_turns_.erase(pending_turns_.begin());
+    if (pending_turns_.front().live_worker) {
+      // **M2c.1. Live worker reports are merged, and scheduled ones are not.**
+      //
+      // The rule below for schedules — one turn each, because the user asked
+      // for them at two different moments and experiences them as two promises
+      // — inverts for live workers. Three workers the user started in one
+      // breath and that finish within a second of each other are one piece of
+      // news, and three consecutive model calls about them would be the app
+      // holding the floor for the better part of a minute to say what fits in
+      // a sentence. So every *consecutive* live report waiting at this moment
+      // goes into one turn. Consecutive, not all of them: a scheduled report
+      // sitting between two live ones keeps its place in the queue, because
+      // reordering it would be this mechanism deciding which promise the user
+      // hears about first.
+      std::vector<std::string> batch;
+      while (!pending_turns_.empty() && pending_turns_.front().live_worker) {
+        batch.push_back(std::move(pending_turns_.front().report));
+        if (!pending_turns_.front().fallback.empty()) {
+          if (!fallback.empty()) fallback += " ";
+          fallback += pending_turns_.front().fallback;
+        }
+        pending_turns_.erase(pending_turns_.begin());
+      }
+      sent = live_report_prompt(batch);
+    } else {
+      // One at a time. Two reports that came due together are two turns, not one
+      // turn describing both: the second is started from the Idle the first one
+      // returns to, so the user hears them as two things because they were two
+      // things.
+      sent = std::move(pending_turns_.front().sent);
+      fallback = std::move(pending_turns_.front().fallback);
+      pending_turns_.erase(pending_turns_.begin());
+    }
     partial_.clear();
   }
   // The microphone closes before the turn starts, not when the reply begins
@@ -1268,8 +1362,8 @@ bool VoiceSession::flush_injected_turns() {
   mic_->drain(chunk_);
   chunk_.clear();
   speech_->clear();
-  log("[schedule] reporting back through Claude");
-  start_injected_turn(std::move(sent));
+  log("[report] reporting back through Claude");
+  start_injected_turn(std::move(sent), std::move(fallback));
   return true;
 }
 
@@ -1548,6 +1642,38 @@ std::string VoiceSession::scheduled_report_prompt(WorkerPool::State state,
       "is. Do not mention this message, the app, the worker, its name, or any file path.";
   return "<context name=\"Deferred task\" kind=\"report\">\n" + body + "\n</context>\n\n" +
          "Tell me how that went.";
+}
+
+std::string VoiceSession::live_report_prompt(const std::vector<std::string>& shown) {
+  // M2c.1. The same wrapper and the same division of labour as
+  // scheduled_report_prompt(): the app supplies the fact, the model supplies
+  // the wording, and the rules about how this app sounds reach it through the
+  // composed system prompt rather than being restated here.
+  //
+  // What differs is the framing, and it is not cosmetic. The user is at the
+  // desk. They asked for this work a few minutes ago, in this conversation,
+  // and the model can see that it asked for the worker itself — so "picking
+  // the conversation back up after a gap" would be wrong, and so would a
+  // recap of what the task was. They know. They want the outcome.
+  const bool many = shown.size() > 1;
+  std::string body =
+      many ? "Several of the background tasks you started have just finished, together.\n\n"
+           : "The background task you started has just finished.\n\n";
+  body += "What came back";
+  body += many ? ", one line each:\n" : ":\n";
+  for (const std::string& s : shown) body += (many ? "- " : "") + s + "\n";
+  body += "\n";
+  body +=
+      "That text was written to be read, not heard: it may carry file names, paths, "
+      "identifiers or counts. Say what it amounts to, out loud, in the language you have "
+      "been speaking";
+  body += many ? ", in one or two short sentences covering all of them together.\n"
+               : ", in one short sentence.\n";
+  body +=
+      "Do not read the text back, do not spell out paths or names, and do not mention this "
+      "message, the app or the worker.";
+  return "<context name=\"Task finished\" kind=\"report\">\n" + body + "\n</context>\n\n" +
+         "That's back — what happened?";
 }
 
 void VoiceSession::deliver_schedule(const Schedule& s) {
