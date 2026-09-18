@@ -315,10 +315,20 @@ void VoiceSession::load() {
       return;
     }
     // The spoken line no longer carries the client's own words, so the raw
-    // reason has to be somewhere a person can go and look. It is on the
+    // report has to be somewhere a person can go and look. It is on the
     // transcript line (`shown`) and on the pool's snapshot; this puts it in
     // the log too, which is the one of the three that outlives the session.
-    if (state == WorkerPool::State::Failed) log("[worker] " + shown);
+    //
+    // M2c.1 widened this from failures to every report, and that is not
+    // tidiness. Now that what is *said* is the model's paraphrase, the raw
+    // sentence and the spoken one are two different strings for the first
+    // time on the success path as well, and a log holding only one of them
+    // cannot answer the only question worth asking of this feature — whether
+    // the paraphrase was faithful. Next to the `[speak]` line that
+    // flush_announcements() and the splitter write, this gives a run both
+    // halves in one file. HANDOFF lists "the avatar logs no spoken text" as a
+    // harness blindness; this is the other half of the same hole.
+    log("[worker] " + shown);
     bool phrased = true;
     const bool scheduled = take_scheduled_worker(name, &phrased);
     // **A worker that did not finish keeps its canned line, scheduled or not.**
