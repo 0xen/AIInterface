@@ -1,6 +1,7 @@
 #pragma once
 // Streaming speech recogniser (sherpa-onnx online transducer, Nemotron-3.5).
 #include <string>
+#include <vector>
 
 struct SherpaOnnxOnlineRecognizer;
 struct SherpaOnnxOnlineStream;
@@ -42,14 +43,47 @@ class Recognizer {
   bool is_endpoint();
   std::string finish();                             // flush, return final text
 
+  // M8.4, the segmental re-decode. Only ever runs while the language is
+  // "auto" — that is, only when both languages are on, which is the one
+  // configuration in which the deletion happens (a pinned recogniser does not
+  // delete, which is what the language toggles already buy). Off switches it
+  // for the offline harness, which measures the same audio both ways.
+  void set_redecode(bool on) { redecode_ = on; }
+
+  // What the last finish() did about it. Nothing reads this in the app; the
+  // harness scores it, and it is what a log line would print.
+  struct RedecodeInfo {
+    bool fired = false;          // the detector found a suspect span
+    float cut_a = -1.0f, cut_b = -1.0f;  // the window handed to the second decode
+    float gap = 0.0f;            // the loud token-timestamp gap that fired it
+    std::string decoded;         // raw text of that language=ja decode
+    bool spliced = false;        // accepted and written into the returned text
+    float ms = 0.0f;             // wall-clock cost of the second decode
+  };
+  const RedecodeInfo& last_redecode() const { return redecode_info_; }
+
  private:
   void create_stream();
   void destroy_stream();
+  // M8.4. See the .cpp: find the span the decoder emitted nothing for, decode
+  // it again pinned to Japanese, and splice the result back in.
+  std::string redecode_and_splice(const std::vector<std::string>& tokens,
+                                  const std::vector<float>& times);
+  std::string decode_segment(const std::vector<float>& pcm, const char* lang);
 
   const SherpaOnnxOnlineRecognizer* recognizer_ = nullptr;
   const SherpaOnnxOnlineStream* stream_ = nullptr;
   std::string language_ = "auto";
   std::string encoder_, decoder_, joiner_, tokens_;
+
+  // M8.4. The utterance's own PCM, 16 kHz mono, kept so that a span of it can
+  // be decoded a second time. Capped (see kMaxBufferSec in the .cpp); past the
+  // cap the re-decode is skipped rather than run against a buffer whose
+  // timestamps no longer line up with the decoder's.
+  std::vector<float> audio_;
+  bool audio_usable_ = true;
+  bool redecode_ = true;
+  RedecodeInfo redecode_info_;
 };
 
 }  // namespace aii
