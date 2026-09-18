@@ -120,6 +120,10 @@ class SidebarWindow {
   HWND hwnd() const;
   unsigned width() const;
   unsigned height() const;
+  // The strip's left edge in screen pixels, as of the last dock(). What docks
+  // further left — M9.1's worker strip — needs it, and computing it again at
+  // the call site would mean a second copy of the dock gap.
+  int left() const;
 
  private:
   SidebarWindow() = default;

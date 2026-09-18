@@ -1,0 +1,408 @@
+#include "worker_strip_window.h"
+
+#include "rend/core/log.h"
+#include "rend/gpu/command_context.h"
+#include "rend/gpu/device.h"
+#include "rend/gpu/frame_renderer.h"
+#include "rend/gpu/instance.h"
+#include "rend/gpu/swapchain.h"
+#include "rend/platform/backend.h"
+
+#include <windows.h>
+#include <commctrl.h>
+#include <windowsx.h>
+
+#include "imgui.h"
+
+#include <algorithm>
+#include <cfloat>
+#include <utility>
+#include <vector>
+
+#include "imgui_layer.h"
+#include "pixel_icons.h"
+
+using namespace rend;
+
+namespace aii {
+namespace {
+
+// ---- layout (pixels) ----
+//
+// Deliberately the primary strip's numbers, not new ones: the two columns sit
+// side by side and the eye reads them as one control surface, which it stops
+// doing the moment the buttons are a different size.
+constexpr unsigned kStripW = 48;
+constexpr float kButton = 40.0f;
+constexpr float kButtonGap = 6.0f;
+constexpr float kStripPad = 3.0f;
+constexpr int kDockGap = 6;
+
+unsigned strip_height(std::size_t slots) {
+  if (slots == 0) slots = 1;  // never a 0-px swapchain; see the empty slot below
+  return static_cast<unsigned>(2.0f * kStripPad + slots * kButton + (slots - 1) * kButtonGap +
+                               0.5f);
+}
+
+// The state colours the panel's worker rows already use (avatar_ui.cpp's
+// worker_color). Repeated rather than shared because avatar_ui's palette
+// helpers are file-local there, and because a worker's icon and its panel row
+// agreeing is a property worth one duplicated switch.
+ImVec4 state_ink(WorkerPool::State s) {
+  switch (s) {
+    case WorkerPool::State::Working: return ui_color(0.44f, 0.80f, 0.53f);
+    case WorkerPool::State::Done: return ui_color(0.78f, 0.62f, 0.95f);
+    case WorkerPool::State::Failed: return ui_color(0.95f, 0.53f, 0.44f);
+    default: return ui_color(0.62f, 0.65f, 0.72f);
+  }
+}
+
+// This window's own input, queued rather than fed to ImGui as it arrives — the
+// messages are pumped inside the *widget's* pumpEvents() call, where another
+// ImGui context is current and another frame may be half built. (Same
+// reasoning, same shape, as SidebarInput and InspectorInput.)
+struct WorkerStripInput {
+  std::vector<std::pair<int, bool>> buttons;  // (ImGui button index, pressed)
+  float wheel = 0.0f;
+};
+
+LRESULT CALLBACK workerStripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
+                                 DWORD_PTR ref) {
+  auto* in = reinterpret_cast<WorkerStripInput*>(ref);
+  if (in) {
+    switch (msg) {
+      case WM_LBUTTONDOWN: in->buttons.emplace_back(0, true); break;
+      case WM_LBUTTONUP: in->buttons.emplace_back(0, false); break;
+      case WM_MOUSEWHEEL: in->wheel += GET_WHEEL_DELTA_WPARAM(wp) / 120.0f; break;
+      case WM_MOUSEACTIVATE:
+        // WS_EX_NOACTIVATE is not enough, measured on the primary strip: SDL's
+        // own window procedure answers WM_MOUSEACTIVATE before the ex-style is
+        // consulted. The click still arrives; the caret stays where it was.
+        return MA_NOACTIVATE;
+      case WM_CLOSE:
+        // Swallowed, and a safety property rather than a nicety: the SDL3
+        // backend maps both SDL_EVENT_QUIT and SDL_EVENT_WINDOW_CLOSE_REQUESTED
+        // onto one identityless Event::CloseRequested that the frame loop quits
+        // the whole application on. This window is borderless and has no close
+        // box, so nothing should ever send it one — which is exactly why the
+        // day something does, it must not take the widget with it.
+        return 0;
+      default: break;
+    }
+  }
+  return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+}  // namespace
+
+struct WorkerStripWindow::Impl {
+  std::unique_ptr<platform::PresentationTarget> target;
+  std::unique_ptr<gpu::Swapchain> swapchain;
+  std::unique_ptr<gpu::FrameRenderer> renderer;
+  std::unique_ptr<ImGuiLayer> ui;
+  std::unique_ptr<WorkerStripInput> input;
+  HWND hwnd = nullptr;
+  HWND prev_foreground = nullptr;
+  unsigned w = kStripW;
+  unsigned h = 0;
+  int x = 0, y = 0;
+  bool shown = false;
+  bool subclassed = false;
+  std::vector<WorkerStripRow> rows;
+  std::string tooltip;
+  float tooltip_y = 0.0f;  // screen space
+};
+
+std::unique_ptr<WorkerStripWindow> WorkerStripWindow::create(platform::IPlatformBackend& backend,
+                                                             gpu::Instance& instance,
+                                                             gpu::Device& device, float font_px,
+                                                             std::string* error) {
+  const auto fail = [&](std::string msg) -> std::unique_ptr<WorkerStripWindow> {
+    if (error) *error = std::move(msg);
+    return nullptr;
+  };
+  auto self = std::unique_ptr<WorkerStripWindow>(new WorkerStripWindow());
+  self->p_ = std::make_unique<Impl>();
+  Impl& s = *self->p_;
+  // Before the window exists, because it is about to take the foreground away
+  // from whoever has it — the same measured behaviour the primary strip hands
+  // it back for.
+  s.prev_foreground = GetForegroundWindow();
+  s.h = strip_height(0);
+
+  auto t = backend.createTarget({
+      .style = platform::WindowStyle::BorderlessTransparent,
+      .size = {s.w, s.h},
+      .title = "AIInterface workers",
+      .vulkan = false,
+  });
+  if (!t) return fail("createTarget: " + t.error().message);
+  s.target = std::move(t).value();
+  s.hwnd = static_cast<HWND>(backend.nativeWindowHandle(*s.target));
+  if (!s.hwnd) return fail("no HWND for the worker strip");
+
+  // Hidden, restyled, and shown again by dock() with SW_SHOWNOACTIVATE, for the
+  // primary strip's reason: createTarget ends in SDL_ShowWindow, which
+  // *activates*, and a style added afterwards cannot undo an activation that
+  // already happened. Showing it here would also put it wherever SDL happened
+  // to place it for a frame.
+  ShowWindow(s.hwnd, SW_HIDE);
+  const LONG_PTR ex = GetWindowLongPtrW(s.hwnd, GWL_EXSTYLE);
+  SetWindowLongPtrW(s.hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+
+  auto sc = gpu::Swapchain::create(instance, device,
+                                   {
+                                       .nativeSurface = s.hwnd,
+                                       .width = s.w,
+                                       .height = s.h,
+                                       .transparent = true,
+                                       .vsync = false,  // vsynced chains on one thread divide fps
+                                   });
+  if (!sc) return fail("swapchain: " + sc.error().message);
+  s.swapchain = std::move(sc).value();
+
+  auto fr = gpu::FrameRenderer::create(device, *s.swapchain);
+  if (!fr) return fail("frame renderer: " + fr.error().message);
+  s.renderer = std::move(fr).value();
+  s.renderer->setClearColor(0.0f, 0.0f, 0.0f, 0.0f);  // premultiplied: desktop shows through
+
+  std::string err;
+  s.ui = ImGuiLayer::create(device, s.swapchain->imageFormat(), font_px, &err);
+  if (!s.ui) return fail("imgui: " + err);
+  ImGuiLayer* layer = s.ui.get();
+  s.renderer->setOverlayRecorder([layer](gpu::CommandContext& cmd) { layer->end_frame(cmd); });
+
+  s.input = std::make_unique<WorkerStripInput>();
+  s.subclassed = SetWindowSubclass(s.hwnd, workerStripProc, 1,
+                                   reinterpret_cast<DWORD_PTR>(s.input.get())) != FALSE;
+  if (!s.subclassed) {
+    // Not survivable, and this is the inspector's rule rather than the primary
+    // strip's: without the subclass a WM_CLOSE reaching SDL reports an
+    // identityless CloseRequested, which quits the whole application. A window
+    // that can kill the app is worse than no window at all.
+    return fail("could not subclass the worker strip for input");
+  }
+  log::info("workers: strip up, hwnd {:p}, {}x{}", static_cast<void*>(s.hwnd), s.w, s.h);
+  return self;
+}
+
+WorkerStripWindow::~WorkerStripWindow() {
+  if (!p_) return;
+  Impl& s = *p_;
+  // The primary strip's order, for the primary strip's reasons: the subclass
+  // comes off the HWND before the input it points at is freed, the GPU is
+  // waited on, and the renderer's callbacks are dropped before the objects they
+  // capture. This runs on every close, not only at exit, so it is what decides
+  // whether opening and closing the strip fifty times leaks fifty ImGui
+  // contexts.
+  if (s.hwnd && s.subclassed) RemoveWindowSubclass(s.hwnd, workerStripProc, 1);
+  if (s.renderer) {
+    s.renderer->waitIdle();
+    s.renderer->setOverlayRecorder(nullptr);
+    s.renderer->setFramePasses({});
+  }
+  s.ui.reset();
+  s.renderer.reset();
+  s.swapchain.reset();
+  s.target.reset();
+  log::info("workers: strip torn down");
+}
+
+HWND WorkerStripWindow::hwnd() const { return p_->hwnd; }
+unsigned WorkerStripWindow::width() const { return p_->w; }
+unsigned WorkerStripWindow::height() const { return p_->h; }
+int WorkerStripWindow::left() const { return p_->x; }
+
+void WorkerStripWindow::set_rows(std::vector<WorkerStripRow> rows) {
+  if (rows.size() > kWorkerSlotsMax) rows.resize(kWorkerSlotsMax);
+  p_->rows = std::move(rows);
+}
+
+void WorkerStripWindow::dock(const RECT& widget, unsigned band, int right_edge) {
+  Impl& s = *p_;
+  const unsigned want = strip_height(s.rows.size());
+  const int x = right_edge - static_cast<int>(s.w) - kDockGap;
+  // The panel's top, not the window's: the band above it is transparent air,
+  // and a strip floating beside it would not read as part of the widget.
+  const int y = static_cast<int>(widget.top) + static_cast<int>(band);
+  const bool resize = want != s.h;
+  if (!resize && x == s.x && y == s.y && s.shown) return;
+
+  if (resize) {
+    // Through the target, never a raw SetWindowPos: SDL answers WM_NCCALCSIZE
+    // with the size *it* holds, so a raw resize grows the window rect while the
+    // client rect — the part DWM composites — stays put, and the strip silently
+    // clips. This window resizes every time a worker starts or finishes, which
+    // makes it the one in this app most likely to have found that out the hard
+    // way.
+    s.h = want;
+    s.target->setSize({s.w, s.h});
+  }
+  s.x = x;
+  s.y = y;
+  SetWindowPos(s.hwnd, HWND_TOPMOST, x, y, static_cast<int>(s.w), static_cast<int>(s.h),
+               SWP_NOACTIVATE);
+  if (resize) s.renderer->resize(s.w, s.h);
+  if (!s.shown) {
+    ShowWindow(s.hwnd, SW_SHOWNOACTIVATE);
+    s.shown = true;
+    // And then give the foreground back, because none of the above is enough on
+    // its own: measured on the primary strip, the activation SDL performed at
+    // creation outlives every later "do not activate". This window is opened by
+    // a click, so the thing it would steal the caret from is whatever the user
+    // was typing in a moment ago.
+    if (s.prev_foreground && GetForegroundWindow() == s.hwnd)
+      SetForegroundWindow(s.prev_foreground);
+  }
+}
+
+WorkerStripResult WorkerStripWindow::draw(float dt) {
+  Impl& s = *p_;
+  WorkerStripResult out;
+  s.tooltip.clear();
+  if (!s.ui) return out;
+
+  // Its own context, first: ImGui's ambient current context belongs to whoever
+  // touched it last, and with four window types — and N chat windows — that is
+  // never a safe assumption.
+  s.ui->make_current();
+  ImGuiIO& io = ImGui::GetIO();
+
+  // The pointer, polled rather than tracked from WM_MOUSEMOVE: this window
+  // moves under a still pointer every time the chat opens *and* resizes itself
+  // every time a worker starts or stops, and a position that only changes when
+  // the mouse does would leave a slot hovered that the pointer is no longer
+  // over — or, worse, hovered over a different worker than the one it was on.
+  POINT cursor{};
+  if (GetCursorPos(&cursor)) {
+    POINT local = cursor;
+    if (ScreenToClient(s.hwnd, &local) && local.x >= 0 && local.y >= 0 &&
+        local.x < static_cast<LONG>(s.w) && local.y < static_cast<LONG>(s.h))
+      io.AddMousePosEvent(static_cast<float>(local.x), static_cast<float>(local.y));
+    else
+      io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+  }
+  for (const auto& [button, pressed] : s.input->buttons) io.AddMouseButtonEvent(button, pressed);
+  s.input->buttons.clear();
+  if (s.input->wheel != 0.0f) {
+    io.AddMouseWheelEvent(0.0f, s.input->wheel);
+    s.input->wheel = 0.0f;
+  }
+
+  s.ui->begin_frame(s.w, s.h, dt);
+  ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+  ImGui::SetNextWindowSize(ImVec2(static_cast<float>(s.w), static_cast<float>(s.h)));
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, ui_color(0.086f, 0.094f, 0.118f));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kStripPad, kStripPad));
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, kButtonGap));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+  ImGui::Begin("##worker_strip", nullptr,
+               ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
+                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const char* const* figure = icon_for_glyph(ButtonGlyph::Workers);
+
+  if (s.rows.empty()) {
+    // **The empty strip, which is the normal one.** This app runs with zero
+    // workers nearly all of the time, so the case the user will see most often
+    // is this one, and it must read as "nothing is running" rather than as a
+    // window that failed to draw. A dimmed, unclickable slot with the same
+    // figure in it says that; an empty 48x46 rectangle says nothing at all, and
+    // a strip that collapsed to zero height would be a zero-px swapchain.
+    //
+    // It is an InvisibleButton rather than a disabled one because a disabled
+    // item is not hovered, and the tooltip is the whole of the explanation.
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##worker_none", ImVec2(kButton, kButton));
+    dl->AddRect(p, ImVec2(p.x + kButton, p.y + kButton),
+                ImGui::GetColorU32(ui_color(0.22f, 0.24f, 0.29f)), 5.0f);
+    if (figure) {
+      const ImU32 ink = ImGui::GetColorU32(ui_color(0.28f, 0.30f, 0.36f));
+      draw_icon(dl, figure, ImVec2(p.x + (kButton - kIconPx) * 0.5f, p.y + (kButton - kIconPx) * 0.5f),
+                ink, ink);
+    }
+    if (ImGui::IsItemHovered()) {
+      s.tooltip = "No workers running";
+      s.tooltip_y = static_cast<float>(s.y) + p.y + kButton * 0.5f;
+    }
+  }
+
+  for (const WorkerStripRow& row : s.rows) {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton(("##worker_" + row.name).c_str(),
+                                                ImVec2(kButton, kButton));
+    const ImGuiCol bg = ImGui::IsItemActive()    ? ImGuiCol_ButtonActive
+                        : ImGui::IsItemHovered() ? ImGuiCol_ButtonHovered
+                                                 : ImGuiCol_Button;
+    dl->AddRectFilled(p, ImVec2(p.x + kButton, p.y + kButton), ImGui::GetColorU32(bg), 5.0f);
+    const ImU32 ink = ImGui::GetColorU32(state_ink(row.state));
+    if (figure)
+      draw_icon(dl, figure, ImVec2(p.x + (kButton - kIconPx) * 0.5f, p.y + (kButton - kIconPx) * 0.5f),
+                ink, ink);
+    // The worker's initial, bottom-right. Two workers are two identical figures
+    // otherwise, and "which of these is `scout`" is the first question the strip
+    // is asked — the tooltip answers it, but only after a hover, and a column
+    // you have to hover to read is a column you stop using.
+    if (!row.name.empty()) {
+      const char badge[2] = {row.name[0], '\0'};
+      const ImVec2 size = ImGui::CalcTextSize(badge);
+      dl->AddText(ImVec2(p.x + kButton - size.x - 3.0f, p.y + kButton - size.y - 1.0f), ink, badge);
+    }
+    // Open: a bar down the left edge, in the state's own colour. A second
+    // *shape* rather than a second colour, because the colour is already
+    // carrying the state and two meanings on one channel is how a legend
+    // becomes necessary.
+    if (row.window_open)
+      dl->AddRectFilled(ImVec2(p.x + 1.0f, p.y + 5.0f), ImVec2(p.x + 3.0f, p.y + kButton - 5.0f),
+                        ink, 1.0f);
+    if (ImGui::IsItemHovered()) {
+      s.tooltip = row.name + "  [" + worker_state_name(row.state) + "]";
+      if (!row.activity.empty()) s.tooltip += "\n" + row.activity;
+      s.tooltip += row.window_open ? "\nClick to close its window" : "\nClick to watch it";
+      // Screen space: ImGui's coordinates here are this window's client area,
+      // and the widget that letters the tooltip has its own.
+      s.tooltip_y = static_cast<float>(s.y) + p.y + kButton * 0.5f;
+    }
+    if (clicked) out.toggled = row.name;
+  }
+
+  ImGui::End();
+  ImGui::PopStyleVar(3);
+  ImGui::PopStyleColor();
+
+  if (auto r = s.renderer->waitFrameSlot(); !r) {
+    log::error("worker strip wait: {}", r.error().message);
+    return out;
+  }
+  if (auto d = s.renderer->drawFrame(nullptr); !d)
+    log::error("worker strip draw: {}", d.error().message);
+  return out;
+}
+
+void WorkerStripWindow::draw_tooltip_into_widget(const RECT& widget) const {
+  const Impl& s = *p_;
+  if (s.tooltip.empty()) return;
+  // Called inside the widget's ImGui frame: its context is current, its
+  // viewport is the widget's 360 px, and its foreground draw list is over
+  // everything the panel drew. This window's own context is untouched.
+  ImDrawList* dl = ImGui::GetForegroundDrawList();
+  const float pad = 6.0f;
+  const ImVec2 size = ImGui::CalcTextSize(s.tooltip.c_str());
+  const float x = 4.0f;
+  // Centred on the icon, then kept inside the widget: the foreground draw list
+  // is clipped to the widget's viewport, so a three-line label beside the last
+  // slot would have its last line silently cut off at the widget's bottom edge.
+  const float height = static_cast<float>(widget.bottom - widget.top);
+  const float y = std::clamp(s.tooltip_y - static_cast<float>(widget.top) - size.y * 0.5f, 4.0f,
+                             std::max(4.0f, height - size.y - 4.0f));
+  const ImVec2 a(x, y - pad * 0.5f);
+  const ImVec2 b(x + size.x + 2.0f * pad, y + size.y + pad * 0.5f);
+  dl->AddRectFilled(a, b, ImGui::GetColorU32(ui_color(0.16f, 0.17f, 0.21f, 0.96f)), 4.0f);
+  dl->AddRect(a, b, ImGui::GetColorU32(ui_color(0.32f, 0.34f, 0.40f)), 4.0f);
+  dl->AddText(ImVec2(x + pad, y), ImGui::GetColorU32(ui_color(0.91f, 0.92f, 0.94f)),
+              s.tooltip.c_str());
+}
+
+}  // namespace aii

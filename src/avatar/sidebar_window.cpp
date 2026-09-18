@@ -218,6 +218,7 @@ SidebarWindow::~SidebarWindow() {
 HWND SidebarWindow::hwnd() const { return p_->hwnd; }
 unsigned SidebarWindow::width() const { return p_->w; }
 unsigned SidebarWindow::height() const { return p_->h; }
+int SidebarWindow::left() const { return p_->x; }
 
 void SidebarWindow::dock(const RECT& widget, unsigned band) {
   Impl& s = *p_;

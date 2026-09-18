@@ -37,6 +37,10 @@ add_executable(avatar
   voice_session.h
   watermark.cpp
   watermark.h
+  worker_strip_window.cpp
+  worker_strip_window.h
+  worker_window.cpp
+  worker_window.h
   win_text_input.cpp
   win_text_input.h)
 target_include_directories(avatar PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
