@@ -1968,19 +1968,51 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
 
 }  // namespace
 
-bool avatar_visible(AvatarVisibility mode, VoiceSession::State state) {
+bool avatar_engaged(const AvatarEngagement& e) {
+  switch (e.state) {
+    // A turn in flight, in any of its phases. Thinking is on this list now,
+    // and it is the single line that stops the avatar leaving in the middle
+    // of the question it was asked (user, 19 Sep 2026).
+    case VoiceSession::State::Listening:
+    case VoiceSession::State::Thinking:
+    case VoiceSession::State::Speaking:
+      return true;
+    default:
+      break;
+  }
+  // Nothing is happening in the session. That is not the same as nobody being
+  // there: the latch, a held Talk button and a half-written message are all
+  // the user, mid-interaction, with the session idle behind them.
+  return e.mic_on || e.mic_hold || e.composing;
+}
+
+bool AvatarPresence::update(AvatarVisibility mode, const AvatarEngagement& e, float dt) {
+  // Loading is the one state the avatar is never wanted in, whatever the mode
+  // and whatever the user's hands are doing: the loading screen owns the
+  // window and the M1.5 handoff is what brings the avatar in.
+  if (e.state == VoiceSession::State::Loading) {
+    linger_ = 0.0f;
+    return false;
+  }
   switch (mode) {
     case AvatarVisibility::Always:
-      // Loading is the one state it is never wanted in: the loading screen
-      // owns the window and the M1.5 handoff is what brings the avatar in.
-      return state != VoiceSession::State::Loading;
+      linger_ = 0.0f;
+      return true;
     case AvatarVisibility::WhenTalking:
-      // Thinking is deliberately not on this list (user, 16 Sep 2026).
-      return state == VoiceSession::State::Listening ||
-             state == VoiceSession::State::Speaking;
+      break;
     default:
+      linger_ = 0.0f;
       return false;
   }
+  if (avatar_engaged(e)) {
+    linger_ = kLingerSeconds;
+    return true;
+  }
+  // Disengaged. The grace runs down from whatever the last engaged frame
+  // left, so re-engaging inside it costs nothing at all -- not a fade, not a
+  // clip -- because the avatar never stopped being wanted.
+  linger_ = std::max(0.0f, linger_ - dt);
+  return linger_ > 0.0f;
 }
 
 AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot& snap,

@@ -1145,6 +1145,7 @@ int main(int /*argc*/, char** /*argv*/) {
     float lastTracedAlpha = -1.0f;
     std::uint32_t lastTracedBand = 9999;
     std::string lastTracedClip;
+    int lastTracedWanted = -1;
     bool running = true;
     std::size_t nextSay = 0;
     // A settle before the next turn goes in: Idle is reached the moment the
@@ -1183,6 +1184,10 @@ int main(int /*argc*/, char** /*argv*/) {
     // special case — the loading screen is up on frame one and it will not
     // let the avatar appear underneath it.
     aii::AvatarAppearance appearance;
+    // And the policy that feeds it: whether the user is engaged, which in
+    // `when_talking` is now the whole of "is the avatar wanted" (user,
+    // 19 Sep 2026). It holds the grace period and nothing else.
+    aii::AvatarPresence presence;
 
     // ---- M4: the sidebar, a real second window ----
     //
@@ -1824,9 +1829,17 @@ int main(int /*argc*/, char** /*argv*/) {
         // dissolve, so the entrance M2.4 fired on the same frame played under
         // a scrim and was finished before the band was opaque. Now the loader
         // leaves first and the avatar is summoned into the space it left.
-        const bool avatarWanted = aii::avatar_visible(
-            uiState.avatar_mode,
-            loading ? aii::VoiceSession::State::Loading : snap.state);
+        // What the user is doing, gathered here and judged in one place
+        // (avatar_ui.cpp). Every field is a level read off something that
+        // already exists — the session's two microphone answers and the
+        // panel's message buffer — so there is no fourth owner of "is anyone
+        // there" to fall out of step with the three that were already right.
+        aii::AvatarEngagement engagement;
+        engagement.state = loading ? aii::VoiceSession::State::Loading : snap.state;
+        engagement.mic_on = session && session->mic_open();
+        engagement.mic_hold = session && session->mic_hold();
+        engagement.composing = uiState.message[0] != '\0';
+        const bool avatarWanted = presence.update(uiState.avatar_mode, engagement, dt);
         const aii::AvatarAppearance::Frame appeared =
             appearance.update(avatarWanted, loading, dt);
         avatarAlpha = appeared.alpha;
@@ -2323,12 +2336,19 @@ int main(int /*argc*/, char** /*argv*/) {
             if (hwnd) { GetWindowRect(hwnd, &wr); GetClientRect(hwnd, &cr); }
             const bool interesting = avatarAlpha != lastTracedAlpha || band != lastTracedBand ||
                                      pendingH != 0 || nextBand != band ||
+                                     (avatarWanted ? 1 : 0) != lastTracedWanted ||
                                      controller.clip() != lastTracedClip;
             if (interesting) {
-                log::info("[band] f={} t={:.3f} dt={:.4f} state={} wanted={} loading={} "
+                // `mic` and `draft` are the engagement inputs the user's rule
+                // is written in; without them a trace can say the avatar was
+                // wanted but not why anyone thought so.
+                log::info("[band] f={} t={:.3f} dt={:.4f} state={} wanted={} mic={}{} draft={} "
+                          "loading={} "
                           "alpha={:.4f} clip={} why={} band={} next={} h={} pendingH={} winH={} "
                           "win={}x{} client={}x{} winTop={}",
                           frameNo, t, dt, static_cast<int>(snap.state), avatarWanted ? 1 : 0,
+                          engagement.mic_on ? 1 : 0, engagement.mic_hold ? "h" : "",
+                          engagement.composing ? 1 : 0,
                           loading ? 1 : 0, avatarAlpha, controller.clip(), controller.reason(),
                           band, nextBand, height, pendingH, windowH,
                           static_cast<int>(wr.right - wr.left), static_cast<int>(wr.bottom - wr.top),
@@ -2336,6 +2356,7 @@ int main(int /*argc*/, char** /*argv*/) {
                           static_cast<int>(wr.top));
             }
             lastTracedClip = controller.clip();
+            lastTracedWanted = avatarWanted ? 1 : 0;
             lastTracedAlpha = avatarAlpha;
             lastTracedBand = band;
         }

@@ -18,8 +18,9 @@
 namespace aii {
 
 // The three avatar visibility modes, in the order the button cycles them
-// (user, 16 Sep 2026). `WhenTalking` is listening or speaking only — it goes
-// dark through the thinking pause, which the user chose knowing it does.
+// (user, 16 Sep 2026). `WhenTalking` is *while the user is engaged* — see
+// AvatarEngagement below for what that means and why it is no longer a
+// property of the session's state alone (user, 19 Sep 2026).
 enum class AvatarVisibility { Always, WhenTalking, Hidden };
 constexpr int kAvatarVisibilityCount = 3;
 // How the three modes are spelled in the settings file (M1b.5), in enum
@@ -75,10 +76,88 @@ constexpr float kTalkHoldSeconds = 0.40f;
 constexpr int kListenTimeoutUserFloorSec = 15;
 constexpr int kListenTimeoutMaxSec = 600;
 
-// Whether the avatar belongs on screen for this mode in this state. The rule
+// ------------------------------------------------- when the avatar is here
+//
+// (user, 19 Sep 2026: "When I have it with mic toggled on, whenever I ask
+// something, the AI keeps jumping in and out of the window. I do not want
+// this. I only want the AI's avatar to physically leave the window when I
+// have stopped interacting with it, for example, and I've turned the
+// microphone off.")
+//
+// This reverses the 16 Sep rule, and the reversal is the user's own. The old
+// one asked which state the *session* was in — Listening or Speaking, and
+// deliberately not Thinking — so one exchange with the latch open was
+// Listening (in), Thinking (**out**), Speaking (**in**), Idle (**out**): two
+// entrances and two exits for one question. Measured, in this mode, every
+// time.
+//
+// The new rule asks about the **user**, not about the middle of a turn. The
+// avatar is here while they are engaged and leaves when they have stopped
+// interacting, which is what "shown when talking" was always meant to say —
+// a conversation is the unit, not a turn, and certainly not a phase of one.
+struct AvatarEngagement {
+  // Where the session is. Loading is the one answer that outranks everything
+  // else here: that overlay owns the window, and no mode wants the avatar
+  // underneath it.
+  VoiceSession::State state = VoiceSession::State::Loading;
+  // The microphone latch (VoiceSession::mic_open). **The user's own example
+  // of being engaged**, and the reason this struct exists: a latch that is
+  // open is a user who has not finished, whatever the turn is doing this
+  // instant.
+  bool mic_on = false;
+  // A Talk press is down (VoiceSession::mic_hold). Someone holding a button
+  // is interacting with it by definition.
+  bool mic_hold = false;
+  // There is text in the message field. Typing is an interaction too, and it
+  // is the one kind that leaves the session sitting in Idle with the
+  // microphone shut for as long as it takes to write a sentence — exactly the
+  // shape the old rule read as "gone away". A draft is also where a
+  // hold-to-dictate release puts its words, so the avatar stays to be seen
+  // handing them over.
+  bool composing = false;
+};
+
+// Engaged: a turn in flight, or the user's hand on one of the three things
+// they can hold open. Pure, and the whole of the policy — AvatarPresence adds
+// only the grace period, and nothing else in the program restates either.
+bool avatar_engaged(const AvatarEngagement& e);
+
+// Whether the avatar belongs on screen, for this mode, this frame. The rule
 // lives next to the button that sets the mode rather than being restated in
 // the frame loop, which only turns the answer into a fade.
-bool avatar_visible(AvatarVisibility mode, VoiceSession::State state);
+//
+// The one piece of state is the grace period, and it is one number doing two
+// jobs that must not be allowed to disagree:
+//
+//   * **Nothing flaps at the boundary.** A mic toggled off and straight back
+//     on — a mis-click, a second thought — must not cost an exit clip and an
+//     entrance. Two seconds is longer than any hand takes to change its mind
+//     and shorter than any pause that means "I have finished".
+//   * **Dozing and leaving are one idea, in that order.** M1f's auto-listen
+//     timeout closes the latch on a silent room and the slime droops
+//     (`sleepy`, avatar_controller.cpp). That is the stopped-interacting case
+//     par excellence, and it arrives here as `mic_on` going false with the
+//     session already Idle — so the same grace becomes the beat between the
+//     droop and the departure. It reads as one gesture: it gives up on the
+//     room, then it leaves it. Departing on the same frame it dozed would
+//     show the sleepy pose for no frames at all, which is two reactions
+//     racing rather than one sentence; waiting on a second timer of its own
+//     would be a third number for a silence M1f has already measured.
+//
+// Deliberately *not* applied to `always` or `hidden`: those change only when
+// the user cycles the mode button, which is a deliberate act, and a band that
+// is already 0 px wide with an avatar still fading inside it would be the
+// resize bug back in a new shape.
+class AvatarPresence {
+ public:
+  static constexpr float kLingerSeconds = 2.0f;
+
+  // `dt` in seconds. Returns `wanted` for AvatarAppearance::update.
+  bool update(AvatarVisibility mode, const AvatarEngagement& e, float dt);
+
+ private:
+  float linger_ = 0.0f;
+};
 
 // M1c.3: what the settings surface has to offer this frame, from the parts of
 // the app the panel has no business reaching into. The panel owns no art, no

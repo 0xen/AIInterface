@@ -13,7 +13,8 @@
 //
 // So: one object, two inputs, and everything else is derived from them.
 //
-//   `wanted`           -- avatar_visible(mode, state): the mode switch, the
+//   `wanted`           -- AvatarPresence::update(mode, engagement): the
+//                         mode switch, the
 //                         turn start, the hold-to-dictate release and every
 //                         later reason all arrive as this one bool. They are
 //                         not special-cased here and must not be: a path this
