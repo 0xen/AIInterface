@@ -6,7 +6,7 @@
 // an avatar channel, and then the user asked for a script to register toolbar
 // buttons and set avatar themes, neither of which is avatar animation. So
 // avatar control is one *family* of messages among several — `avatar`, `theme`,
-// `toolbar` today, `task` (M2b) next — and the bus itself knows about none of
+// `toolbar`, `script` and (M2b.2) `schedule` — and the bus itself knows about none of
 // them. It carries lines, bounds them, parses them and routes them by family
 // name; what a family means lives in the handler the app registers for it.
 //
@@ -28,6 +28,7 @@
 //                   {"t":"avatar.load","name":"slime"}
 //                   {"t":"theme.set","name":"ember"}
 //                   {"t":"toolbar.button","id":"proj","label":"Project","path":"C:\\x"}
+//                   {"t":"schedule.create","in":"10m","say":"tea","grade":"fixed"}
 //
 // `t` is `family.verb`. The plan's sketch used a bare verb (`{"t":"play"}`),
 // which was unambiguous while the channel was avatar-only and stops being so

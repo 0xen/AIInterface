@@ -190,6 +190,34 @@ class VoiceSession {
   // call, so a "cancel everything" that partly misses says one sentence rather
   // than one per item.
   void request_cancel(std::vector<std::uint64_t> ids);
+  // M2b.2. Cancel one id and say nothing about it. **Frame loop only.** This
+  // is apply_cancels()'s body, one id at a time, and it is public because the
+  // bus needs the *act* without the sentence: apply_cancels() speaks when a
+  // cancel misses because by then the model has already told the user out loud
+  // that it is cancelled, and a script has told the user nothing at all. A
+  // miss is data the script asked for and gets back on the bus; speaking it
+  // would be the app announcing another program's bookkeeping.
+  //
+  // Safe from the bus handler because AppBus::apply_pending() runs earlier in
+  // the same frame, on the same thread, as the schedule tick: a schedule is
+  // either still in the book here, or it fired on an earlier frame and is
+  // already in `scheduled_workers_`. There is no frame on which it is neither,
+  // which is the whole of M2b.5's argument and this call inherits it.
+  bool cancel_schedule(std::uint64_t id);
+  // M2b.2. The pending list as data rather than as the sentence
+  // pending_context() writes for the model. Same three-part definition of
+  // "pending" — schedules not yet due, and workers a schedule started that are
+  // still running — because a script asking "what is pending?" is asking the
+  // same question the user is, and answering it from the book alone would tell
+  // a script that a build it is waiting for does not exist. Any thread.
+  struct PendingItem {
+    std::uint64_t id = 0;
+    std::string kind;   // "timer" / "worker", or "running" once it has started
+    std::string label;
+    bool phrased = false;
+    double seconds = 0.0;  // until due; for a running one, how long it has run
+  };
+  std::vector<PendingItem> pending_items() const;
   // M2b.4. What the app says about schedules it is dropping at shutdown.
   // **One line for all of them**, not one per schedule: this runs during
   // teardown, where the frame loop has already stopped and nothing can be

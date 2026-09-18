@@ -261,6 +261,64 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       "clear_buttons", [] { return post_line(aii::BusLine("toolbar.clear").done()); },
       "Remove every registered toolbar button.");
 
+  // ---- schedules (M2b.2) -------------------------------------------------
+  m.def(
+      "schedule",
+      [](const std::string& in, const std::string& say, const std::string& task,
+         const std::string& cwd, const std::string& name, const std::string& label,
+         const std::string& grade, const std::string& echo) {
+        return post_line(aii::BusLine("schedule.create")
+                             .str("in", in)
+                             .str("say", say)
+                             .str("task", task)
+                             .str("cwd", cwd)
+                             .str("name", name)
+                             .str("label", label)
+                             .str("grade", grade)
+                             .str("echo", echo)
+                             .done());
+      },
+      py::arg("in_"), py::arg("say") = "", py::arg("task") = "", py::arg("cwd") = "",
+      py::arg("name") = "", py::arg("label") = "", py::arg("grade") = "", py::arg("echo") = "",
+      "Defer one thing inside this session. `in_` is a delay a person would "
+      "say -- '90s', '10m', '1h30m' -- capped at a day, because a schedule "
+      "lives only as long as the app and a promise past that is the failure.\n"
+      "\n"
+      "Either `say` (the exact words spoken when it fires) or `task` with an "
+      "absolute `cwd` (a worker does the work then, and Claude reports it in "
+      "its own words). `grade` overrides that default: 'fixed' speaks the "
+      "line as it stands, 'phrased' spends a turn on Claude's own words. The "
+      "assistant is not told about `grade` -- it picks by the shape of what "
+      "was asked -- but a script has no shape to signal with, so it says so "
+      "outright. `echo` comes back on the reply so several scripts can share "
+      "one bus.\n"
+      "\n"
+      "Returns whether the line was accepted, not whether the schedule was "
+      "made: watch for a `schedule.created` or `schedule.refused` event, and "
+      "for `schedule.fired` when it comes due.");
+
+  m.def(
+      "cancel_schedule",
+      [](double id, const std::string& echo) {
+        return post_line(
+            aii::BusLine("schedule.cancel").num("id", id, 0).str("echo", echo).done());
+      },
+      py::arg("id"), py::arg("echo") = "",
+      "Cancel a pending schedule by the id `schedule.created` gave you. Also "
+      "stops a worker one already started. Answered by `schedule.cancelled` "
+      "with ok=False if it had already gone off -- and, unlike the "
+      "assistant's own cancel, nothing is said aloud about it either way.");
+
+  m.def(
+      "list_schedules",
+      [](const std::string& echo) {
+        return post_line(aii::BusLine("schedule.list").str("echo", echo).done());
+      },
+      py::arg("echo") = "",
+      "Ask what is pending. Answered by one `schedule.pending` event per item "
+      "-- schedules not yet due *and* workers a schedule has already started "
+      "-- then one `schedule.list` carrying the count.");
+
   m.attr("scripts") = g_host.scripts;
 
   // The two calls a script actually uses are parsed JSON, not lines. Written

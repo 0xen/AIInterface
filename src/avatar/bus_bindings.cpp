@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <system_error>
 
 #include "core/button_registry.h"
+#include "core/schedule.h"
 #include "core/worker_pool.h"
 
 namespace aii {
@@ -66,6 +68,9 @@ void BusBindings::install(Context ctx) {
   // something the user can see rather than a line in a console they are not
   // watching.
   bus.add_family("script", [this](const BusMessage& m, std::string* e) { on_script(m, e); });
+  // M2b.2. Scheduling without the conversational instance: the family the
+  // ```aii``` verb's `grade=` was parsed and then withheld for.
+  bus.add_family("schedule", [this](const BusMessage& m, std::string* e) { on_schedule(m, e); });
 }
 
 float BusBindings::lease_from(const BusMessage& m) const {
@@ -261,6 +266,146 @@ void BusBindings::on_script(const BusMessage& m, std::string* error) {
     if (script_log_.size() < kBusStatusMax) script_log_.push_back(m.str("text"));
     return;
   }
+  if (error) *error = "unknown verb";
+}
+
+// ---------------------------------------------------------------- schedule
+
+// M2b.2. Scheduling from a script, without the conversational instance.
+//
+// Every verb here runs inside `AppBus::apply_pending()`, which is frame loop
+// only and, in main.cpp, runs *earlier in the same frame* than
+// `ScheduleBook::tick()` and `VoiceSession::apply_cancels()`. That ordering is
+// what makes a cancel from here safe without a second queue: a schedule is
+// either still in the book when this looks, or it fired on an earlier frame
+// and is already recorded as a running worker. It is never in neither place,
+// which is M2b.5's argument and this call simply stands inside it.
+//
+// Nothing here invents a privilege. `create` goes through `build_schedule()`,
+// the same mapping — and the same absolute-`cwd` refusal — the ```aii``` verb
+// uses; `cancel` goes through the session's own two lookups. The one thing a
+// script may do that the model may not is state `grade=`, which is exactly what
+// M2b.3 held back for it.
+void BusBindings::on_schedule(const BusMessage& m, std::string* error) {
+  AppBus& bus = AppBus::instance();
+  // Copied onto the replies so a script sharing the bus with another can pick
+  // its own out. Never interpreted, never stored on the schedule.
+  const std::string echo = m.str("echo");
+
+  if (m.verb == "create") {
+    ScheduleRequest req;
+    req.in = m.str("in");
+    req.say = m.str("say");
+    req.task = m.str("task");
+    req.cwd = m.str("cwd");
+    req.name = m.str("name");
+    req.label = m.str("label");
+    req.grade = m.str("grade");
+    ScheduleAction action;
+    ReportGrade grade = ReportGrade::Fixed;
+    double seconds = 0.0;
+    std::string detail;
+    const ScheduleRefusal why = build_schedule(req, &action, &grade, &seconds, &detail);
+    std::string reason = why == ScheduleRefusal::None ? std::string() : to_string(why);
+    std::uint64_t id = 0;
+    if (reason.empty()) {
+      std::string err;
+      id = ScheduleBook::instance().create(std::chrono::duration<double>(seconds), action, grade,
+                                           &err);
+      // The book's own refusal: full at kSchedulesMax. A script in a loop is
+      // the realistic way to reach it, so this is the one a script most needs
+      // to hear about, and it hears about it as data rather than as silence.
+      if (id == 0) reason = err.empty() ? "the schedule book refused it" : err;
+    }
+    if (!reason.empty()) {
+      // A refused *script* schedule is logged and published, never spoken.
+      // M2b.3's refusals are spoken because the model has already promised the
+      // user a timer out loud by the time the block runs; a script has made no
+      // promise to anyone, and the app announcing another program's mistake is
+      // the toolbar family's rule too.
+      // No verb prefix: AppBus's own status line already carries `family.verb`.
+      if (error) *error = reason + (detail.empty() ? "" : " (" + detail + ")");
+      bus.publish(BusLine("schedule.refused")
+                      .str("reason", reason)
+                      .str("detail", detail)
+                      .str("echo", echo)
+                      .done());
+      return;
+    }
+    if (script_log_.size() < kBusStatusMax) {
+      char when[32];
+      std::snprintf(when, sizeof when, "%.1fs", seconds);
+      script_log_.push_back("scheduled id=" + std::to_string(id) + " kind=" + action.kind +
+                            " grade=" + to_string(grade) + " in " + when);
+    }
+    bus.publish(BusLine("schedule.created")
+                    .num("id", static_cast<double>(id), 0)
+                    .str("kind", action.kind)
+                    .str("grade", to_string(grade))
+                    .num("in", seconds)
+                    .str("label", action.label)
+                    .str("echo", echo)
+                    .done());
+    return;
+  }
+
+  if (m.verb == "cancel") {
+    const std::uint64_t id = static_cast<std::uint64_t>(m.num("id", 0.0));
+    bool ok = false;
+    if (id == 0) {
+      if (error) *error = "no id";
+    } else if (ctx_.session) {
+      ok = ctx_.session->cancel_schedule(id);
+    } else {
+      // No session in this run, so there are no schedule-started workers to
+      // look in either. The book is the whole of the truth here.
+      ok = ScheduleBook::instance().cancel(id);
+    }
+    bus.publish(BusLine("schedule.cancelled")
+                    .num("id", static_cast<double>(id), 0)
+                    .flag("ok", ok)
+                    .str("echo", echo)
+                    .done());
+    return;
+  }
+
+  if (m.verb == "list") {
+    // One event per item and then a count, so a script knows when it has the
+    // whole answer without counting on the order of an empty list. `count`
+    // last rather than first for exactly that: a list of zero is one event,
+    // not a promise of rows that never arrive.
+    std::size_t n = 0;
+    if (ctx_.session) {
+      for (const VoiceSession::PendingItem& it : ctx_.session->pending_items()) {
+        bus.publish(BusLine("schedule.pending")
+                        .num("id", static_cast<double>(it.id), 0)
+                        .str("kind", it.kind)
+                        .str("label", it.label)
+                        .str("grade", it.phrased ? "phrased" : "fixed")
+                        .num("in", it.seconds, 1)
+                        .str("echo", echo)
+                        .done());
+        ++n;
+      }
+    } else {
+      const auto now = std::chrono::steady_clock::now();
+      for (const Schedule& s : ScheduleBook::instance().list()) {
+        bus.publish(BusLine("schedule.pending")
+                        .num("id", static_cast<double>(s.id), 0)
+                        .str("kind", s.action.kind)
+                        .str("label", s.action.label)
+                        .str("grade", to_string(s.grade))
+                        .num("in", s.seconds_until(now), 1)
+                        .str("echo", echo)
+                        .done());
+        ++n;
+      }
+    }
+    bus.publish(
+        BusLine("schedule.list").num("count", static_cast<double>(n), 0).str("echo", echo).done());
+    return;
+  }
+
   if (error) *error = "unknown verb";
 }
 
