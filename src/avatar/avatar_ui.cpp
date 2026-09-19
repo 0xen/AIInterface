@@ -65,11 +65,6 @@ ImVec4 red_deep() { return ui_color(0.62f, 0.10f, 0.10f); }
 // sidebar's live with the shared code, since the strip will not be the only
 // surface that ever wants a cog.
 constexpr float kTransportButton = 30.0f;  // kIconPx plus 2 px of air all round
-// The extra air before the close button (user, 19 Sep 2026). Slots 0-3 act on
-// the conversation; slot 4 acts on the application. Ten pixels is enough for
-// the eye to group four and one rather than five, and small enough that the
-// row still reads as one row.
-constexpr float kCloseSlotGap = 10.0f;
 
 // The microphone, six ways. Idle is the bare capsule-and-cradle; everything
 // else is that same shape with something added, so the button never changes
@@ -339,13 +334,25 @@ std::string until(long long reset_epoch) {
   return buf;
 }
 
+// The label a segment draws: "Session", or "Session (2h14m)" when there is a
+// reported reset time and there is room on the row for it. Shared with
+// segment_width() so the measurement and the drawing can never disagree.
+std::string segment_label(const char* label, long long reset_epoch, bool countdown) {
+  std::string text = label;
+  if (!countdown) return text;
+  if (const std::string left = until(reset_epoch); !left.empty()) text += " (" + left + ")";
+  return text;
+}
+
 // One "12% CTX" segment. A negative fraction means the CLI has not said yet.
 // `reset_epoch` > 0 turns the label into "Session (2h14m)" — the real time
-// left in that window rather than its nominal length.
+// left in that window rather than its nominal length. `countdown` is the
+// row's verdict on whether the bracket fits; the hover tooltip reports the
+// reset time either way, so a dropped bracket costs convenience and not
+// information.
 void segment(double fraction, const char* label, double amber, double red,
-             long long reset_epoch = 0) {
-  std::string text = label;
-  if (const std::string left = until(reset_epoch); !left.empty()) text += " (" + left + ")";
+             long long reset_epoch = 0, bool countdown = true) {
+  const std::string text = segment_label(label, reset_epoch, countdown);
   char buf[64];
   if (fraction < 0.0) {
     std::snprintf(buf, sizeof(buf), "--%% %s", text.c_str());
@@ -364,6 +371,18 @@ void segment(double fraction, const char* label, double amber, double red,
     if (localtime_s(&local, &t) == 0) std::strftime(when, sizeof(when), "%a %d %b %H:%M", &local);
     ImGui::SetTooltip("%s resets at %s", label, when);
   }
+}
+
+// What segment() above will take, to the pixel. It mirrors the two branches
+// of the draw exactly — the placeholder is one string, a real reading is the
+// percentage, four pixels and the label — because a measurement that drifts
+// from its drawing is worse than no measurement at all.
+float segment_width(double fraction, const char* label, long long reset_epoch, bool countdown) {
+  const std::string text = segment_label(label, reset_epoch, countdown);
+  if (fraction < 0.0) return ImGui::CalcTextSize(("--% " + text).c_str()).x;
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%.0f%%", fraction * 100.0);
+  return ImGui::CalcTextSize(buf).x + 4.0f + ImGui::CalcTextSize(text.c_str()).x;
 }
 
 const char* visibility_name(AvatarVisibility mode) {
@@ -1438,6 +1457,13 @@ void separator() {
   ImGui::SameLine(0.0f, 6.0f);
 }
 
+// Defined with the rest of the close gesture, down among the transport row's
+// faces and skins, because that is where its sibling (Reset) lives and the two
+// must stay identical. Declared here because this is the row it is drawn on.
+// See the definition for why it is on this row at all.
+void close_button(AvatarUiState& state, const VoiceSession::Snapshot& snap, float size,
+                  AvatarUiResult& out);
+
 // "12% CTX | 40% Session (2h14m) | 53% Week (3d 5h)" plus the chat toggle,
 // pinned to the right edge of the same row. The bracketed times count down to
 // when each window actually resets, as reported by the CLI.
@@ -1447,21 +1473,65 @@ void separator() {
 // The row still draws (empty) so the panel keeps its height and the chat
 // toggle keeps its place; the toggle is disabled with the rest of the
 // controls, since there is no chat to open until the engines are up.
-void status_bar(AvatarUiState& state, const UsageStats& usage, bool loading, float width) {
+//
+// Three buttons on the right now, not two (user, 19 Sep 2026): the avatar-mode
+// disc, the chat arrow, and Close outboard of both. The cursor is set from the
+// right edge, so the arithmetic is "three buttons and two gaps" — it was two
+// and one — and getting that wrong is how the cluster walks off the panel or
+// lands on the usage text.
+void status_bar(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool loading,
+                float width, AvatarUiResult& out) {
+  const UsageStats& usage = snap.usage_stats;
+  const float button = ImGui::GetFrameHeight();
+  const float gap = ImGui::GetStyle().ItemSpacing.x;
+  const float pad = ImGui::GetStyle().WindowPadding.x;
+
+  // The third button costs this row 27 px of text, and at 360 px the row did
+  // not have 27 px to spare: "12% CTX | 40% Session (2h14m) | 53% Week (3d 5h)"
+  // fitted the two-button cluster to the pixel and ran under the third. Text
+  // that disappears under an opaque plate is the worst of the options — it
+  // reads as a rendering bug, and "(3d 5h" with no closing bracket is a number
+  // the user cannot trust.
+  //
+  // So the brackets are the part that gives way, and Week's goes first. They
+  // are the one thing on the row that is duplicated elsewhere: hovering
+  // Session or Week says "Week resets at Thu 25 Sep 14:00" in full, and that
+  // tooltip is offered whether or not the bracket was drawn. The percentages,
+  // which are the reason anyone looks at this row, are never touched.
+  //
+  // **Week's first** because it is both the widest ("3d 5h" against "2h14m")
+  // and the least worth watching: a seven-day window that rolls over in three
+  // days is not a number anyone is counting down. The five-hour window is.
+  //
+  // Measured, not assumed: this depends on the font, and the font is whichever
+  // of Segoe UI / Tahoma / Arial the machine has, merged with whichever CJK
+  // face it has. The verdict can change as a countdown ticks from "2h14m" to
+  // "2h9m" — that is a layout adapting a handful of times an hour, not a
+  // per-frame flicker, and the alternative is dropping the brackets forever on
+  // a row where one of them usually fits.
+  const float sep = 6.0f + ImGui::CalcTextSize("|").x + 6.0f;
+  const float cluster = 3.0f * button + 2.0f * gap;
+  const float budget = width - 2.0f * pad - cluster - gap;
+  auto row_width = [&](bool session_cd, bool week_cd) {
+    return segment_width(usage.ctx, "CTX", 0, false) + sep +
+           segment_width(usage.session, "Session", usage.session_reset, session_cd) + sep +
+           segment_width(usage.week, "Week", usage.week_reset, week_cd);
+  };
+  const bool week_cd = row_width(true, true) <= budget;
+  const bool session_cd = week_cd || row_width(true, false) <= budget;
+
   if (loading) {
     ImGui::Dummy(ImVec2(0.0f, ImGui::GetFrameHeight()));
   } else {
     segment(usage.ctx, "CTX", 20.0, 30.0);
     separator();
-    segment(usage.session, "Session", 70.0, 90.0, usage.session_reset);
+    segment(usage.session, "Session", 70.0, 90.0, usage.session_reset, session_cd);
     separator();
-    segment(usage.week, "Week", 70.0, 90.0, usage.week_reset);
+    segment(usage.week, "Week", 70.0, 90.0, usage.week_reset, week_cd);
   }
 
-  const float button = ImGui::GetFrameHeight();
-  const float gap = ImGui::GetStyle().ItemSpacing.x;
   ImGui::SameLine();
-  ImGui::SetCursorPosX(width - ImGui::GetStyle().WindowPadding.x - 2.0f * button - gap);
+  ImGui::SetCursorPosX(width - pad - cluster);
   // Live even while loading, unlike the controls around it: it is a
   // preference about this window, not a control that routes into engines that
   // are not up yet, and setting it during the wait is when it is most natural
@@ -1474,6 +1544,12 @@ void status_bar(AvatarUiState& state, const UsageStats& usage, bool loading, flo
   if (ImGui::IsItemHovered())
     ImGui::SetTooltip("%s", state.chat_open ? "Hide the chat" : "Show the chat");
   ImGui::EndDisabled();
+  ImGui::SameLine(0.0f, gap);
+  // Outboard of the arrow, hard against the right edge, and **not** inside
+  // BeginDisabled: the engines take about five seconds to come up and a user
+  // who wants out during that wait should not have to reach for Esc. Closing
+  // is the one thing this app is always able to do.
+  close_button(state, snap, button, out);
 }
 
 ImVec4 worker_color(WorkerPool::State s) {
@@ -2328,23 +2404,131 @@ std::string close_tooltip(CloseFace face, const VoiceSession::Snapshot& snap) {
   return t;
 }
 
+// --- the close button (user, 19 Sep 2026) -----------------------------------
+//
+// **Why on the status row.** The window is borderless on purpose, so there is
+// no OS close button to lean on, and the only ways out were Esc/Q and the
+// window's own close message — neither of which is visible. It spent one
+// commit as slot 4 of the transport row; the user asked for it beside the chat
+// arrow instead, and that is the better place on its own merits. The status
+// row is the top of the panel and this cluster is its right-hand end, which is
+// where every window on this desktop keeps its close button.
+//
+// **Outboard of the arrow, not inboard.** Hard right is where the muscle
+// memory goes, and it is the only one of the three that has a convention at
+// all. The argument the other way is that the cluster is right-aligned, so the
+// outermost slot is what a reach for the arrow overshoots onto — but an
+// overshoot here only *arms* the button, which turns red, says what it is
+// about to do, and forgets about it four seconds later. That is exactly the
+// accident the two-press gesture exists to absorb. Inboard would have cost
+// more: it would have driven the disc and the arrow apart, and put the one
+// destructive control in this window between two harmless toggles, where a
+// reach for either could land on it.
+//
+// **Why two presses.** Closing is at least as destructive as Reset and has
+// even less of an undo: Reset loses a conversation, this loses the
+// conversation *and* every worker mid-task. So it borrows Reset's gesture
+// wholesale — arm, change glyph and plate, fire on the second press, with the
+// same kResetArmMinSeconds dwell that stops a double-click walking through the
+// confirm, and the same kResetArmSeconds timeout. (That gesture is the house
+// style rather than a proven design: it is still on the user's own test list.
+// If it turns out to be wrong, it is wrong in one place and both buttons are
+// fixed together.)
+//
+// **Why it never greys out.** See CloseFace: a quit button that refuses is a
+// worse promise than no button, and Esc/Q would contradict it anyway. Note
+// that the caller draws it outside BeginDisabled for the same reason.
+//
+// **Why it paints itself instead of calling transport_slot.** These are
+// ImGui frame-height buttons, not the transport row's 30 px plates, and
+// kIconScale is 2 — a 26 px icon in a 21 px button. The scale is computed from
+// the button here and is still a whole number, which is the whole of the rule:
+// a 13-cell grid at 1.5x alternates 1 and 2 px cells and reads as mush.
+void close_button(AvatarUiState& state, const VoiceSession::Snapshot& snap, float size,
+                  AvatarUiResult& out) {
+  const double now = ImGui::GetTime();
+  if (state.close_armed_at > 0.0) {
+    // Deliberately a shorter list than Reset's. Reset disarms when the session
+    // runs out of things to reset; nothing can make a quit inapplicable, so
+    // only a real gesture elsewhere and the timeout drop it. The transport
+    // row's gestures arrive as a counter because it draws after this row —
+    // see the tail of transport().
+    const bool moved_on = state.transport_gesture_seq != state.close_gesture_seq;
+    if (moved_on || now - state.close_armed_at > kResetArmSeconds) state.close_armed_at = 0.0;
+  }
+  state.close_gesture_seq = state.transport_gesture_seq;
+
+  const CloseFace face = state.close_pending ? CloseFace::Waiting
+                         : state.close_armed_at > 0.0 ? CloseFace::Armed
+                                                      : CloseFace::Ready;
+  const TransportSkin skin = close_skin(face);
+
+  const ImVec2 p = ImGui::GetCursorScreenPos();
+  const bool clicked = ImGui::InvisibleButton("##close", ImVec2(size, size));
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec4 bg = ImGui::IsItemActive()    ? skin.active
+                    : ImGui::IsItemHovered() ? skin.hovered
+                                             : skin.bg;
+  dl->AddRectFilled(p, ImVec2(p.x + size, p.y + size), ImGui::GetColorU32(bg),
+                    ImGui::GetStyle().FrameRounding);
+  // The largest whole-number scale that leaves a pixel of air on each side.
+  // At this font (15 px, so a 21 px frame) that is 1x: a 13 px glyph with four
+  // pixels round it, which is the same air-to-ink the arrow beside it has.
+  const float scale = std::max(1.0f, std::floor((size - 2.0f) / kIconCells));
+  const float inset = std::floor((size - kIconCells * scale) * 0.5f);
+  draw_icon(dl, face == CloseFace::Ready ? kIconClose : kIconCloseArmed,
+            ImVec2(p.x + inset, p.y + inset), ImGui::GetColorU32(skin.ink),
+            ImGui::GetColorU32(skin.mark), scale);
+
+  if (clicked) {
+    if (face == CloseFace::Waiting) {
+      // Second thoughts, and the only way back: a queued quit the user can no
+      // longer call off would be the same trap as one they never asked for.
+      state.close_pending = false;
+      state.refusal = "Staying open.";
+      state.refusal_left = kRefusalSeconds;
+    } else if (face == CloseFace::Ready) {
+      state.close_armed_at = now;
+    } else if (now - state.close_armed_at >= kResetArmMinSeconds) {
+      state.close_armed_at = 0.0;
+      // Confirmed. Whether it happens on this frame is quitting_ok()'s
+      // decision, not this button's — the app must not tear a turn down
+      // half-way, and the reply already half paid for is the user's.
+      state.close_pending = true;
+    }
+  }
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", close_tooltip(face, snap).c_str());
+
+  // The pending quit, resolved here rather than at the click, so it is retried
+  // every frame until the session allows it. On the overwhelmingly common path
+  // — nothing in flight — `quit_ok` is already true on the very frame the
+  // second press lands and this fires immediately, so the wait costs a user
+  // who is simply closing an idle app exactly nothing.
+  if (state.close_pending && snap.quit_ok) {
+    state.close_pending = false;
+    out.close = true;
+  } else if (state.close_pending) {
+    // Said in words as well as in the button's face. This is the reserved row
+    // that already answers "why did my Enter do nothing"; "why is the app not
+    // closing" is the same question. It is set before that row is drawn now
+    // that this button is at the top of the panel, so the words appear on the
+    // same frame as the face rather than one behind it.
+    state.refusal = "Closing when this turn finishes...";
+    state.refusal_left = kRefusalSeconds;
+  }
+}
+
 void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool voice_enabled,
                bool loading, bool mic_on, bool mic_hold, AvatarUiResult& out) {
   const ImGuiStyle& style = ImGui::GetStyle();
   const float gap = style.ItemSpacing.x;
-  // One origin, five slot indices. Read off the layout cursor once, before
+  // One origin, four slot indices. Read off the layout cursor once, before
   // anything is submitted, so nothing that happens inside the row can move a
   // later slot: slot 2 being absent cannot shift slot 0 because slot 0's
   // position was never a function of slot 2.
-  //
-  // Slot 4 (close) is pushed out by kCloseSlotGap so it does not read as one
-  // more transport control. It is still a pure function of the index and of
-  // nothing else, which is the whole of the invariant — the extra gap is a
-  // constant, not a state.
   const ImVec2 origin = ImGui::GetCursorScreenPos();
   auto slot_pos = [&](int i) {
-    const float extra = i >= 4 ? kCloseSlotGap : 0.0f;
-    return ImVec2(origin.x + i * (kTransportButton + gap) + extra, origin.y);
+    return ImVec2(origin.x + i * (kTransportButton + gap), origin.y);
   };
 
   // The two stretches in which the microphone has nothing to attach itself to:
@@ -2553,80 +2737,19 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
   }
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", reset_tooltip(reset));
 
-  // --- slot 4: close (user, 19 Sep 2026) -------------------------------------
+  // The close button was slot 4 of this row for one commit (0739f64). It now
+  // sits beside the chat arrow on the status row (user, 19 Sep 2026), so the
+  // row is back to exactly the four slots it had before — and slots 0-3 did
+  // not move in either direction, because none of their positions was ever a
+  // function of anything but their own index.
   //
-  // **Why here.** The window is borderless on purpose, so there is no OS close
-  // button to lean on, and the only ways out were Esc/Q and the window's own
-  // close message — neither of which is visible. The row was the one place a
-  // 30 px icon button could be added that costs the window no height at all:
-  // slots are laid out from an origin and an index, so a fifth is arithmetic
-  // rather than layout, and the panel is 360 px wide against the ~192 px five
-  // slots occupy. The toolbar above was the alternative and was rejected: it
-  // flows with SameLine and its contents are whatever agents have registered,
-  // so a button placed there moves when something else registers — which is
-  // bug f713297 by a different route. This slot cannot move, and adding it
-  // cannot move slots 0-3, because none of their positions was ever a function
-  // of anything but their own index.
-  //
-  // **Why two presses.** Closing is at least as destructive as Reset and has
-  // even less of an undo: Reset loses a conversation, this loses the
-  // conversation *and* every worker mid-task. So it borrows Reset's gesture
-  // wholesale — arm, change glyph and plate, fire on the second press, with
-  // the same kResetArmMinSeconds dwell that stops a double-click walking
-  // through the confirm, and the same kResetArmSeconds timeout. (That gesture
-  // is the house style rather than a proven design: it is still on the user's
-  // own test list. If it turns out to be wrong, it is now wrong in one place
-  // and both buttons are fixed together.)
-  //
-  // **Why it never greys out.** See CloseFace: a quit button that refuses is
-  // a worse promise than no button, and Esc/Q would contradict it anyway.
-  if (state.close_armed_at > 0.0) {
-    // Deliberately a shorter list than Reset's. Reset disarms when the session
-    // runs out of things to reset; nothing can make a quit inapplicable, so
-    // only a real gesture elsewhere and the timeout drop it. `out.reset` is in
-    // the list because arming Close and then confirming Reset is a user who is
-    // plainly no longer closing.
-    const bool moved_on = out.talk_pressed || out.stop || out.reset || mute_clicked;
-    if (moved_on || now - state.close_armed_at > kResetArmSeconds) state.close_armed_at = 0.0;
-  }
-  const CloseFace close_face = state.close_pending ? CloseFace::Waiting
-                               : state.close_armed_at > 0.0 ? CloseFace::Armed
-                                                            : CloseFace::Ready;
-  if (transport_slot("##close", slot_pos(4),
-                     close_face == CloseFace::Ready ? kIconClose : kIconCloseArmed,
-                     close_skin(close_face))) {
-    if (close_face == CloseFace::Waiting) {
-      // Second thoughts, and the only way back: a queued quit the user can no
-      // longer call off would be the same trap as one they never asked for.
-      state.close_pending = false;
-      state.refusal = "Staying open.";
-      state.refusal_left = kRefusalSeconds;
-    } else if (close_face == CloseFace::Ready) {
-      state.close_armed_at = now;
-    } else if (now - state.close_armed_at >= kResetArmMinSeconds) {
-      state.close_armed_at = 0.0;
-      // Confirmed. Whether it happens on this frame is quitting_ok()'s
-      // decision, not this button's — the app must not tear a turn down
-      // half-way, and the reply already half paid for is the user's.
-      state.close_pending = true;
-    }
-  }
-  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", close_tooltip(close_face, snap).c_str());
-  // The pending quit, resolved here rather than at the click, so it is retried
-  // every frame until the session allows it. On the overwhelmingly common path
-  // — nothing in flight — `quit_ok` is already true on the very frame the
-  // second press lands and this fires immediately, so the wait costs a user
-  // who is simply closing an idle app exactly nothing.
-  if (state.close_pending && snap.quit_ok) {
-    state.close_pending = false;
-    out.close = true;
-  } else if (state.close_pending) {
-    // Said in words as well as in the button's face. This is the reserved row
-    // that already answers "why did my Enter do nothing"; "why is the app not
-    // closing" is the same question.
-    state.refusal = "Closing when this turn finishes...";
-    state.refusal_left = kRefusalSeconds;
-  }
+  // One thing stays behind. The close button cannot see the gestures that mean
+  // the user has moved on and is no longer closing: status_bar() draws before
+  // this row, so `out` is still empty when the close button reads it. A
+  // counter is the honest way across, and one frame of lag is nothing against
+  // a four-second timeout. `out.reset` is on the list because arming Close and
+  // then confirming Reset is a user who is plainly no longer closing.
+  if (out.talk_pressed || out.stop || out.reset || mute_clicked) ++state.transport_gesture_seq;
 }
 
 }  // namespace
@@ -2752,7 +2875,7 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
   // above it is the top of the panel.
   button_bar(state, loading, w);
 
-  status_bar(state, snap.usage_stats, loading, w);
+  status_bar(state, snap, loading, w, out);
 
   // What the loop is doing, or why it is not doing anything.
   if (voice_enabled) {

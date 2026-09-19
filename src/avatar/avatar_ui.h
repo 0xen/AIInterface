@@ -529,6 +529,16 @@ struct AvatarUiState {
   // exactly the same reason, one notch stronger: an app that came back up with
   // its own quit button armed would be a single brush from closing again.
   double close_armed_at = 0.0;
+  // How Close hears about the transport row's gestures. The close button moved
+  // to the status row, which is drawn *before* the transport row, so it cannot
+  // read this frame's AvatarUiResult to find out that the user has pressed
+  // Talk, Stop, Reset or Mute and is plainly no longer closing. The row bumps
+  // the first counter when any of those happens; the button latches it into
+  // the second and disarms when the two differ. One frame of lag, against a
+  // four-second timeout. Neither is persisted, for the same reason
+  // `close_armed_at` is not.
+  unsigned transport_gesture_seq = 0;
+  unsigned close_gesture_seq = 0;
   // A confirmed Close that VoiceSession::quitting_ok() would not allow yet:
   // the turn in flight has to finish first. Held here rather than acted on
   // because the alternatives are both worse — tearing down mid-turn loses the
