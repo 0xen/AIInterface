@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 
+#include "core/model_choice.h"
 #include "core/prompt_store.h"
 #include "core/tool_policy.h"
 #include "llm/claude_client.h"
@@ -32,7 +33,13 @@ bool build_llm(const Config& cfg, Engines& out, const LogFn& log, std::string* e
       if (error) *error = "AII_BACKEND=api needs ANTHROPIC_API_KEY";
       return false;
     }
-    const std::string model = cfg.model_override.empty() ? "claude-opus-5" : cfg.model_override;
+    // M3.11. The Model picker stores a CLI *alias* ("opus"), and this backend
+    // is the raw Messages API, which has never understood one — it wants a
+    // full id. `model_api_id` translates a listed alias and passes anything
+    // else through, so an `AII_MODEL` naming a dated id still reaches the API
+    // untouched and the empty default still resolves to the id this line
+    // hardcoded before the table existed.
+    const std::string model = model_api_id(cfg.model_override);
     // M3.9. This backend defines no tools at all — it is the raw Messages API,
     // not the CLI — so the prompt it gets is composed against an empty policy
     // whatever the tick boxes say. The settings surface already tells the user
@@ -73,7 +80,7 @@ bool build_llm(const Config& cfg, Engines& out, const LogFn& log, std::string* e
     return false;
   }
   say(log, "claude code launched  " + fmt_secs(t) + "  (" +
-               (cfg.model_override.empty() ? "default model" : cfg.model_override) + ", tools: " +
+               model_label(cfg.model_override) + ", tools: " +
                (tools.empty() ? std::string("none") : tools) + ")");
   out.llm = std::move(cc);
   return true;

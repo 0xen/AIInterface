@@ -17,6 +17,7 @@
 //     "startup": { "auto_listen": true },
 //     "timing": { "listen_timeout": 60.0 },
 //     "tools": { "web": true, "file_read": true, "file_write": false },
+//     "model": { "name": "default" },
 //     "inspector": { "placed": true, "x": 1180, "y": 420, "w": 1100, "h": 700 }
 //   }
 //
@@ -51,6 +52,15 @@
 // `--allowedTools` on the `claude` child's command line, which is fixed when
 // that process starts, so a change here reaches Claude at the next launch and
 // the settings surface says so rather than appearing to do nothing.
+//
+// `model.name` (M3.11) is a *key* from the table in `core/model_choice.h` —
+// "default", "opus", "sonnet", "haiku" — and not a model string. A key survives
+// the alias behind it moving on, and a key this build does not recognise (a
+// hand edit, or an entry a newer version added and this one has not) falls
+// back to "default" with a line in the log, because a model string the CLI
+// rejects is a `claude` child that starts and then fails every turn. "default"
+// means no `--model` flag at all. Read only at startup, like `tools` and for
+// the same reason.
 //
 // `language.enabled` (M8.3) is one string — "en", "ja" or "en,ja" — and not
 // two booleans, because at least one language must always be on and a pair of

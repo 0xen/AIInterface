@@ -17,7 +17,24 @@ std::string env_or(const char* name, const std::string& def);
 struct Config {
   std::string backend;         // AII_BACKEND: "code" (Claude Code CLI) or "api"
   std::string effort;          // AII_EFFORT
-  std::string model_override;  // AII_MODEL (empty = backend default)
+  // M3.11. Which model the *conversational* instance runs on, as the string
+  // that goes on `claude --model` — a CLI alias ("opus", "sonnet", "haiku"),
+  // or **empty**, which means the flag is not passed at all and the CLI picks.
+  // Empty is the default and has to stay reachable.
+  //
+  // `AII_MODEL` seeds it; the avatar reads `settings.json` over that before
+  // the session is built (main.cpp), through the table in
+  // `core/model_choice.h` — which is also what keeps a stale or mistyped
+  // stored value from reaching the command line, since a model string the CLI
+  // rejects means a child that starts and then fails every turn.
+  //
+  // Like `tools` it cannot be pushed down as a level: `--model` is fixed when
+  // the child starts, so a change reaches Claude at the next launch and the
+  // settings surface says so rather than appearing to do nothing.
+  //
+  // **Workers never read this.** `WorkerPool::spawn` sets no model at all and
+  // keeps the CLI's default whatever is picked here.
+  std::string model_override;
   std::string stt_lang;        // AII_STT_LANG: auto | en | ja (an explicit override)
   // M8.3. Which languages are on. The avatar overwrites this from
   // settings.json before it builds anything; `AII_LANGS` ("en", "ja", "en,ja")
