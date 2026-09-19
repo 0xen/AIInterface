@@ -46,27 +46,6 @@ struct AvatarPush {
   std::uint32_t pad;
 };
 
-// Stand-in art (M2.1). '#' is the body, 'o' the face, '.' transparent.
-// Replaced wholesale by the authored slime in M2.3.
-constexpr const char* kBlob[16] = {
-    "................",
-    ".....######.....",
-    "...##########...",
-    "..############..",
-    ".##############.",
-    ".##############.",
-    ".###oo####oo###.",
-    ".###oo####oo###.",
-    ".##############.",
-    ".##############.",
-    ".####o####o####.",
-    ".#####oooo#####.",
-    ".##############.",
-    "################",
-    "################",
-    "................",
-};
-
 }  // namespace
 
 void AvatarGrid::resize(std::uint32_t w, std::uint32_t h) {
@@ -84,28 +63,6 @@ void AvatarGrid::set(AvatarLayer layer, std::uint32_t x, std::uint32_t y, std::u
   if (x >= width || y >= height) return;
   auto& cells = layer == AvatarLayer::Base ? base : overlay;
   cells[y * width + x] = rgba;
-}
-
-void avatar_placeholder_blob(AvatarGrid& grid) {
-  grid.resize(16, 16);
-  // The placeholder is a character, not a stage: it wants the derived scale
-  // that fills the band, and it has to say so in case a stage ran before it.
-  grid.scale = 0;
-  constexpr std::uint32_t kBody = avatar_rgba(0, 0, 0, 255);
-  constexpr std::uint32_t kFace = avatar_rgba(255, 255, 255, 255);
-  for (std::uint32_t y = 0; y < 16; ++y) {
-    for (std::uint32_t x = 0; x < 16; ++x) {
-      const char c = kBlob[y][x];
-      if (c == '#') grid.set(AvatarLayer::Base, x, y, kBody);
-      else if (c == 'o') grid.set(AvatarLayer::Base, x, y, kFace);
-    }
-  }
-  // A shine in the overlay layer rather than painted into the body: this is
-  // the accessory layer M2.4 drives, and having something in it from the
-  // start means the composite is exercised rather than assumed.
-  for (std::uint32_t y = 3; y <= 4; ++y) {
-    for (std::uint32_t x = 4; x <= 5; ++x) grid.set(AvatarLayer::Overlay, x, y, kFace);
-  }
 }
 
 AvatarRenderer::~AvatarRenderer() = default;

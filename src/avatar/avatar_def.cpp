@@ -1003,10 +1003,19 @@ std::vector<std::string> avatar_definition_names() {
   return names;
 }
 
-void AvatarSource::open(fs::path dir, std::string clip, std::vector<std::string> sprites) {
+void AvatarSource::open(fs::path dir, std::string clip, std::vector<std::string> sprites,
+                        std::string fallback_name) {
   dir_ = std::move(dir);
   wanted_clip_ = std::move(clip);
   wanted_sprites_ = std::move(sprites);
+  fallback_name_ = std::move(fallback_name);
+  fallback_note_.clear();
+  // The fallback happens inside this call, before anything has been composed.
+  // That matters as much as the fallback itself: main.cpp reads the avatar
+  // name, the theme and the picked colour *before* open() precisely so the
+  // first frame is already the user's art in the user's colours, and a
+  // fallback that waited until the first failed compose would put back the
+  // flash and the resize that ordering exists to prevent.
   reload(true);
 }
 
@@ -1225,8 +1234,13 @@ void AvatarSource::reload(bool initial) {
     status_ = (initial ? "avatar " : "avatar reloaded ") + def_.name + " [" + theme_ + "]: " +
               std::to_string(def_.clips.size()) + " clips" + variants + ", playing \"" +
               def_.clips[clip_index_].name + "\", " + std::to_string(def_.sprites.size()) +
-              " sprites (" + std::to_string(shown) + " shown)" + missing;
-    status_ok_ = missing.empty();
+              " sprites (" + std::to_string(shown) + " shown)" + missing + fallback_note_;
+    // A load that only happened because the asked-for one failed is not good
+    // news, however well the fallback loaded: the user asked for a name, and
+    // if this said "ok" they would see a working avatar and never learn that
+    // the name they typed resolves to nothing.
+    status_ok_ = missing.empty() && fallback_note_.empty();
+    fallback_note_.clear();
   } else if (loaded_) {
     // Requirement of the format, not an accident: a bad save must cost the
     // user the save, never the definition they already had.
@@ -1234,8 +1248,34 @@ void AvatarSource::reload(bool initial) {
     status_ok_ = false;
   } else {
     loaded_ = false;
-    status_ = "avatar definition unusable, drawing the built-in placeholder - " + error;
+    // Nothing has ever loaded here. If a fallback was offered, take it by
+    // actually loading it — the shipped `default` is 22 clips of real art, and
+    // loading it is the only honest way to have something animating in the
+    // band. The name is taken out of the member *before* the recursive call,
+    // so a `default` that will not load itself lands in this same branch with
+    // nothing left to try and stops.
+    if (!fallback_name_.empty()) {
+      const std::string fallback = std::move(fallback_name_);
+      fallback_name_.clear();
+      const fs::path dest = seed_avatar_definition(fallback);
+      if (dest != dir_) {
+        fallback_note_ = " (asked for \"" + dir_.filename().string() + "\", which would not load: " +
+                         error + ")";
+        dir_ = dest;
+        // The theme, the picked colour and the wanted clip are all still
+        // sitting in their members, so the fallback resolves with the user's
+        // palette rather than starting from the art's default and swapping.
+        reload(initial);
+        return;
+      }
+    }
+    // A broken install, and it says so rather than dressing itself up: the
+    // band stays empty. This is the convention the rest of the app follows —
+    // a failure is one line and the program keeps running — and an empty band
+    // is also the only state that cannot be mistaken for working art.
+    status_ = "avatar definition unusable, nothing to draw - " + error + fallback_note_;
     status_ok_ = false;
+    fallback_note_.clear();
   }
   status_new_ = true;
 }
@@ -1419,7 +1459,12 @@ std::int32_t AvatarSource::slide_cell_y() const {
 
 void AvatarSource::compose(AvatarGrid& grid, std::uint32_t band_w, std::uint32_t band_h) {
   if (!loaded_) {
-    avatar_placeholder_blob(grid);
+    // Nothing loaded, nothing drawn. The band is a fixed height (kAvatarH),
+    // laid out by the window rather than by the grid, so an empty grid leaves
+    // an empty band and does *not* resize the window — a broken install looks
+    // like a broken install, and only like that, with reload() having already
+    // said which file and why.
+    grid.clear();
     return;
   }
   // Rebuilt from sprite_state_ rather than tracked alongside it: one source of
