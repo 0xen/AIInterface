@@ -525,6 +525,19 @@ struct AvatarUiState {
   // button, the reset starting, or the session running out of things to
   // reset. See kResetArmSeconds.
   double reset_armed_at = 0.0;
+  // The same two fields for Close (user, 19 Sep 2026), and not persisted for
+  // exactly the same reason, one notch stronger: an app that came back up with
+  // its own quit button armed would be a single brush from closing again.
+  double close_armed_at = 0.0;
+  // A confirmed Close that VoiceSession::quitting_ok() would not allow yet:
+  // the turn in flight has to finish first. Held here rather than acted on
+  // because the alternatives are both worse — tearing down mid-turn loses the
+  // reply that is already half paid for, and dropping the click silently is
+  // the one behaviour a button must never have. The button says it is waiting
+  // and a further press takes it back. Also not persisted: a quit the user
+  // asked for in the last session is not a quit they are asking for in this
+  // one.
+  bool close_pending = false;
   // What is in the message field (M1b.2). A fixed buffer rather than a
   // std::string because imgui_stdlib is not in this build, and a corner
   // window's typed message has no business being longer than this anyway.
@@ -636,6 +649,12 @@ struct AvatarUiResult {
   // is panel state and never reaches here. So main.cpp sees one event, on the
   // frame the user actually meant it, and has nothing to decide.
   bool reset = false;
+  // Close confirmed: bring the app down (user, 19 Sep 2026). Set on the frame
+  // the two-press gesture completes *and* the session says a quit is allowed,
+  // which may be a later frame than the second press — see
+  // AvatarUiState::close_pending. Like `reset`, main.cpp sees one event on one
+  // frame and has nothing left to decide.
+  bool close = false;
   // The message field's contents, on the frame Enter sent them; the field has
   // already been cleared. Empty on every other frame, including the ones where
   // a send was refused — the text stays in the field then, never swallowed.

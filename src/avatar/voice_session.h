@@ -109,6 +109,13 @@ class VoiceSession {
     // `State` in the panel, all to say something only the reset button draws.
     bool resettable = false;
     bool resetting = false;
+    // quitting_ok() as of this snapshot (user, 19 Sep 2026): the close button
+    // in the transport row's fifth slot needs it to tell "close now" from
+    // "close once this turn is done", and a button drawn from a snapshot
+    // cannot call a method on a session it does not hold. Same reasoning as
+    // `resettable` directly above — a fact only the session knows, published
+    // for the one control that draws itself from it.
+    bool quit_ok = true;
     // M3.12. What the `claude` child that is running *now* was launched with —
     // the `--model` argument ("" = no flag) and the tool policy. The settings
     // surface draws its picker and its tick boxes against these, and since a

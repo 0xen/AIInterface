@@ -65,6 +65,27 @@ if(MSVC)
   target_compile_options(avatar PRIVATE /utf-8 /W4 /wd4996)
 endif()
 set_target_properties(avatar PROPERTIES FOLDER "apps")
+# No console window (user, 19 Sep 2026).
+#
+# The console this app opened was not a child process and not the engine: a
+# console-subsystem binary is *given* one by Windows at startup whether or not
+# it ever writes a byte, and this target had no WIN32_EXECUTABLE. The child
+# `claude` processes were never the cause -- claude_code_client.cpp already
+# spawns them CREATE_NO_WINDOW.
+#
+# /ENTRY:mainCRTStartup keeps `int main` rather than adding a WinMain shim. A
+# shim would buy nothing here: main() ignores argc/argv already and parses
+# CommandLineToArgvW(GetCommandLineW()) instead, so the windowed subsystem
+# costs this app no argument handling at all.
+#
+# What it *does* cost is stdout, and that is paid for in routeDiagnostics() at
+# the top of main.cpp -- read that before changing anything here, because
+# without it every diagnostic in this project goes nowhere and says nothing
+# about having done so.
+set_target_properties(avatar PROPERTIES WIN32_EXECUTABLE TRUE)
+if(MSVC)
+  target_link_options(avatar PRIVATE /ENTRY:mainCRTStartup)
+endif()
 # M2.6. Neither DLL is linked — both are LoadLibrary'd, and only on a run that
 # has a script — but the documented build command is `--target avatar`, and a
 # feature that silently is not there because a second target was not named is
