@@ -948,6 +948,102 @@ void tools_section(AvatarUiState& state, const AvatarOptions& options) {
   }
 }
 
+// ---- M1f.5: the app starts listening by itself -------------------------------
+//
+// (user, 19 Sep 2026: "I would like the toggle in the settings to have the AI
+// auto start by listening. And I would like this by default to be on.")
+//
+// **Its own heading, and it is neither Timing nor Voice.** Timing is about
+// durations the app spends, Voice is about which voice speaks; this is about
+// what state the app comes up in, which is a third thing and the first of its
+// kind here — the avatar mode and mute are startup behaviour too, but they are
+// *levels* that happen to persist, while this one describes a single act
+// performed once per launch. A row that means "do this at startup" filed under
+// a heading about endpointing would be findable only by someone who already
+// knew where it was.
+//
+// **It is placed immediately above Timing**, which is not decoration either.
+// The two rows that result read as one pair on screen —
+//
+//     Startup   Start listening  [x]
+//     Timing    Stop listening   [x]  After [60 s]
+//
+// — and that pairing is the whole of the interaction between them. With both
+// on, a user who launches the app and walks away starts listening and is
+// closed again a minute later; the only place that is discoverable is a
+// surface where the two controls are next to each other and can be read in one
+// glance. The alternative, Startup at the top of the surface with sixty
+// seconds of scrolling between them, hides a real consequence behind a
+// scrollbar.
+//
+// **The line underneath is the honest part, and it is required.** This setting
+// is read exactly once, at the moment the loading screen leaves, so changing
+// it now cannot do anything now — the failure Tools already documents, in a
+// milder form. It therefore never pretends: the prose says what this run did,
+// and the moment the box disagrees with what this run did, an amber line names
+// the next launch. It does not say "restart to apply", because the microphone
+// button beside it will open the microphone this second and that is what a
+// user who wants it open *now* should be pointed at.
+void startup_section(AvatarUiState& state, const AvatarOptions& options) {
+  // The pose flag before the heading, as Tools' is: the point of the flag is a
+  // capture in which the section's own name is in the frame.
+  if (state.settings_scroll_startup) ImGui::SetScrollHereY(0.0f);
+  settings_heading("Startup");
+
+  settings_row("Start listening");
+  ImGui::BeginDisabled(!options.voice_enabled);
+  ImGui::Checkbox("##auto_listen", &state.auto_listen);
+  ImGui::EndDisabled();
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    if (!options.voice_enabled)
+      ImGui::SetTooltip("This run was started with --no-voice, so there\nare no engines and nothing "
+                        "to listen with.");
+    else
+      ImGui::SetTooltip("On: once the engines have finished loading, the\napp latches the "
+                        "microphone on by itself - the\nsame state clicking the microphone puts it "
+                        "in,\nnot hold-to-talk.\n\nOff: it comes up idle and waits for you to "
+                        "click.\n\nEither way this is read once, when the app\nstarts.");
+  }
+
+  ImGui::PushStyleColor(ImGuiCol_Text, dim());
+  if (state.auto_listen) {
+    // Says the whole sequence in the order it happens, because the one second
+    // it describes has already gone by for anybody reading this. The timeout
+    // is named here rather than left to Timing below: "it starts listening"
+    // and "it stops listening on its own" are the same sentence for a user who
+    // launches the app and goes to make tea, and this is the surface where
+    // that sentence can be finished.
+    ImGui::TextWrapped("The microphone latches on as the loading screen leaves, and the app is "
+                       "listening before you touch it. Speak and it answers. Stop listening below "
+                       "still applies from there.");
+  } else {
+    ImGui::TextWrapped("The app comes up idle, with the microphone shut, and waits for you to "
+                       "click it.");
+  }
+  ImGui::PopStyleColor();
+
+  if (!options.voice_enabled) {
+    ImGui::PushStyleColor(ImGuiCol_Text, dim());
+    ImGui::TextWrapped("Not in use this run: --no-voice loads no engines.");
+    ImGui::PopStyleColor();
+  } else if (state.auto_listen != options.auto_listen_in_force) {
+    // The gap, named. Amber rather than dim for the same reason Tools' line
+    // is: this is the state in which a control genuinely is not doing the
+    // thing it describes, and that has to look different from the state in
+    // which it is.
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("Saved, and it decides what happens the next time you start the app. This "
+                       "run started %s, and nothing here changes that now - the microphone button "
+                       "at the top of the panel opens and closes it today.",
+                       options.auto_listen_in_force ? "listening" : "idle");
+    ImGui::PopStyleColor();
+  } else {
+    ImGui::PushStyleColor(ImGuiCol_Text, dim());
+    ImGui::TextWrapped("This run started %s.", options.auto_listen_in_force ? "listening" : "idle");
+    ImGui::PopStyleColor();
+  }
+}
+
 void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ui_color(0.055f, 0.063f, 0.082f));
   ImGui::BeginChild("##settings", ImVec2(0.0f, kChatHeight), ImGuiChildFlags_None, 0);
@@ -1033,6 +1129,10 @@ void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
 
   settings_heading("Voice");
   ImGui::TextColored(dim(), "Which voice speaks each language: M8.");
+  // M1f.5. Deliberately the section immediately above Timing; startup_section
+  // says why at length, and the short version is that "start listening" and
+  // "stop listening" are one pair and have to be read as one.
+  startup_section(state, options);
   settings_heading("Timing");
   // M1f.2's pose flag; see AvatarUiState::settings_scroll_timing. Held rather
   // than applied once, because a run that is being screenshotted is one where

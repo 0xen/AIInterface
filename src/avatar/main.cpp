@@ -53,6 +53,8 @@
 //     --settings  open the settings surface at startup, and
 //     --settings-timing  the same, held scrolled to the Timing section, which
 //                 is below the fold of a surface that scrolls (M1f.2).
+//     --settings-startup  the same, held scrolled to the Startup section
+//                 (M1f.5), which is below the fold as well.
 //     --settings-tools  the same, held scrolled to the Tools section (M3.8),
 //                 which is likewise below the fold.
 //     --listen-timeout-at S:V  at S seconds, write V seconds into the
@@ -333,6 +335,14 @@ int main(int /*argc*/, char** /*argv*/) {
     // with. `toolsInForce` is written once, beside the tick boxes it is
     // compared against, and never again — it is what "in force" means.
     bool settingsScrollTools = false;
+    bool settingsScrollStartup = false;
+    // M1f.5. The armed auto-listen latch and the copy of the setting this run
+    // started under. `autoListenPending` is a one-shot: it is cleared by the
+    // frame that latches, so nothing can re-latch a microphone the user has
+    // since closed. Seeded from the panel state further down, once the file
+    // has been read.
+    bool autoListenPending = false;
+    bool autoListenInForce = false;
     aii::ToolPolicy toolsInForce;
     // --inspector: open the prompt inspector on the first frame, as if the
     // sidebar button had been clicked. Nothing else about it differs.
@@ -462,6 +472,8 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (a == L"--settings") settingsOpen = true;
             else if (a == L"--settings-timing") { settingsOpen = true; settingsScrollTiming = true; }
             else if (a == L"--settings-tools") { settingsOpen = true; settingsScrollTools = true; }
+            // M1f.5's, same reason again: Startup is below the fold too.
+            else if (a == L"--settings-startup") { settingsOpen = true; settingsScrollStartup = true; }
             else if (a == L"--listen-timeout-at" && i + 1 < wargc) {
                 const std::wstring spec = wargv[++i];
                 const size_t colon = spec.find(L':');
@@ -894,6 +906,12 @@ int main(int /*argc*/, char** /*argv*/) {
     // something sensible to turn back on. `std::max` covers the case where the
     // default is itself a "never" (AII_LISTEN_TIMEOUT=0 on a first run): there
     // is no number to show then, so the floor is the honest starting point.
+    // M1f.5. The one setting in this block that is not a level: it is read
+    // here, armed once below, and never pushed anywhere. The default is
+    // `kAutoListenDefault` (true) and lives in avatar_ui.h, so a fresh install
+    // with no settings.json takes exactly the same path as a file that has no
+    // `startup` section — which is the case the user asked about.
+    uiState.auto_listen = settings.get_bool("startup", "auto_listen", uiState.auto_listen);
     uiState.listen_timeout_on = voiceCfg.listen_timeout > 0.0f;
     uiState.listen_timeout_sec =
         uiState.listen_timeout_on
@@ -910,6 +928,7 @@ int main(int /*argc*/, char** /*argv*/) {
     if (settingsOpen) uiState.settings_open = true;
     uiState.settings_scroll_timing = settingsScrollTiming;
     uiState.settings_scroll_tools = settingsScrollTools;
+    uiState.settings_scroll_startup = settingsScrollStartup;
     // M3.8. Same idea again, and here it is the whole feature: the tick boxes
     // are seeded from the value the session was actually built with, and
     // `toolsInForce` keeps a copy of it that nothing ever writes to. The
@@ -917,6 +936,17 @@ int main(int /*argc*/, char** /*argv*/) {
     // thing it can do until a toggle can reach a running child (M3.6).
     uiState.tools = voiceCfg.tools;
     toolsInForce = voiceCfg.tools;
+    // M1f.5. Armed here, from the panel state, and read by exactly one place in
+    // the frame loop. `autoListenInForce` is the copy the settings surface
+    // compares the live tick box against; nothing writes it again.
+    //
+    // `--no-voice` is not a special case in the arming: there is no session, so
+    // the condition below can never be true and the flag simply never fires.
+    // The surface is told separately, because a tick box that silently did
+    // nothing all run is the thing this project keeps refusing to ship.
+    autoListenInForce = uiState.auto_listen;
+    autoListenPending = uiState.auto_listen;
+    log::info("[auto-listen] start listening: {}", uiState.auto_listen ? "on" : "off");
     log::info("[listen-timeout] setting: {} ({:.1f} s configured, default {:.1f} s)",
               uiState.listen_timeout_on ? std::to_string(uiState.listen_timeout_sec) + " s"
                                         : std::string("never"),
@@ -1811,6 +1841,70 @@ int main(int /*argc*/, char** /*argv*/) {
         const float loaderAlpha = 1.0f - smoothstep(0.00f, 0.62f, handoff);
         loading = loaderAlpha > 0.0f;
 
+        // ---- M1f.5: the app latches its own microphone on, once ----
+        //
+        // **This line, and this position in the frame, is the whole decision.**
+        //
+        // The moment is "the first frame on which the loading screen is
+        // finally gone", and it is chosen over the two obvious alternatives:
+        //
+        //  - *As soon as the session exists* is wrong twice over. The session
+        //    exists while it is still loading its engines, and
+        //    `set_mic_open()` refuses in `Loading` by dropping the latch back
+        //    to false — so an early call does not crash, it does something
+        //    worse: it leaves a microphone that is reported shut and a setting
+        //    that appears not to work.
+        //  - *As soon as the session reaches Idle* would work mechanically —
+        //    the recogniser is up and `begin_listening()` starts the capture
+        //    device synchronously — but it is up to 0.26 s before the loader
+        //    has faded, and for that whole stretch the panel is still clamped
+        //    to `Loading` further down and the avatar is still suppressed by
+        //    `AvatarPresence`. The microphone would be live while all three
+        //    surfaces that report it said the app was still starting. A live
+        //    microphone nobody has been told about is the one thing this
+        //    feature must never produce.
+        //
+        // Latching here instead costs a quarter of a second of a fade nobody
+        // is talking over, and buys the property that matters: the first frame
+        // on which the panel tells the truth is the first frame on which the
+        // microphone is open. Icon, status line and avatar all change on the
+        // same frame, and `begin_listening()` calls `mic_->discard()` before
+        // `mic_->start()`, so nothing said before it is half-captured either.
+        //
+        // It is *above* the engagement gather below on purpose, so the frame
+        // that latches is also the frame `engagement.mic_on` is true on: the
+        // avatar is summoned into the space the loader left by the ordinary
+        // startup path (cb38eef) rather than a second time, a frame later, by
+        // a latch the presence rule found afterwards. There is one `summoned`
+        // edge in the program and this does not add another.
+        //
+        // One shot, cleared by the frame that fires. A microphone the user
+        // closes afterwards stays closed; the setting had its one say.
+        if (autoListenPending && session && !loading) {
+            if (snap.state == aii::VoiceSession::State::Failed) {
+                // Nothing to listen with, and never will be this run. Cleared
+                // so the condition stops being asked, and said once, because
+                // "the setting did nothing" is otherwise indistinguishable
+                // from a bug in it.
+                autoListenPending = false;
+                log::warn("[auto-listen] engines failed; the microphone is not being opened");
+            } else if (!session->mic_open()) {
+                autoListenPending = false;
+                // The same call a short click on the microphone makes, and
+                // deliberately that call and not a private one: latched, not
+                // hold-to-dictate, and there is exactly one path into the
+                // latch for both of them.
+                session->toggle_mic();
+                log::info("[auto-listen] microphone latched at {:.2f}s (mic_open={})", t,
+                          session->mic_open() ? 1 : 0);
+            } else {
+                // Something else already opened it this frame — `--mic-latch`,
+                // or a hand fast enough to click during the fade. Either way
+                // the app is listening, which is what the setting asked for.
+                autoListenPending = false;
+            }
+        }
+
         // M7.2: the one place the avatar appears. Every path that can put it
         // on screen — the loader handing over at startup, the mode switched in
         // settings, a turn starting in "shown when talking", hold-to-dictate
@@ -2215,6 +2309,9 @@ int main(int /*argc*/, char** /*argv*/) {
             // surface's job is to show the gap and name the restart.
             avatarOptions.tools_in_force = toolsInForce;
             avatarOptions.tools_supported = voiceCfg.backend != "api";
+            // M1f.5. What this run started under, beside what the box says.
+            avatarOptions.auto_listen_in_force = autoListenInForce;
+            avatarOptions.voice_enabled = session != nullptr;
             const aii::AvatarUiResult r =
                 aii::draw_avatar_ui(uiState, snap, avatarOptions, session != nullptr,
                                     session && session->mic_open(),
@@ -2260,6 +2357,12 @@ int main(int /*argc*/, char** /*argv*/) {
             // say so. The write itself is debounced inside Settings.
             settings.set_bool("panel", "chat_open", uiState.chat_open);
             settings.set_bool("panel", "muted", uiState.muted);
+            // M1f.5. Its own section rather than `panel`, because it is not a
+            // property of the panel's state: it is what the app does to itself
+            // at launch, and the next things to join it there (which window to
+            // come up in, whether to open the chat) belong beside it rather
+            // than among the toggles.
+            settings.set_bool("startup", "auto_listen", uiState.auto_listen);
             settings.set_enum("panel", "avatar_mode", aii::kAvatarVisibilityNames,
                               aii::kAvatarVisibilityCount,
                               static_cast<int>(uiState.avatar_mode));

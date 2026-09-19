@@ -76,6 +76,29 @@ constexpr float kTalkHoldSeconds = 0.40f;
 constexpr int kListenTimeoutUserFloorSec = 15;
 constexpr int kListenTimeoutMaxSec = 600;
 
+// M1f.5. Whether the app latches the microphone on for itself once the engines
+// are up (user, 19 Sep 2026: "I would like the toggle in the settings to have
+// the AI auto start by listening. And I would like this by default to be on.")
+//
+// **The default is on, and it is on here rather than in main.cpp**, for the
+// reason `listen_timeout_sec` states in the other direction: a default written
+// twice is a default that drifts. `AvatarUiState::auto_listen` starts at this
+// value and `settings.json` is read *over* it, so a missing key and a fresh
+// install are the same code path — which is exactly the case the user asked
+// about.
+//
+// It is worth saying plainly what defaulting it on means, because nothing else
+// in this panel does anything of the kind: **the app begins listening the
+// moment it finishes starting, with nobody having touched it.** That is what
+// was asked for, on the user's own machine, and it is built — but it puts the
+// whole weight of the feature on the app being legible about it. Three
+// surfaces say so from the first frame after the loader leaves (the microphone
+// icon's `Listening` face, the status line, and the avatar being present
+// because the latch counts as engagement), and none of them is new: this
+// reaches exactly the state a click on the microphone reaches, so there is no
+// second spelling of "the microphone is live" for one of them to get wrong.
+constexpr bool kAutoListenDefault = true;
+
 // ------------------------------------------------- when the avatar is here
 //
 // (user, 19 Sep 2026: "When I have it with mic toggled on, whenever I ask
@@ -223,6 +246,22 @@ struct AvatarOptions {
   // tools of any kind. The toggles are then inert and say so rather than
   // claiming to have removed something that was never there.
   bool tools_supported = true;
+
+  // M1f.5. What *this* run actually started with, beside what the tick box
+  // says — the same shape as `tools_in_force` above and for the same reason,
+  // though a much milder case of it. The two differ from the moment the box is
+  // changed until the app is next started, because the thing the setting
+  // decides happened once, seconds after launch, and cannot be made to happen
+  // again without taking the microphone off the user. So the surface shows the
+  // gap and names the launch, rather than letting a toggle look inert.
+  //
+  // Seeded once, before the first frame, from the same bool the latch itself
+  // was armed from. Nothing writes it afterwards.
+  bool auto_listen_in_force = kAutoListenDefault;
+  // False with --no-voice, where there is no session and nothing was ever
+  // going to listen. The row then says that rather than claiming a microphone
+  // this run does not have.
+  bool voice_enabled = true;
 };
 
 struct AvatarUiState {
@@ -245,6 +284,20 @@ struct AvatarUiState {
   // session every frame, which is the same "mirror the level, not the edge"
   // pattern the persisted fields already use.
   bool muted = false;
+  // M1f.5. Latch the microphone on for the user once the engines are up. Same
+  // persistence contract as `muted` above — the panel owns it, main.cpp seeds
+  // it from settings.json before the first frame and mirrors it back every
+  // frame — with one difference that the control on screen has to say out
+  // loud: **nothing pushes this down into the session.** It is read once, at
+  // the moment the loading screen leaves, and after that it is a note for the
+  // next launch. Toggling it mid-run therefore cannot open or close the
+  // microphone that is running, and must not: the microphone button is what
+  // does that, and a setting that reached across and moved it would be a
+  // second control for one piece of state.
+  //
+  // The default lives in `kAutoListenDefault`, not here, so the value and the
+  // paragraph explaining it stay in one place.
+  bool auto_listen = kAutoListenDefault;
   // Same contract as `chat_open`, persistence included: user state, written
   // only by its button. Defaults to the behaviour that predates the button.
   AvatarVisibility avatar_mode = AvatarVisibility::Always;
@@ -424,6 +477,8 @@ struct AvatarUiState {
   // scrolls, so without this there is no state in which it can be
   // screenshotted. Harness only (`--settings-tools`).
   bool settings_scroll_tools = false;
+  // M1f.5's, and the same again: Startup sits below the fold too.
+  bool settings_scroll_startup = false;
 };
 
 // M1f.2. What the two fields above mean as one number, in the one spelling the

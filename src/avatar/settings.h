@@ -14,6 +14,7 @@
 //     "version": 1,
 //     "panel": { "chat_open": false, "avatar_mode": "always" },
 //     "language": { "enabled": "en,ja" },
+//     "startup": { "auto_listen": true },
 //     "timing": { "listen_timeout": 60.0 },
 //     "tools": { "web": true, "file_read": true, "file_write": false },
 //     "inspector": { "placed": true, "x": 1180, "y": 420, "w": 1100, "h": 700 }
@@ -33,6 +34,14 @@
 // `VoiceSession::set_listen_timeout`), so there is one way to say "never" in
 // the whole feature rather than a number and a flag that can contradict
 // each other.
+//
+// `startup.auto_listen` (M1f.5) is whether the app latches its own microphone
+// on once the engines are up. **A missing key means true**, which is the whole
+// of the user's "by default it should be on": a fresh install with no file at
+// all and a file written before this key existed both come up listening. Like
+// `tools` it is read only at startup — the thing it decides happens once, a
+// second after launch — and the settings surface says which state the running
+// app is actually in rather than letting the box look inert.
 //
 // `tools` (M3.8) is one boolean per *group* of Claude Code tools, keyed by the
 // table in `core/tool_policy.h` — not one per tool, of which there are
