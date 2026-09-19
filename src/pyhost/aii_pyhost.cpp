@@ -319,6 +319,197 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       "-- schedules not yet due *and* workers a schedule has already started "
       "-- then one `schedule.list` carrying the count.");
 
+  // ---- the transport row (M2.9) -----------------------------------------
+  // One helper per control, not a `press(button)`: half of these are levels
+  // the panel owns rather than presses — `mute(False)` means the same thing
+  // however many times it arrives, where "press mute" twice unmutes — and a
+  // press-by-name verb would couple a script to the button registry, which is
+  // the one door `ButtonActionKind::Invoke` is deliberately kept behind.
+  m.def(
+      "mic",
+      [](bool on, const std::string& echo) {
+        return post_line(aii::BusLine("session.mic").flag("on", on).str("echo", echo).done());
+      },
+      py::arg("on") = true, py::arg("echo") = "",
+      "Latch the microphone on or off -- `toggle_mic()`, the same call a short "
+      "click on the microphone button makes and the only path into the latch. "
+      "Not hold-to-dictate, which is a gesture and is not on the bus.\n"
+      "\n"
+      "Answered by `session.mic` carrying `open`, which also arrives when the "
+      "user clicks the button, when Stop drops the latch and when a timeout "
+      "closes it. `session.refused` if the microphone cannot open yet.");
+
+  m.def(
+      "mute",
+      [](bool on, const std::string& echo) {
+        return post_line(aii::BusLine("session.mute").flag("on", on).str("echo", echo).done());
+      },
+      py::arg("on") = true, py::arg("echo") = "",
+      "Mute or unmute Claude's *voice*. Voice only: the reply still arrives as "
+      "text and the transcript is untouched. Turning it on cuts what is "
+      "already being spoken, mid-sentence.\n"
+      "\n"
+      "This writes the same flag the mute button and the S key write, so it is "
+      "remembered in settings.json exactly as a click is. Answered by "
+      "`session.muted` carrying `on` -- a fact, published whoever changed it, "
+      "and published even when your call changed nothing.");
+
+  m.def(
+      "stop",
+      [](const std::string& echo) {
+        return post_line(aii::BusLine("session.stop").str("echo", echo).done());
+      },
+      py::arg("echo") = "",
+      "Stop: cancel the reply in flight, drop the microphone latch, pause "
+      "every running worker. Answered by `session.stopped`.");
+
+  m.def(
+      "reset",
+      [](const std::string& echo) {
+        return post_line(aii::BusLine("session.reset").str("echo", echo).done());
+      },
+      py::arg("echo") = "",
+      "Throw the conversation away and start a fresh one -- everything Stop "
+      "does, then the `claude` child is ended and relaunched with the same "
+      "options. Workers and schedules survive it; mute, language and the "
+      "avatar are untouched.\n"
+      "\n"
+      "**This call is the confirmation.** The button asks twice because it is "
+      "24 px wide and cannot be undone; a line of Python is already "
+      "deliberate. What you do inherit is the guard that is not about "
+      "confirmation: a second reset while one is running is refused, and so is "
+      "a reset of an empty conversation.\n"
+      "\n"
+      "Answered by `session.resetting` with ok=True when it was *accepted*. It "
+      "takes a second or so; wait for `session.state` to come back.");
+
+  m.def(
+      "say",
+      [](const std::string& text, const std::string& echo) {
+        return post_line(aii::BusLine("session.say").str("text", text).str("echo", echo).done());
+      },
+      py::arg("text"), py::arg("echo") = "",
+      "Send text as the user's turn, exactly as typing it and pressing Enter "
+      "does. Refused for the reasons the message field refuses, in the same "
+      "words -- 'the microphone is open', 'Claude is still replying' -- as a "
+      "`session.refused` event. Answered by `session.said`, and the reply "
+      "arrives as `session.state` and (with --bus-text) `turn.text`.");
+
+  m.def(
+      "session_info",
+      [](const std::string& echo) {
+        return post_line(aii::BusLine("session.get").str("echo", echo).done());
+      },
+      py::arg("echo") = "",
+      "Ask what the session is doing. Answered by one `session.info` -- state, "
+      "mic, muted, resetting, resettable, status -- plus the two level facts.");
+
+  // ---- the settings surface (M2.9) --------------------------------------
+  m.def(
+      "model",
+      [](const std::string& name, const std::string& echo) {
+        return post_line(aii::BusLine("settings.model").str("name", name).str("echo", echo).done());
+      },
+      py::arg("name"), py::arg("echo") = "",
+      "Pick the conversational instance's base model, by its settings.json "
+      "key: 'default', 'opus', 'sonnet' or 'haiku'. Anything else is refused "
+      "rather than written, because an unknown --model starts a child in which "
+      "every turn fails.\n"
+      "\n"
+      "The same write the picker makes, with the same reach: it is remembered, "
+      "and it reaches Claude when the child next starts. Workers are unaffected "
+      "-- they are separate processes with their own grant.\n"
+      "\n"
+      "Answered by `settings.changed` with key='model'.");
+
+  m.def(
+      "tools",
+      [](const std::string& group, bool on, const std::string& echo) {
+        return post_line(aii::BusLine("settings.tools")
+                             .str("group", group)
+                             .flag("on", on)
+                             .str("echo", echo)
+                             .done());
+      },
+      py::arg("group"), py::arg("on") = true, py::arg("echo") = "",
+      "Grant or withhold one tool group for the conversational instance: "
+      "'web', 'file_read' or 'file_write'. An enabled group is *granted*, not "
+      "offered -- nothing in this app can answer a permission prompt -- so "
+      "'file_write' lets Claude change files on this PC without asking. Reaches "
+      "the child when it next starts, like the model.");
+
+  m.def(
+      "language",
+      [](bool english, bool japanese, const std::string& echo) {
+        return post_line(aii::BusLine("settings.language")
+                             .flag("english", english)
+                             .flag("japanese", japanese)
+                             .str("echo", echo)
+                             .done());
+      },
+      py::arg("english") = true, py::arg("japanese") = false, py::arg("echo") = "",
+      "Which languages are recognised and spoken. Takes effect at once, on an "
+      "utterance already in flight. Both false is refused, the way the "
+      "checkboxes lock the last one on.");
+
+  m.def(
+      "auto_listen",
+      [](bool on, const std::string& echo) {
+        return post_line(
+            aii::BusLine("settings.auto_listen").flag("on", on).str("echo", echo).done());
+      },
+      py::arg("on") = true, py::arg("echo") = "",
+      "Whether the app latches the microphone for itself at startup. Read at "
+      "launch, so this is for the next run.");
+
+  m.def(
+      "listen_timeout",
+      [](double seconds, const std::string& echo) {
+        return post_line(aii::BusLine("settings.listen_timeout")
+                             .num("seconds", seconds, 0)
+                             .str("echo", echo)
+                             .done());
+      },
+      py::arg("seconds"), py::arg("echo") = "",
+      "How long a latched microphone may hear nothing before it closes itself. "
+      "0 is never; otherwise 15 to 600 seconds, the control's own clamp. "
+      "Honoured by a latch that is already open -- there is no restart.");
+
+  m.def(
+      "chat",
+      [](bool on, const std::string& echo) {
+        return post_line(aii::BusLine("settings.chat").flag("on", on).str("echo", echo).done());
+      },
+      py::arg("on") = true, py::arg("echo") = "", "Open or close the transcript panel.");
+
+  m.def(
+      "open_settings",
+      [](bool on, const std::string& echo) {
+        return post_line(aii::BusLine("settings.open").flag("on", on).str("echo", echo).done());
+      },
+      py::arg("on") = true, py::arg("echo") = "",
+      "Open or close the settings surface -- the cog in the sidebar.");
+
+  m.def(
+      "avatar_mode",
+      [](const std::string& value, const std::string& echo) {
+        return post_line(
+            aii::BusLine("settings.avatar_mode").str("value", value).str("echo", echo).done());
+      },
+      py::arg("value"), py::arg("echo") = "",
+      "Cycle target for the avatar-visibility disc: 'always', 'when_talking' "
+      "or 'hidden'.");
+
+  m.def(
+      "settings_info",
+      [](const std::string& echo) {
+        return post_line(aii::BusLine("settings.get").str("echo", echo).done());
+      },
+      py::arg("echo") = "",
+      "Ask what every setting is. Answered by one `settings.info`, read off "
+      "the panel rather than off the file, so it is right on the frame before "
+      "the debounced write has happened.");
+
   m.attr("scripts") = g_host.scripts;
 
   // The two calls a script actually uses are parsed JSON, not lines. Written

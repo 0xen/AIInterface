@@ -26,6 +26,97 @@
 //   schedule.create -> build_schedule() + ScheduleBook::create (M2b.2)
 //   schedule.cancel -> VoiceSession::cancel_schedule, the AI's own two lookups
 //   schedule.list   -> VoiceSession::pending_items, back out as events
+//   session.*       -> the transport row (M2.9): toggle_mic, the panel's mute
+//                      flag, stop(), reset(), say()
+//   settings.*      -> the settings surface's own fields in AvatarUiState
+//                      (M2.9), which is where every one of those controls
+//                      writes and the only owner of record there is
+//
+// ## The controls a script can work (M2.9)
+//
+// The user asked that "all UI buttons are triggerable by Python". Two
+// families, and a decision about shape that is worth stating: **there is no
+// `button.press` verb and there never will be.**
+//
+//   * Half of these controls are *levels*, not presses. Mute, the model, the
+//     tool grants, the language boxes, the listen timeout: the panel owns the
+//     value and pushes it down every frame. "Press mute" has no idempotent
+//     form — a script that retried it would unmute — whereas `session.mute
+//     on=false` means the same thing however many times it arrives.
+//   * A press-by-id verb would couple a script to the button *registry*, and
+//     `ButtonActionKind::Invoke` is deliberately unreachable from the bus
+//     (see on_toolbar). A verb that could press a registered button by name
+//     would walk straight through that wall, because a worker and the
+//     assistant can both register buttons.
+//   * Every verb below lands on the call the control itself makes. `mic` is
+//     `toggle_mic()`, the one path into the latch that the button, the SPACE
+//     click and `--auto-listen` all share; `mute` and the whole `settings`
+//     family write `AvatarUiState`, which is what the checkbox writes and what
+//     main.cpp mirrors into `settings.json`. Nothing here is a second
+//     implementation of anything, so nothing here can drift — including when
+//     a setting starts restarting the child, which it will.
+//
+//   {"t":"session.mic","on":true}      {"t":"session.mute","on":true}
+//   {"t":"session.stop"}               {"t":"session.reset"}
+//   {"t":"session.say","text":"hello"} {"t":"session.get"}
+//   {"t":"settings.model","name":"haiku"}
+//   {"t":"settings.tools","group":"file_write","on":true}
+//   {"t":"settings.language","english":true,"japanese":false}
+//   {"t":"settings.listen_timeout","seconds":45}
+//   {"t":"settings.auto_listen","on":true}
+//   {"t":"settings.chat","on":true}    {"t":"settings.open","on":true}
+//   {"t":"settings.avatar_mode","value":"hidden"}
+//   {"t":"settings.get"}
+//
+// and back out:
+//
+//   {"t":"session.muted","on":true}         {"t":"session.mic","open":true}
+//   {"t":"session.said","ok":true,"echo":"x"}
+//   {"t":"session.stopped","echo":"x"}
+//   {"t":"session.resetting","ok":true,"echo":"x"}
+//   {"t":"session.refused","verb":"say","reason":"the microphone is open"}
+//   {"t":"session.info","state":"idle","mic":false,"muted":true,...}
+//   {"t":"settings.changed","key":"model","value":"haiku","echo":"x"}
+//   {"t":"settings.refused","key":"model","reason":"no such model: gpt"}
+//   {"t":"settings.info","model":"haiku","tools":"web,file_read",...}
+//
+// **Levels answer as facts, discrete acts answer with `echo`.** `session.muted`
+// and `session.mic` are published from `publish()` like `session.state` — on
+// change, coalesced under their own key — because a level is a fact about the
+// app and not a reply to anybody: the same event has to arrive whether the
+// mute came from this script, from the button, from the S key or from another
+// script, and an `echo` on it would be a lie three times out of four. Setting
+// one *also* forces the fact out on that frame even when nothing changed, so a
+// script that mutes an already-muted app still gets its answer rather than
+// waiting forever. Everything else here — say, stop, reset, and every
+// `settings` verb — is a request with an outcome, so it carries `echo` back
+// exactly as `schedule.created` does.
+//
+// **`drain_events()` still empties the queue for everybody** and nothing here
+// changes that. The two new facts are keyed, so they cost two slots however
+// long nothing drains; the acks are keyless and capped like turn text.
+//
+// **Reset: the explicit call is the confirmation.** The transport row makes
+// the user press twice because the button is 24 px wide, sits beside three
+// others and cannot be undone — the second press is there to catch a slipped
+// mouse. A script does not slip. `aii.reset()` is already a deliberate line
+// someone wrote, and a two-message handshake on the bus would only mean every
+// script carrying the same boilerplate. What a script *does* inherit is the
+// part that is not about confirmation: `VoiceSession::reset()` refuses while
+// one is already running, and refuses before the engines are up, so a script
+// can no more fire two concurrently than a hand can.
+//
+// **What is deliberately not here.** Hold-to-dictate
+// (`talk_pressed`/`talk_released`) is a gesture whose whole meaning is how
+// long it lasted and whether the pointer was still on the button; a script has
+// neither, and both of its outcomes are already reachable — a click latches
+// the microphone (`session.mic`), a hold puts words in the field to be sent
+// (`session.say`). Exposing the halves would mostly buy a script the ability
+// to open the microphone and never close it. The sidebar's folder button, the
+// prompt inspector and the worker windows open OS windows and an Explorer
+// window, which is not app state and cannot be observed on the bus; quitting
+// the app is not offered either, since `should_quit()` is the app's word to
+// the script and not the other way round.
 //
 // **Adding a family is a data change.** `AppBus::add_family("schedule",
 // handler)` and one function; M2.6's `script` family was exactly that — two
@@ -189,6 +280,11 @@ class BusBindings {
   void on_toolbar(const BusMessage& m, std::string* error);
   void on_script(const BusMessage& m, std::string* error);
   void on_schedule(const BusMessage& m, std::string* error);
+  // M2.9. The transport row and the settings surface.
+  void on_session(const BusMessage& m, std::string* error);
+  void on_settings(const BusMessage& m, std::string* error);
+  // The two levels, published on change and whenever a verb touched one.
+  void publish_facts();
   float lease_from(const BusMessage& m) const;
 
   Context ctx_;
@@ -215,6 +311,13 @@ class BusBindings {
   double last_ctx_ = -2.0, last_session_ = -2.0, last_week_ = -2.0;
   std::vector<std::pair<std::string, std::string>> last_workers_;
   std::size_t last_lines_ = 0;
+  // M2.9. -1 is "never published", so the first frame states both levels
+  // rather than leaving a script to assume a default it cannot see.
+  int last_muted_ = -1;
+  int last_mic_ = -1;
+  // A `session.mute`/`session.mic`/`session.get` landed this frame: say what
+  // the level is even if it did not move.
+  bool facts_now_ = false;
 };
 
 }  // namespace aii

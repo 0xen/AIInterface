@@ -1371,23 +1371,11 @@ bool blank(const char* s) {
   return true;
 }
 
-// Why this text cannot be sent right now, or null if it can. Sending routes
-// into VoiceSession::say(), which refuses outright while the engines are down
-// or the microphone is open, and treats a send during a turn as a barge-in —
-// so the field does not offer that: a turn in flight is a wait, not a queue.
-const char* refusal_reason(const VoiceSession::Snapshot& snap, bool voice_enabled,
-                           const char* text) {
-  if (blank(text)) return "nothing to send";
-  if (!voice_enabled) return "no voice this run (--no-voice)";
-  switch (snap.state) {
-    case VoiceSession::State::Loading: return "still starting up";
-    case VoiceSession::State::Failed: return "the session failed to start";
-    case VoiceSession::State::Listening: return "the microphone is open";
-    case VoiceSession::State::Thinking:
-    case VoiceSession::State::Speaking: return "Claude is still replying";
-    default: return nullptr;
-  }
-}
+// `send_refusal()` used to live here, file-static. It is declared in the
+// header now because the message field is no longer the only door into
+// `VoiceSession::say()` — M2.9's `session.say` bus verb is the same act and
+// has to refuse for the same reasons — and a second copy of that switch is
+// exactly the drift `build_schedule()` was factored out to prevent.
 
 // The message field, above the transport row (M1b.2).
 //
@@ -1756,7 +1744,7 @@ void message_field(AvatarUiState& state, const VoiceSession::Snapshot& snap, boo
   edit.st = &state;
   bool rebuild = dictate_into_field(state, snap);
   if (submit && !loading) {
-    if (const char* why = refusal_reason(snap, voice_enabled, state.message)) {
+    if (const char* why = send_refusal(snap, voice_enabled, state.message)) {
       // Refused, never queued and never dropped: the text is left in the field
       // exactly as typed and the reason appears below it.
       state.refusal = why;
@@ -2346,6 +2334,25 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
 }
 
 }  // namespace
+
+// M2.9. One set of words for both doors into `VoiceSession::say()`: the
+// message field, and the bus's `session.say`. `say()` itself is silent about
+// every one of these — it returns without a sound while the engines are down,
+// while the microphone is open, and barges in mid-reply — so whoever calls it
+// is the one that has to know, and there is now more than one caller.
+const char* send_refusal(const VoiceSession::Snapshot& snap, bool voice_enabled,
+                         const char* text) {
+  if (blank(text)) return "nothing to send";
+  if (!voice_enabled) return "no voice this run (--no-voice)";
+  switch (snap.state) {
+    case VoiceSession::State::Loading: return "still starting up";
+    case VoiceSession::State::Failed: return "the session failed to start";
+    case VoiceSession::State::Listening: return "the microphone is open";
+    case VoiceSession::State::Thinking:
+    case VoiceSession::State::Speaking: return "Claude is still replying";
+    default: return nullptr;
+  }
+}
 
 bool avatar_engaged(const AvatarEngagement& e) {
   switch (e.state) {
