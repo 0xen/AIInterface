@@ -132,6 +132,45 @@ enum class Msg {
   ClosingWithOne,        // {count}, then the caller appends the list
   ClosingWithMany,       // {count}
 
+  // --- The AI changing its own settings (M3.14) --------------------------
+  //
+  // **These are the app's sentences and not the model's, and that is the
+  // whole of the design.** What a settings change costs is a fact about this
+  // program -- which keys are levels pushed down every frame, which are read
+  // once at startup, and which of those restart the `claude` child and throw
+  // the conversation away. The model cannot know that from the outside and a
+  // prompt that told it would be a second copy of the truth, free to drift
+  // from `kSettingKeys` the day a key changes class. So the table in
+  // `avatar/settings.h` names one of these per key and the app says it.
+  //
+  // The practical consequence is the one the user will hear: a blanket "this
+  // needs a restart" on a key that needs none is unreachable, because a key
+  // whose cost is `Live` has no sentence to say at all.
+  //
+  // The two `Restart` lines end in a question and mean it. See
+  // `VoiceSession::apply_setting`: the first time a key and value are asked
+  // for the app asks this and does nothing, and only a *later* turn can carry
+  // the change through. Neither the wording nor the waiting is the model's to
+  // skip.
+  SettingRestartModel,   // model.name
+  SettingRestartTools,   // tools.*
+  // Saved now, read at the next launch. Said rather than left silent, because
+  // the alternative is the model announcing a change that has not happened.
+  SettingNextLaunch,     // startup.auto_listen
+  // In the file, and not this app's to write: the inspector window stores its
+  // own rect, `window.dodge_watermark` is read once before there is a window
+  // to ask, and `version` is the format's own field rather than a setting.
+  SettingWindowOwns,     // inspector.*
+  SettingStartupOnly,    // window.dodge_watermark
+  SettingFormatField,    // version
+  // {key}. The key the model named is not in `settings.json`'s format, or the
+  // value is not one that key takes. Spoken, not swallowed: an invented key
+  // that failed quietly is dead weight the user finds in their file a week
+  // later, and a refused value that failed quietly is a change they think
+  // they made.
+  SettingNoSuchKey,      // {key}
+  SettingBadValue,       // {key}
+
   Count,                 // not a message: the number of them, for the test
 };
 

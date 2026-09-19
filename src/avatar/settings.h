@@ -84,12 +84,111 @@
 // `version` is written for a human reading the file and for a future format
 // break that actually needs one; nothing reads it today, because per-key
 // defaults make the ordinary case of new keys a non-event.
+//
+// ----------------------------------------------------------------- M3.14
+//
+// **This file is a mirror, not a master, and everything M3.14 does follows
+// from that.** Read `main.cpp`'s frame loop: `panel`, `language`, `timing`,
+// `startup`, `tools`, `model` and `avatar` are all written out of
+// `AvatarUiState` *every frame*. A value written straight into
+// `settings.json` by anything else is therefore overwritten within about
+// sixteen milliseconds, silently, and the write looks like it worked.
+//
+// So "the AI can modify its own settings file" cannot be built as a file
+// writer. It is built as a translator: from the key vocabulary of this file,
+// which is what the user reads and what they asked the AI to be aware of, to
+// the control that owns each key -- and the control writes the file, exactly
+// as it did before any of this existed. There is one writer of
+// `settings.json` and M3.14 does not add a second.
+//
+// `kSettingKeys` below is that translation, and it is also the machine-readable
+// form of the doc comment above: one row per key this format defines, its
+// value's shape, what changing it costs, and the sentence the app says about
+// that cost. Adding a key to the format means a row here, or the AI will say
+// there is no such setting -- which is the intended failure, not an oversight.
 #include <filesystem>
 #include <string>
 
+#include "core/app_strings.h"
 #include "json.hpp"
 
 namespace aii {
+
+// What a key costs to change, which is the whole of what the warning has to
+// get right. **Per key, never per change**: three of these four classes cost
+// the user nothing, and a "this needs a restart" spoken over one of them is
+// the failure this enum exists to make unreachable.
+enum class SettingCost {
+  // A level the frame loop pushes down. It is true the moment it is set and
+  // the app says nothing, because there is nothing to warn about.
+  Live,
+  // Stored now, read at startup. Nothing breaks and nothing is lost; the
+  // thing it decides simply already happened this run.
+  NextLaunch,
+  // Read only when the `claude` child is created, so since M3.12 setting it
+  // replaces that child **now** and the conversation goes with it. This is
+  // the only class that asks before it acts.
+  Restart,
+  // In the file and not this app's to write. Not the same as "unknown": the
+  // key is real, the user can see it, and the app can say exactly why it will
+  // not touch it.
+  NotSettable,
+};
+
+// The shape of a key's value, which is what turns "haiku" into a bus message
+// and what refuses "banana" before anything is written.
+enum class SettingValue {
+  Bool,        // on / off / true / false / 1 / 0
+  Seconds,     // a number; 0 is never, as everywhere else in this file
+  ModelKey,    // a key from core/model_choice.h
+  AvatarMode,  // a name from kAvatarVisibilityNames
+  Languages,   // "en", "ja" or "en,ja"
+  Colour,      // #rrggbb
+  Free,        // a name only the art can validate (an avatar, a theme)
+  Opaque,      // NotSettable rows, which never parse a value at all
+};
+
+// One key of `settings.json`, as the AI is allowed to see it.
+struct SettingKey {
+  // `section.key`, spelled exactly as the file spells it. The dotted form is
+  // deliberate: it is how a person reads the file out loud, so the AI's
+  // vocabulary and the user's are the same words.
+  const char* key;
+  SettingValue value;
+  SettingCost cost;
+  // What the app says. `Msg::Count` means "nothing to say", which is the
+  // right and only answer for a `Live` key. For `Restart` it is the question
+  // that must be answered before the change happens; for `NextLaunch` it is
+  // said after; for `NotSettable` it is said instead.
+  Msg say;
+  // The bus topic that owns this key -- the same door a Python script uses
+  // (`avatar/bus_bindings.h`), which is the same door the panel's own control
+  // writes through. Empty for `NotSettable`. Nothing here is a second
+  // implementation of anything, so nothing here can drift from the button.
+  const char* bus;
+  // What a legal value looks like, and the shipped default, both for the
+  // digest the system prompt carries. Prose about *values* rather than prose
+  // about behaviour, which is why it can live in a table: see settings.md for
+  // the half a person is meant to edit.
+  const char* shape;
+  const char* def;
+};
+
+int setting_key_count();
+const SettingKey& setting_key_at(int i);
+// The row for a dotted key, or null -- which is the AI having invented one.
+const SettingKey* setting_key(const std::string& dotted);
+
+// The bus line that makes this change, or an empty string with `*error` set.
+//
+// Validation happens here, before anything is posted, because the bus
+// handler's own refusal goes to the log and not to the user: a value refused
+// two hops away is a change the user believes they made. What cannot be
+// checked here is checked there -- a theme or avatar name is only knowable to
+// the art, so `Free` is passed through and the bus is the one that says no.
+std::string setting_bus_line(const SettingKey& k, const std::string& value, std::string* error);
+
+class Settings;  // the digest is declared under it, where it can be read
 
 // %APPDATA%\AIInterface\settings.json, or AII_SETTINGS_FILE if that is set —
 // the same escape hatch AII_AVATAR_DIR gives the avatar loader, and for the
@@ -169,6 +268,18 @@ class Settings {
   // repeating it — same shape as AvatarSource::take_status_change().
   bool take_status_change();
 
+  // M3.14. What is actually on disk under `section`/`key`, rendered the way
+  // the file spells it, or an empty string when the file does not name it.
+  //
+  // Untyped on purpose, and it is the one accessor here that is. Every other
+  // getter answers "what should this setting be", which is a question with a
+  // default; this one answers "what does the file say", which is a question
+  // with an absence -- and the digest has to be able to tell a value that was
+  // written from one that was never there. It is also how a key this build
+  // has never heard of can still be *seen*, which is what stops an invented
+  // key being invisible.
+  std::string value_text(const char* section, const char* key) const;
+
  private:
   void note(std::string line, bool ok);
   void save();
@@ -183,5 +294,16 @@ class Settings {
   bool status_ok_ = false;
   bool status_new_ = false;
 };
+
+// M3.14. Every key, its value as this file has it, and what changing it costs
+// -- substituted into `system/settings.md` at launch, which is the "aware of
+// the settings file" half of the milestone and the half the user put first.
+//
+// It is *data*, which is why it is generated. The paragraph around it stays in
+// the Markdown where the user can edit it, for the reason `prompt_store.h`
+// gives about never lifting prose into string literals. A table of current
+// values is not prose and could not be written in the Markdown at all: it is
+// different on every machine and on every launch.
+std::string settings_digest(const Settings& s);
 
 }  // namespace aii

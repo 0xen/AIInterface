@@ -96,6 +96,43 @@ const AppLine kLines[] = {
     // --- Shutting down with schedules still pending ------------------------
     {"Closing with {} thing still to do: ", "やり残し {} 件のまま閉じるよ: "},
     {"Closing with {} things still to do: ", "やり残し {} 件のまま閉じるよ: "},
+
+    // --- The AI changing its own settings (M3.14) --------------------------
+    //
+    // The two questions are the point of the milestone, so they say the cost
+    // in the order it is paid: the restart is the mechanism, forgetting is
+    // what it costs, and the question comes last so the user answers the
+    // thing they just heard. "Restart" on its own is the word the user used
+    // when they asked for this and it is not enough on its own any more --
+    // since M3.12 the child is replaced at once and the conversation goes
+    // with it, so the sentence has to say that out loud.
+    {"Switching model means starting Claude again, so I would forget everything we have said. "
+     "Shall I?",
+     "モデルを変えるにはClaudeを起動し直すことになるから、今まで話したことは全部忘れちゃう。やっていい？"},
+    {"Changing what I am allowed to do means starting Claude again, so I would forget everything "
+     "we have said. Shall I?",
+     "できることを変えるにはClaudeを起動し直すことになるから、今まで話したことは全部忘れちゃう。やっ"
+     "ていい？"},
+    // Deliberately not "done" on its own: the change is real and stored, and
+    // the thing it decides happens once, a second after launch.
+    {"That is saved. It takes effect the next time the app starts.",
+     "保存したよ。次にアプリを起動したときから効くようになる。"},
+    {"That one is the inspector window's own position -- it writes it itself, so anything I put "
+     "there would be overwritten.",
+     "それはインスペクタのウィンドウが自分で書いてる位置なんだ。僕が入れても上書きされちゃうよ。"},
+    {"That one is read once before the window exists, so there is nothing running that can change "
+     "it. It can be edited in the file by hand.",
+     "それはウィンドウができる前に一度だけ読まれる設定だから、動いてる間には変えられないんだ。ファイル"
+     "を直接書き換えればいけるよ。"},
+    {"That is the file format's own field rather than a setting.",
+     "それは設定じゃなくて、ファイル形式そのものの項目なんだ。"},
+    // {key}. The key is said because it is the one piece of information the
+    // user cannot get any other way -- it is what *I* reached for, and they
+    // are the only one who can tell me it was wrong.
+    {"There is no setting called {}, so I have left the file alone.",
+     "{} っていう設定はないから、ファイルはそのままにしたよ。"},
+    {"{} does not take that value, so I have left it as it was.",
+     "{} はその値を取らないから、そのままにしておいたよ。"},
 };
 
 static_assert(sizeof(kLines) / sizeof(kLines[0]) == static_cast<size_t>(Msg::Count),

@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <cstdio>
+#include <cstring>
 #include <system_error>
 
 #include "core/config.h"
@@ -638,14 +639,32 @@ std::string expand_tool_sections(const std::string& text, const ToolPolicy& poli
   return trim_end(collapse_blank_runs(out));
 }
 
+namespace {
+// M3.14. Set before the session is built and read when the prompt is
+// composed. A plain string rather than a callback: `core` is not allowed to
+// know what a settings file is, and a value it can neither parse nor validate
+// is exactly the right amount of knowledge to hand it.
+std::string g_settings_digest;
+}  // namespace
+
+void set_settings_digest(std::string text) { g_settings_digest = std::move(text); }
+
 const std::string& system_prompt(const ToolPolicy& policy) {
   // Keyed on the policy rather than computed once and for all — see the
   // header. One process normally asks for one policy and gets the cached
   // bytes every time after the first.
+  //
+  // M3.14 adds the settings digest to the key. The policy alone stopped being
+  // enough the moment a *model* change could restart the child: that restart
+  // composes a new prompt with an unchanged `ToolPolicy`, and a cache keyed on
+  // the policy would have handed the new child the previous file's values —
+  // this app stating, in the system prompt, something it had itself just made
+  // untrue.
   static ToolPolicy cached_for;
+  static std::string cached_digest;
   static std::string cached;
   static bool have = false;
-  if (have && cached_for == policy) return cached;
+  if (have && cached_for == policy && cached_digest == g_settings_digest) return cached;
 
   PromptStore store;
   std::string err;
@@ -659,7 +678,18 @@ const std::string& system_prompt(const ToolPolicy& policy) {
   // because the policy is the *caller's*: the store knows the prose and this
   // function knows the app.
   std::vector<std::string> section_problems;
-  std::string composed = expand_tool_sections(store.compose("system"), policy, &section_problems);
+  // M3.14. Substituted before the conditionals are resolved, so the two never
+  // interact: `expand_tool_sections` looks for `{{#` and `{{^` and this is
+  // neither, and by the time it runs there is no `{{settings}}` left for a
+  // future change to that parser to trip over. A store whose `settings.md`
+  // has been deleted or emptied simply has no slot and loses nothing.
+  std::string text = store.compose("system");
+  if (const size_t at = text.find("{{settings}}"); at != std::string::npos) {
+    // `trim_end` so a digest ending in a newline does not leave a blank line
+    // the collapse pass would then have to reason about.
+    text.replace(at, std::strlen("{{settings}}"), trim_end(g_settings_digest));
+  }
+  std::string composed = expand_tool_sections(text, policy, &section_problems);
   for (const std::string& p : section_problems) std::fprintf(stderr, "[prompts] %s\n", p.c_str());
   // Appended, never substituted, and last so that it has the final word. Not
   // expanded: the file next to the exe is the user's own prose and nothing
@@ -670,6 +700,7 @@ const std::string& system_prompt(const ToolPolicy& policy) {
   }
   cached = std::move(composed);
   cached_for = policy;
+  cached_digest = g_settings_digest;
   have = true;
   return cached;
 }

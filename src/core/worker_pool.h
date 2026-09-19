@@ -115,6 +115,22 @@ struct Command {
   std::string label;
   std::string tip;
   std::string path;
+  // The `setting` verb's fields (M3.14). `key` is a dotted `section.key` of
+  // `settings.json` — the file's own vocabulary rather than a second one, so
+  // that the words the model uses are the words the user reads.
+  //
+  // **`confirm` is a field and not prose, which is the whole of how the
+  // question gets asked.** A change that restarts the `claude` child throws
+  // the conversation away (M3.12), so warning about it has to survive being
+  // forgotten — and a warning the model merely *says* can be skipped in the
+  // same reply that acts, which is a question in grammar only. Making the
+  // consent a token the model has to write turns an omission into a
+  // commission, and `VoiceSession::apply_setting` then refuses it outright
+  // unless the app asked on an earlier turn. See M3.13: the lever on this
+  // model's behaviour was the syntax line, not the paragraph beside it.
+  std::string key;
+  std::string value;
+  std::string confirm;
 };
 
 // Finds ```aii fenced blocks in `text` and parses their command lines.

@@ -227,6 +227,26 @@ std::string local_prompt();
 std::string expand_tool_sections(const std::string& text, const ToolPolicy& policy,
                                  std::vector<std::string>* problems = nullptr);
 
+// ------------------------------------------- M3.14: what the settings say now
+//
+// The block `system/settings.md` substitutes for `{{settings}}` — every key of
+// `settings.json`, its value on this machine at this launch, and what changing
+// it costs. Built by `avatar/settings.cpp`, which owns the table, and handed
+// down here because `core` must not learn what a settings file is.
+//
+// **Values, not prose, and that is why this one is generated.** The rule
+// `expand_tool_sections` is written to protect — the paragraph the user may
+// rewrite must stay in the Markdown, not in a string literal — does not reach
+// here, because a list of current values could not be written in the Markdown
+// at all: it is different on every machine and after every change. The prose
+// around it is still in the file, still editable, still diffable.
+//
+// Set once, before the session is built. It is part of the cache key below, so
+// a restart that changes a value composes fresh bytes rather than handing the
+// new child the old file's values — which would be this app telling Claude
+// something it has just made untrue.
+void set_settings_digest(std::string text);
+
 // The composed system prompt for this process, computed once on first use:
 // the `system` graph, its conditional sections resolved against `policy`, then
 // `pre-prompt.md`.

@@ -454,6 +454,17 @@ class VoiceSession {
   // report and the next gap delivers it on its own, exactly as before.
   void requeue_riding_reports(std::vector<PendingTurn> rider);
   void run_commands(const std::string& reply_text);
+  // M3.14. One `setting key=… value=… [confirm=yes]` line.
+  //
+  // **It adds no way to restart the child and does not want one.** A settings
+  // change is posted to the app bus — `AppBus::post` from any thread,
+  // `apply_pending()` on the frame loop — and lands on the same handler a
+  // Python script and the panel's own control land on. What happens after
+  // that, including whether `apply_llm_settings()` replaces the `claude`
+  // child, is main.cpp's existing decision and is unchanged by this feature.
+  // So a voice change and a clicked change are one code path, and the voice
+  // one cannot restart anything the button could not.
+  void apply_setting(const Command& c);
   // Speak a line from the app itself (worker reports) and show it.
   void announce(const std::string& text);
   // Same, where what is shown and what is spoken differ: a worker report is
@@ -537,6 +548,23 @@ class VoiceSession {
   // whole length ruling out.
   PromptInventory inventory_;                                 // mutex_
   std::vector<std::pair<std::string, double>> prompt_times_;  // turn thread; id -> uptime
+  // M3.14. The `key=value` the app has already asked the user about, and the
+  // only one a `confirm=yes` can carry through. Turn thread only, like
+  // `prompt_times_` and `injector_`, and lockless for the same reason:
+  // `run_commands()` is the sole reader and the sole writer.
+  //
+  // **This is what makes the question a question.** The model could always
+  // have written the warning and the change in one reply — a sentence ending
+  // in "shall I?" followed immediately by the restart — and no amount of
+  // prompt prose reliably stops it. So the app holds the first ask and honours
+  // only a confirmation that answers one: an unmatched `confirm=yes` is not
+  // refused, it is *asked about*, which costs the user one turn and costs a
+  // model trying to shortcut the gesture exactly nothing it can spend.
+  //
+  // It survives a "no" on purpose. A declined change leaves the proposal here
+  // with no confirmation attached, so asking again later still asks again —
+  // the pair only lets a confirmation through, never a change.
+  std::string asked_setting_;
   // When this session began, for the inspector's "how long ago". Steady, so a
   // clock change mid-session cannot make a prompt look like it was injected in
   // the future. Set once, in the constructor, so it covers the load as well.

@@ -19,11 +19,20 @@
           "kind": "global",
           "enabled": true,
           "pos": [320, 80]
+        },
+        {
+          "id": "settings",
+          "title": "Settings",
+          "file": "system/settings.md",
+          "kind": "global",
+          "enabled": true,
+          "pos": [320, 240]
         }
       ],
       "links": [
         { "from": "start", "to": "voice", "order": 0, "enabled": true },
-        { "from": "start", "to": "workers", "order": 1, "enabled": true }
+        { "from": "start", "to": "workers", "order": 1, "enabled": true },
+        { "from": "start", "to": "settings", "order": 2, "enabled": true }
       ]
     },
     "project": {

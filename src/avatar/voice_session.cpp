@@ -9,6 +9,9 @@
 
 #include "rend/core/log.h"
 
+#include "settings.h"
+
+#include "core/app_bus.h"
 #include "core/app_strings.h"
 #include "core/cwd_policy.h"
 #include "core/language.h"
@@ -2444,6 +2447,12 @@ void VoiceSession::run_commands(const std::string& reply_text) {
     // The model reaching for a prompt that does not exist is its own
     // housekeeping; reading "I could not load that" aloud would spend a spoken
     // sentence on something the user never asked for, exactly as `button` does.
+    // M3.14. Not a worker verb either, so it is handled before the `workers_`
+    // guard: changing a setting has nothing to do with whether a pool exists.
+    if (c.verb == "setting") {
+      apply_setting(c);
+      continue;
+    }
     if (c.verb == "load") {
       if (injector_.request(c.name)) log("[prompts] queued " + c.name + " for the next turn");
       else log("[prompts] refused load name=" + c.name + " (no such prompt in the store)");
@@ -2499,6 +2508,78 @@ void VoiceSession::run_commands(const std::string& reply_text) {
     }
   }
   request_cancel(std::move(cancels));
+}
+
+void VoiceSession::apply_setting(const Command& c) {
+  // The key first, because "there is no setting called that" is a different
+  // sentence from "that key does not take that value" and the user hears
+  // which. A key this format does not define is the model having invented
+  // one, and it is **said out loud** rather than logged: the whole hazard of
+  // an invented key is that it is inert, and inert failures are the ones that
+  // turn up in a file a week later with nobody able to say how.
+  const SettingKey* key = setting_key(c.key);
+  if (!key) {
+    log("[setting] refused key=\"" + c.key + "\" (no such key in settings.json)");
+    announce(app_text(Msg::SettingNoSuchKey, c.key));
+    return;
+  }
+
+  // A real key that nothing running owns. It has its own sentence in the
+  // table — the inspector's rect, a value read before there was a window, the
+  // format's own version field — so the user is told which of those it is
+  // rather than getting one refusal that covers three unrelated facts.
+  if (key->cost == SettingCost::NotSettable) {
+    log("[setting] refused key=" + c.key + " (not settable while running)");
+    announce(app_text(key->say, c.key));
+    return;
+  }
+
+  std::string err;
+  const std::string line = setting_bus_line(*key, c.value, &err);
+  if (line.empty()) {
+    log("[setting] refused key=" + c.key + " value=\"" + c.value + "\": " + err);
+    announce(app_text(Msg::SettingBadValue, c.key));
+    return;
+  }
+
+  // The confirmation. See `asked_setting_` in the header for why the app holds
+  // this and the model does not: the restart discards the conversation the
+  // question was asked in, so a "shall I?" that acts in the same reply is a
+  // question in grammar only.
+  if (key->cost == SettingCost::Restart) {
+    const std::string pair = c.key + "=" + c.value;
+    const bool confirmed = c.confirm == "yes" || c.confirm == "true" || c.confirm == "on";
+    if (!confirmed || asked_setting_ != pair) {
+      // Both halves land here, and deliberately answer the same way. An
+      // unconfirmed line is the model doing as it was told; a `confirm=yes`
+      // nobody was asked about is the model skipping the gesture. The user's
+      // experience of the two must be identical — they are asked — or the
+      // second one becomes a thing worth trying.
+      asked_setting_ = pair;
+      log("[setting] asking about " + pair +
+          (confirmed ? " (confirm= arrived before the question)" : ""));
+      announce(app_text(key->say));
+      return;
+    }
+    asked_setting_.clear();
+  }
+
+  // Posted, not applied. `AppBus::post` may be called from any thread and
+  // `apply_pending()` runs the handler on the frame loop, which is the rule
+  // `announce()` keeps for the same reason. From here on this is the panel's
+  // own path: the handler writes `AvatarUiState`, main.cpp mirrors that into
+  // `settings.json`, and a model or tool change arms the restart main.cpp
+  // already arms when the box is ticked by hand.
+  if (!AppBus::instance().post(line, &err)) {
+    log("[setting] could not post " + c.key + ": " + err);
+    announce(app_text(Msg::SettingBadValue, c.key));
+    return;
+  }
+  log("[setting] " + c.key + " = " + c.value + " (" + key->bus + ")");
+  // Nothing is said for a change that costs nothing: the model's own spoken
+  // sentence already said what it did, and a second voice repeating it is the
+  // app talking over the conversation. The one that costs something says so.
+  if (key->cost == SettingCost::NextLaunch) announce(app_text(key->say));
 }
 
 void VoiceSession::publish_inventory() {
