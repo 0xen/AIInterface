@@ -98,6 +98,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <io.h>
 
 #include <algorithm>
 #include <atomic>
@@ -129,6 +130,7 @@
 #include "core/model_choice.h"
 #include "core/prompt_store.h"
 #include "core/schedule.h"
+#include "core/user_paths.h"
 #include "core/worker_pool.h"
 #include "imgui_layer.h"
 #include "action_store.h"
@@ -301,8 +303,102 @@ void colourToFloats(std::uint32_t c, float* f) {
 
 } // namespace
 
-int main(int /*argc*/, char** /*argv*/) {
+// ---------------------------------------------- where the diagnostics go
+//
+// `avatar.exe` is linked for the **windows** subsystem (see the avatar target
+// in CMakeLists.txt), because a console-subsystem binary gets a console window
+// from Windows whether or not it ever writes to it, and the user asked for
+// that window to stop appearing. The entry point is still `main`
+// (/ENTRY:mainCRTStartup), so nothing about argument handling changes -- the
+// arguments never came from `argv` anyway (CommandLineToArgvW, below).
+//
+// The cost of that subsystem is the whole point of this function. Every
+// diagnostic this project is read by -- `[setting]`, `[handoff]`, `[reply]`,
+// the loader's stage timings, `avatar exit: N frames`, which is the marker a
+// scripted run watches for -- goes to stdout, and on a windowed process
+// launched from Explorer stdout is attached to nothing at all. Silently.
+//
+// Three writers reach that stream and only one of them is rend::log: the
+// `[setting]`/`[handoff]` lines come through VoiceSession::log, and aii_core
+// writes `[tools]`/`[prompts]` to stderr with fprintf because it does not link
+// the engine and so cannot call rend::log at all. Redirecting *the streams*
+// rather than each call site is therefore not laziness, it is the only way to
+// catch all three -- and it fixes a fourth thing that is easy to miss:
+// claude_code_client.cpp hands `GetStdHandle(STD_ERROR_HANDLE)` to every
+// `claude` child it spawns, so a process with no stderr would silently throw
+// away everything the CLI itself reports.
+//
+// So:
+//   1. **The parent's console, when there is one.** A developer running this
+//      from a terminal still sees the lines exactly as before. Only for a
+//      stream whose handle is not already valid: a run that redirected stdout
+//      to a file inherited a real handle, and stealing it back to CONOUT$
+//      would throw that file away.
+//   2. **Otherwise the log file becomes the stream.** stdout and stderr are
+//      reopened onto `%APPDATA%\AIInterface\logs\avatar.log` -- under
+//      user_data_root(), and therefore under the same APPDATA redirection
+//      every scripted and agent run already uses to stay off the real profile
+//      -- and SetStdHandle publishes it so spawned children inherit it too.
+//      This is the double-click case, and it is the one that has to keep
+//      working without anybody remembering to arrange anything.
+//   3. **A mirror file when (2) did not happen.** rend::log::mirrorToFile is
+//      the engine's own sink hook. Under (2) it would write every line to the
+//      file twice, once as the stream and once as the mirror, so the two are
+//      deliberately exclusive.
+//
+// No `--console` flag: with (1) a terminal launch already prints and with (2)
+// a double-click is still readable afterwards, so a flag would only add a way
+// to get it wrong.
+void routeDiagnostics() {
+    auto valid = [](DWORD which) {
+        const HANDLE h = GetStdHandle(which);
+        return h != nullptr && h != INVALID_HANDLE_VALUE;
+    };
+    bool haveOut = valid(STD_OUTPUT_HANDLE);
+    bool haveErr = valid(STD_ERROR_HANDLE);
+    if ((!haveOut || !haveErr) && AttachConsole(ATTACH_PARENT_PROCESS)) {
+        // The CRT's streams were bound at startup, when there was no console;
+        // reopening is what actually connects them to the one just attached.
+        std::FILE* f = nullptr;
+        if (!haveOut && freopen_s(&f, "CONOUT$", "w", stdout) == 0) haveOut = true;
+        if (!haveErr && freopen_s(&f, "CONOUT$", "w", stderr) == 0) haveErr = true;
+    }
+    // After the attach, so it applies to the console this process now has.
     SetConsoleOutputCP(CP_UTF8);
+
+    std::error_code ec;
+    const std::filesystem::path dir = aii::user_data_root() / "logs";
+    std::filesystem::create_directories(dir, ec);
+    const std::filesystem::path file = dir / "avatar.log";
+    // One rotation at 4 MB. The log is appended to across runs on purpose --
+    // "what did it say last time" is most of what it is for -- but every
+    // spoken line and every reply goes through it, so unbounded is not a
+    // choice, and one previous file covers "it happened on the run before the
+    // one I am looking at".
+    if (const auto size = std::filesystem::file_size(file, ec); !ec && size > 4u * 1024u * 1024u) {
+        std::filesystem::rename(file, dir / "avatar.log.1", ec);
+    }
+
+    bool redirected = false;
+    auto toFile = [&](std::FILE* stream, DWORD which) {
+        std::FILE* f = nullptr;
+        if (_wfreopen_s(&f, file.c_str(), L"a", stream) != 0 || !f) return;
+        // Unbuffered: line buffering would still hold a line across a hang,
+        // and this stream is read precisely when something has gone wrong.
+        std::setvbuf(stream, nullptr, _IONBF, 0);
+        const intptr_t osf = _get_osfhandle(_fileno(stream));
+        if (osf != -1) SetStdHandle(which, reinterpret_cast<HANDLE>(osf));
+        redirected = true;
+    };
+    if (!haveOut) toFile(stdout, STD_OUTPUT_HANDLE);
+    if (!haveErr) toFile(stderr, STD_ERROR_HANDLE);
+    if (!redirected) rend::log::mirrorToFile(file);
+
+    rend::log::info("avatar start: logging to {}", file.string());
+}
+
+int main(int /*argc*/, char** /*argv*/) {
+    routeDiagnostics();
     // **The folder every worker falls back to**, captured here and nowhere
     // else: this is the directory the user launched the app from, which is the
     // directory the conversational instance is told it is in, and after the
@@ -2847,6 +2943,28 @@ int main(int /*argc*/, char** /*argv*/) {
                 aii::draw_avatar_ui(uiState, snap, avatarOptions, session != nullptr,
                                     session && session->mic_open(),
                                     session && session->mic_hold(), kWindowW, band, submit);
+            // The close button (user, 19 Sep 2026). Outside the `if (session)`
+            // below on purpose: with --no-voice there is no session at all, and
+            // a quit button that worked in one mode and not the other would be
+            // the kind of bug nobody finds until a demo.
+            //
+            // It drops out of the frame loop exactly as Esc/Q and `--seconds`
+            // already do, so there is one shutdown path and this adds no
+            // teardown of its own — scripts.stop(), the dropped-schedule
+            // warnings, settings.flush() and waitIdle() all still run below.
+            // The panel has already asked twice and already waited for
+            // quitting_ok(), so by the time this is true there is nothing left
+            // to check.
+            //
+            // **What it does to a worker mid-task**: the same as every other
+            // way out of this app. ~WorkerPool calls pause_all(), which sets
+            // `cancel` on every Starting or Working instance, then joins the
+            // threads — so each worker's `claude` child is ended wherever it
+            // had got to and anything it had not already reported is lost.
+            // That is not new behaviour and this button does not change it;
+            // what it adds is that the armed tooltip names those workers
+            // before the second press, which Esc and Q never did.
+            if (r.close) running = false;
             if (session) {
                 if (r.talk_pressed) session->talk_pressed();
                 if (r.talk_released) session->talk_released(r.talk_over_button, r.talk_held);

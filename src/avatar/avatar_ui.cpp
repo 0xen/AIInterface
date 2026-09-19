@@ -65,6 +65,11 @@ ImVec4 red_deep() { return ui_color(0.62f, 0.10f, 0.10f); }
 // sidebar's live with the shared code, since the strip will not be the only
 // surface that ever wants a cog.
 constexpr float kTransportButton = 30.0f;  // kIconPx plus 2 px of air all round
+// The extra air before the close button (user, 19 Sep 2026). Slots 0-3 act on
+// the conversation; slot 4 acts on the application. Ten pixels is enough for
+// the eye to group four and one rather than five, and small enough that the
+// row still reads as one row.
+constexpr float kCloseSlotGap = 10.0f;
 
 // The microphone, six ways. Idle is the bare capsule-and-cradle; everything
 // else is that same shape with something added, so the button never changes
@@ -244,6 +249,47 @@ constexpr IconRows kIconResetArmed = {
     "..###...###..",
     "....#####....",
     ".............",
+};
+
+// Close, two faces (user, 19 Sep 2026), built to the same rule Reset's pair
+// is: the armed face changes the *glyph* as well as the plate colour, so the
+// warning survives a greyscale monitor, a capture and a colour-blind eye.
+//
+// An X is the one glyph that means "close this" without a caption, which
+// matters at 13 cells. It is drawn to the corners rather than tucked in,
+// because the armed face needs somewhere to go and pulling *inward* is a
+// motion the eye reads as something closing on it.
+constexpr IconRows kIconClose = {
+    ".............",
+    ".#.........#.",
+    ".##.......##.",
+    "..##.....##..",
+    "...##...##...",
+    "....##.##....",
+    ".....###.....",
+    "....##.##....",
+    "...##...##...",
+    "..##.....##..",
+    ".##.......##.",
+    ".#.........#.",
+    ".............",
+};
+// Armed: the X has drawn in by one cell and four brackets have closed around
+// it. The plate goes red underneath, but the shape alone already says it.
+constexpr IconRows kIconCloseArmed = {
+    "ooo.......ooo",
+    "o...........o",
+    "o.#.......#.o",
+    "..##.....##..",
+    "...##...##...",
+    "....##.##....",
+    ".....###.....",
+    "....##.##....",
+    "...##...##...",
+    "..##.....##..",
+    "o.#.......#.o",
+    "o...........o",
+    "ooo.......ooo",
 };
 
 // Stop. A square is the one transport glyph that needs no explaining, and at
@@ -2221,17 +2267,84 @@ const char* reset_tooltip(ResetFace face) {
   }
 }
 
+// --- the close button's three faces (user, 19 Sep 2026) ---------------------
+//
+// There is no Inert. Closing is the one thing this app must never refuse: Esc
+// and Q already quit from any state, and a quit button that greys itself out
+// would be a worse promise than no button at all. `Waiting` is not a refusal
+// either — it is a quit that has been accepted and is queued behind the turn
+// in flight.
+enum class CloseFace { Ready, Armed, Waiting };
+
+TransportSkin close_skin(CloseFace face) {
+  switch (face) {
+    case CloseFace::Armed:
+      // Deliberately the same red plate Reset's armed face wears. Two buttons
+      // that are one press from doing something irreversible should look the
+      // same while they are armed; teaching the user a second danger colour
+      // would only dilute the first.
+      return {ui_color(0.55f, 0.13f, 0.13f), ui_color(0.70f, 0.19f, 0.18f),
+              ui_color(0.42f, 0.09f, 0.09f), ui_color(1.00f, 0.93f, 0.92f), warn()};
+    case CloseFace::Waiting: {
+      // Still armed — the glyph is the armed one — but dimmed to the accent,
+      // because the user's part is over and the app's has started. Same device
+      // ResetFace::Working uses, and for the same reason: something is
+      // happening and the button is no longer the thing to press.
+      TransportSkin skin = neutral_skin(accent());
+      skin.hovered = skin.active = skin.bg;
+      return skin;
+    }
+    default:
+      return neutral_skin(fg());
+  }
+}
+
+// The armed tooltip names the workers by name rather than counting them,
+// because "2 workers" is a number and "docs, refactor" is the thing the user
+// actually has to decide about. This is the case most likely to cost real
+// work: a worker is a separate `claude` process that has been running for
+// minutes, and closing cancels it wherever it had got to.
+std::string close_tooltip(CloseFace face, const VoiceSession::Snapshot& snap) {
+  if (face == CloseFace::Waiting)
+    return "Closing as soon as this turn finishes.\n"
+           "(Press again to stay open.)";
+  if (face != CloseFace::Armed) return "Close - quit AIInterface\n(asks once more before it does)";
+
+  std::string live;
+  int n = 0;
+  for (const WorkerPool::Snapshot& w : snap.workers) {
+    if (w.state != WorkerPool::State::Working && w.state != WorkerPool::State::Starting) continue;
+    if (n++) live += ", ";
+    live += w.name;
+  }
+  std::string t = "Press again to close AIInterface.\n";
+  if (n > 0)
+    t += (n == 1 ? "The worker " : "The workers ") + live +
+         (n == 1 ? " is still running and will be stopped;\nwhatever it has not reported yet is "
+                   "lost.\n"
+                 : " are still running and will be stopped;\nwhatever they have not reported yet "
+                   "is lost.\n");
+  t += "(Or wait a moment to cancel.)";
+  return t;
+}
+
 void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool voice_enabled,
                bool loading, bool mic_on, bool mic_hold, AvatarUiResult& out) {
   const ImGuiStyle& style = ImGui::GetStyle();
   const float gap = style.ItemSpacing.x;
-  // One origin, three slot indices. Read off the layout cursor once, before
+  // One origin, five slot indices. Read off the layout cursor once, before
   // anything is submitted, so nothing that happens inside the row can move a
   // later slot: slot 2 being absent cannot shift slot 0 because slot 0's
   // position was never a function of slot 2.
+  //
+  // Slot 4 (close) is pushed out by kCloseSlotGap so it does not read as one
+  // more transport control. It is still a pure function of the index and of
+  // nothing else, which is the whole of the invariant — the extra gap is a
+  // constant, not a state.
   const ImVec2 origin = ImGui::GetCursorScreenPos();
   auto slot_pos = [&](int i) {
-    return ImVec2(origin.x + i * (kTransportButton + gap), origin.y);
+    const float extra = i >= 4 ? kCloseSlotGap : 0.0f;
+    return ImVec2(origin.x + i * (kTransportButton + gap) + extra, origin.y);
   };
 
   // The two stretches in which the microphone has nothing to attach itself to:
@@ -2439,6 +2552,81 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
     }
   }
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", reset_tooltip(reset));
+
+  // --- slot 4: close (user, 19 Sep 2026) -------------------------------------
+  //
+  // **Why here.** The window is borderless on purpose, so there is no OS close
+  // button to lean on, and the only ways out were Esc/Q and the window's own
+  // close message — neither of which is visible. The row was the one place a
+  // 30 px icon button could be added that costs the window no height at all:
+  // slots are laid out from an origin and an index, so a fifth is arithmetic
+  // rather than layout, and the panel is 360 px wide against the ~192 px five
+  // slots occupy. The toolbar above was the alternative and was rejected: it
+  // flows with SameLine and its contents are whatever agents have registered,
+  // so a button placed there moves when something else registers — which is
+  // bug f713297 by a different route. This slot cannot move, and adding it
+  // cannot move slots 0-3, because none of their positions was ever a function
+  // of anything but their own index.
+  //
+  // **Why two presses.** Closing is at least as destructive as Reset and has
+  // even less of an undo: Reset loses a conversation, this loses the
+  // conversation *and* every worker mid-task. So it borrows Reset's gesture
+  // wholesale — arm, change glyph and plate, fire on the second press, with
+  // the same kResetArmMinSeconds dwell that stops a double-click walking
+  // through the confirm, and the same kResetArmSeconds timeout. (That gesture
+  // is the house style rather than a proven design: it is still on the user's
+  // own test list. If it turns out to be wrong, it is now wrong in one place
+  // and both buttons are fixed together.)
+  //
+  // **Why it never greys out.** See CloseFace: a quit button that refuses is
+  // a worse promise than no button, and Esc/Q would contradict it anyway.
+  if (state.close_armed_at > 0.0) {
+    // Deliberately a shorter list than Reset's. Reset disarms when the session
+    // runs out of things to reset; nothing can make a quit inapplicable, so
+    // only a real gesture elsewhere and the timeout drop it. `out.reset` is in
+    // the list because arming Close and then confirming Reset is a user who is
+    // plainly no longer closing.
+    const bool moved_on = out.talk_pressed || out.stop || out.reset || mute_clicked;
+    if (moved_on || now - state.close_armed_at > kResetArmSeconds) state.close_armed_at = 0.0;
+  }
+  const CloseFace close_face = state.close_pending ? CloseFace::Waiting
+                               : state.close_armed_at > 0.0 ? CloseFace::Armed
+                                                            : CloseFace::Ready;
+  if (transport_slot("##close", slot_pos(4),
+                     close_face == CloseFace::Ready ? kIconClose : kIconCloseArmed,
+                     close_skin(close_face))) {
+    if (close_face == CloseFace::Waiting) {
+      // Second thoughts, and the only way back: a queued quit the user can no
+      // longer call off would be the same trap as one they never asked for.
+      state.close_pending = false;
+      state.refusal = "Staying open.";
+      state.refusal_left = kRefusalSeconds;
+    } else if (close_face == CloseFace::Ready) {
+      state.close_armed_at = now;
+    } else if (now - state.close_armed_at >= kResetArmMinSeconds) {
+      state.close_armed_at = 0.0;
+      // Confirmed. Whether it happens on this frame is quitting_ok()'s
+      // decision, not this button's — the app must not tear a turn down
+      // half-way, and the reply already half paid for is the user's.
+      state.close_pending = true;
+    }
+  }
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", close_tooltip(close_face, snap).c_str());
+  // The pending quit, resolved here rather than at the click, so it is retried
+  // every frame until the session allows it. On the overwhelmingly common path
+  // — nothing in flight — `quit_ok` is already true on the very frame the
+  // second press lands and this fires immediately, so the wait costs a user
+  // who is simply closing an idle app exactly nothing.
+  if (state.close_pending && snap.quit_ok) {
+    state.close_pending = false;
+    out.close = true;
+  } else if (state.close_pending) {
+    // Said in words as well as in the button's face. This is the reserved row
+    // that already answers "why did my Enter do nothing"; "why is the app not
+    // closing" is the same question.
+    state.refusal = "Closing when this turn finishes...";
+    state.refusal_left = kRefusalSeconds;
+  }
 }
 
 }  // namespace

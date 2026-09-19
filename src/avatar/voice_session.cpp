@@ -183,10 +183,18 @@ const char* VoiceSession::state_name(State s) {
   return "?";
 }
 
-void VoiceSession::log(const std::string& s) {
-  std::printf("  %s\n", s.c_str());
-  std::fflush(stdout);
-}
+// Through rend::log rather than straight at stdout, which it used to be.
+//
+// These are the `[setting]` and `[handoff]` lines -- the ones a run is read
+// against -- and they were the odd ones out in their own stream: `[reply]`,
+// `[speak]` and `[tool]` a few lines away already go through rend::log and so
+// already carry a timestamp and a level. Now these do too, which is worth
+// having on exactly the lines you end up reconstructing a session from.
+//
+// It also means they reach the log file in *both* the modes routeDiagnostics()
+// can end up in (see main.cpp): when a console is attached the file is a
+// rend::log mirror, and a raw printf would have gone only to the console.
+void VoiceSession::log(const std::string& s) { rend::log::info("{}", s); }
 
 void VoiceSession::set_state_locked(State s) {
   if (s == state_) return;
@@ -3172,6 +3180,12 @@ VoiceSession::Snapshot VoiceSession::snapshot() const {
   // can see. Reset clears `lines_`, so this is false on a fresh session and
   // false again the moment a reset finishes, with no counter to keep in step.
   s.resettable = !lines_.empty();
+  // Not quitting_ok(): `busy` above is this snapshot's reading of resetting(),
+  // taken under the same lock, and calling the accessor again here could
+  // answer from a later moment than the rest of the fields were filled from.
+  // A close button that draws itself from a snapshot deserves a snapshot that
+  // agrees with itself.
+  s.quit_ok = !turn_running_ && !busy;
   // M3.12. What the child that is running right now was launched with. Not
   // `cfg_`: between apply_llm_settings() and the new child being up, `cfg_`
   // is what has been *asked for*, and the surface's whole job in that second
