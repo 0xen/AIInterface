@@ -125,6 +125,7 @@
 #include "core/button_registry.h"
 #include "core/config.h"
 #include "core/cwd_policy.h"
+#include "core/handoff_policy.h"
 #include "core/model_choice.h"
 #include "core/prompt_store.h"
 #include "core/schedule.h"
@@ -676,6 +677,30 @@ int main(int /*argc*/, char** /*argv*/) {
     const float defaultListenTimeout = voiceCfg.listen_timeout;
     voiceCfg.listen_timeout =
         settings.get_float("timing", "listen_timeout", voiceCfg.listen_timeout);
+    // M3.15. How full the context window may get before the session hands
+    // over to a fresh one, read here for the same reason as the timeout above:
+    // it is part of `Config` and the session is constructed from it.
+    //
+    // **Its own section, and the generic getter.** `handoff.threshold` needs
+    // nothing added to the settings store — it already keeps keys it does not
+    // know and hands out floats by name — and a section of its own is what
+    // keeps "how full is too full" away from `timing`, which is about
+    // microphones and silences.
+    //
+    // The number is a fraction (0.40 is the user's own 40%), and everything
+    // about reading it — 0 means never, a hand-typed `40` means 40 per cent,
+    // anything above 0.95 is clamped — is in `handoff_due()` rather than here,
+    // so the file, the environment variable and a future control all get the
+    // same answer.
+    voiceCfg.handoff_threshold =
+        settings.get_float("handoff", "threshold", voiceCfg.handoff_threshold);
+    // Logged as the fraction it resolved to, not as what was in the file: the
+    // file may say `40`, the environment may say something else, and the only
+    // number worth having in a log is the one in force.
+    if (const double at = aii::normalise_handoff_threshold(voiceCfg.handoff_threshold); at > 0.0)
+        rend::log::info("[handoff] handing over at {:.0f}% of the context window", at * 100.0);
+    else
+        rend::log::info("[handoff] off: this session will not hand over however full it gets");
     // M3.8. The Tools toggles, read here for the strongest version of the
     // language line's reason: this one *is* built into the session. The list
     // becomes `--tools`/`--allowedTools` on the `claude` child's command line

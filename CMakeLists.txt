@@ -129,6 +129,18 @@ if(AII_BUILD_TESTS)
     target_compile_options(cwd_policy_test PRIVATE /utf-8 /W4)
   endif()
 
+  # ---- handoff_policy_test: when the session hands over to itself ----
+  # Header-only, so there is no source but the test: `core/handoff_policy.h` is
+  # M3.15's whole firing rule, lifted out of VoiceSession for exactly this --
+  # the question "does it fire?" is arithmetic, and answering it by holding an
+  # 80,000-token conversation is not a test anybody would re-run.
+  add_executable(handoff_policy_test tests/handoff_policy_test.cpp)
+  target_include_directories(handoff_policy_test PRIVATE src)
+  target_compile_definitions(handoff_policy_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(handoff_policy_test PRIVATE /utf-8 /W4)
+  endif()
+
   # ---- clip_utf8_test: the shared byte cap that must not split a character ----
   # Same rule as schedule_test: text_util.cpp is standard-library-only, so this
   # builds and runs without an engine DLL anywhere near it. It reads the two caps

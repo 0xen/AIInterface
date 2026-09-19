@@ -42,6 +42,12 @@ Config Config::from_env() {
   // the timeout, which is the safe direction to fail — the microphone then
   // behaves exactly as it did before M1f.
   c.listen_timeout = (float)std::atof(env_or("AII_LISTEN_TIMEOUT", "60").c_str());
+  // M3.15. Parsed and not clamped, exactly as the timeout above is and for the
+  // same reason: 0 is "never hand over" and is a legal answer, and an
+  // unparseable string reads as 0 through atof, which switches the feature off
+  // rather than firing it at a number nobody meant. `handoff_due()` owns the
+  // rest of the reading, including "40 means 40 per cent".
+  c.handoff_threshold = (float)std::atof(env_or("AII_HANDOFF_AT", "0.40").c_str());
   c.worker_bypass = env_or("AII_WORKER_BYPASS", "1") != "0";
   // M3.9. The window reads the tool policy out of settings.json, where the
   // tick boxes write it; voiceloop has no settings.json, so this is how the

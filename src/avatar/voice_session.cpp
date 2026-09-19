@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 
 #include "rend/core/log.h"
 
@@ -14,6 +16,7 @@
 #include "core/app_bus.h"
 #include "core/app_strings.h"
 #include "core/cwd_policy.h"
+#include "core/handoff_policy.h"
 #include "core/language.h"
 #include "core/model_choice.h"
 #include "core/schedule.h"
@@ -506,7 +509,14 @@ void VoiceSession::update() {
       // file that is supposed to answer "did the microphone open?" exactly
       // once per opening.
       mic_open_ = true;
-      set_status("conversation cleared - Claude remembers nothing of it. listening...");
+      // The same clause run_reset() just wrote, with a different tail. It used
+      // to be this literal, which was already wrong for a settings restart the
+      // moment M3.12 shipped — a user with auto-listen on who moved the model
+      // picker was told the conversation had been cleared, in the one place
+      // that was supposed to explain what had happened — and would have been
+      // wrong in the opposite direction for a handoff, telling a session that
+      // *has* carried its direction over that it remembers nothing.
+      set_status(restart_note_ + " listening...");
       log("[reset] the microphone latch was on; it is on again");
     }
   }
@@ -514,6 +524,13 @@ void VoiceSession::update() {
   // Reap a finished turn thread.
   if (turn_.joinable() && !turn_running_) turn_.join();
   if (workers_) workers_->update();
+
+  // M3.15. Before the state branches, because the stage that ends in a
+  // restart is reached while the session is Thinking and Thinking has no
+  // branch below. Arming, which is the half that must only happen when
+  // everything has settled, is not here: it is in the Idle branch, after the
+  // two flushes and before the microphone reopens.
+  tick_handoff(s);
 
   // M1f.1. Every frame this session is doing something other than listening —
   // thinking, speaking, or idle with the microphone shut — is a frame that
@@ -707,7 +724,15 @@ void VoiceSession::update() {
     // a scheduled report next, and only then the microphone. Reopening the mic
     // before either would put the app's own voice into an open microphone,
     // which is the defect announce() exists to avoid.
-    if (!flush_announcements() && !flush_injected_turns() && mic_open_) {
+    // M3.15 extends the same chain by one link, in the one place where it can
+    // be sure of all four things a handover must not interrupt: no turn is
+    // running (Idle), nothing is half-spoken (Speaking is a different branch),
+    // nothing is queued to say (the two flushes above just said so), and the
+    // microphone is shut — it is reopened on the line below, and taking the
+    // frame here is what stops that happening. A user who is mid-sentence is
+    // in Listening, which never reaches this branch at all.
+    if (!flush_announcements() && !flush_injected_turns() && !begin_handoff_if_due() &&
+        mic_open_) {
       // Still unmuted after a reply finished: reopen the mic for the next
       // turn. It stays shut while Claude speaks, so the speakers are never
       // transcribed back in as the user.
@@ -1154,9 +1179,11 @@ void VoiceSession::begin_restart(RestartReason why) {
   // unconditionally here so that a turn in any other shape still unwinds
   // rather than being waited on; run_reset() clears it after the join.
   cancel_ = true;
-  const bool settings = why == RestartReason::Settings;
-  log(settings ? "[restart] restarting Claude on the new settings"
-               : "[reset] clearing the conversation");
+  switch (why) {
+    case RestartReason::Settings: log("[restart] restarting Claude on the new settings"); break;
+    case RestartReason::Handoff: log("[handoff] handing the conversation over to a fresh session"); break;
+    case RestartReason::Reset: log("[reset] clearing the conversation"); break;
+  }
   {
     std::lock_guard<std::mutex> l(mutex_);
     // A status line, not an app_strings entry: that table is for sentences the
@@ -1165,8 +1192,17 @@ void VoiceSession::begin_restart(RestartReason why) {
     // would be the app talking about itself, in a voice that has by definition
     // heard nothing. The same goes for a restart the settings surface asked
     // for: the surface is where the user is looking and where it is said.
-    status_ = settings ? "restarting Claude on the new settings..."
-                       : "clearing the conversation...";
+    //
+    // M3.15 is the one exception in this file to "nothing about a restart is
+    // ever spoken", and it does not weaken the rule: the handoff's sentence is
+    // said *before* this point and is not about the restart. It is a warning
+    // that the app is about to go quiet, in the user's own words, and by the
+    // time this status line is written it has already been heard.
+    switch (why) {
+      case RestartReason::Settings: status_ = "restarting Claude on the new settings..."; break;
+      case RestartReason::Handoff: status_ = "housekeeping - handing over to a fresh session..."; break;
+      case RestartReason::Reset: status_ = "clearing the conversation..."; break;
+    }
   }
   // Set on this thread, before the thread that reads it exists. See the
   // declaration: this store is the fence, not a lock.
@@ -1248,11 +1284,31 @@ void VoiceSession::run_reset() {
       // price, so it names the thing that was wanted first and the price
       // second — "Claude remembers nothing of it" as the whole of the news
       // would read as an answer to a question the user did not ask.
-      status_ = restart_reason_ == RestartReason::Settings
-                    ? "new settings applied - Claude restarted on " +
+      //
+      // M3.15 is the third, and it is the only one of the three that is not a
+      // loss: the user asked for none of it, was told it was coming, and the
+      // session that comes up knows where the conversation had got to. So it
+      // says what carried over rather than what did not — and when nothing
+      // did, it says that instead, because a fresh session claiming to
+      // remember the direction it has not been told is the worst of the three.
+      switch (restart_reason_) {
+        case RestartReason::Settings:
+          restart_note_ = "new settings applied - Claude restarted on " +
                           model_label(cfg_.model_override) +
-                          " and holds nothing of the conversation before it. ready."
-                    : "conversation cleared - Claude remembers nothing of it. ready.";
+                          " and holds nothing of the conversation before it.";
+          break;
+        case RestartReason::Handoff:
+          restart_note_ = handoff_summary_.empty()
+                              ? "housekeeping done - Claude started fresh, with nothing "
+                                "carried over."
+                              : "housekeeping done - Claude carried over its own note on "
+                                "where we had got to, but none of the wording.";
+          break;
+        case RestartReason::Reset:
+          restart_note_ = "conversation cleared - Claude remembers nothing of it.";
+          break;
+      }
+      status_ = restart_note_ + " ready.";
       set_state_locked(State::Idle);
     } else {
       // There is no AI any more and no way to get one, so this is Failed
@@ -1266,10 +1322,331 @@ void VoiceSession::run_reset() {
                  ", tools: " + tool_summary(cfg_.tools) +
                  "; Claude remembers nothing from before"
            : "[restart] could not start a new session: " + err);
-  else
+  else if (restart_reason_ != RestartReason::Handoff)
     log(ok ? "[reset] new session started; Claude remembers nothing from before"
            : "[reset] could not start a new session: " + err);
+
+  // M3.15. The note crosses here and nowhere else.
+  //
+  // Only a handoff carries one, and only a handoff that produced a new child.
+  // A *reset* must not: it was asked for as an act of forgetting, and handing
+  // the new session a summary of the conversation it was told to forget would
+  // be the app overruling the button. A settings restart must not either, for
+  // the reason M3.12 spent a paragraph on — the user asked for a model, the
+  // conversation is the price, and quietly softening the price would make the
+  // tooltip that named it a lie.
+  //
+  // The floor and the one-line warning are cleared whatever ended the old
+  // child, because both are facts about a session and there is a new one.
+  handoff_floor_ = -1.0;
+  handoff_warned_ = false;
+  if (restart_reason_ == RestartReason::Handoff) {
+    if (ok) {
+      carry_over_ = std::move(handoff_summary_);
+      log(carry_over_.empty()
+              ? "[handoff] new session started with nothing carried over"
+              : "[handoff] new session started; the note rides in with its first turn (" +
+                    std::to_string(carry_over_.size()) + " bytes)");
+    } else {
+      carry_over_.clear();
+      log("[handoff] could not start a new session: " + err);
+    }
+  } else {
+    carry_over_.clear();
+  }
+  handoff_summary_.clear();
+  // The only way back to `None`, which is what makes the level a single
+  // firing: between arming and this line there is no frame on which a second
+  // handoff can be armed. It also means a Reset or a settings restart pressed
+  // in the middle of a handover cancels it cleanly rather than leaving a stage
+  // machine running against a child that has already gone.
+  handoff_stage_.store(HandoffStage::None, std::memory_order_release);
   resetting_.store(false, std::memory_order_release);
+}
+
+// ---------------------------------------------------------------- M3.15
+//
+// ## The handover, and the five ways it goes wrong
+//
+// The user's words: *"when its context starts growing a little bit too big,
+// say, for example, around 40%, the AI will auto hand off to the next AI and
+// restart itself within the session… before it does this, it will prompt the
+// user and say, I just need a moment to do some housekeeping."*
+//
+// The mechanism is entirely borrowed. `UsageStats::ctx` is the CLI's own
+// reported fraction and needs no estimating; `begin_restart()` is M3.6a's
+// thread, fence and join; the spoken line goes out through announce() and
+// flush_announcements(), which already know how to take the floor without
+// speaking into an open microphone. What is new is *when*, and five things
+// about "when" are worth more than the code that does them:
+//
+//  1. **Never mid-turn, never mid-sentence.** Armed from the Idle branch
+//     only, after the two flushes and before the microphone reopens — the one
+//     point in the frame loop where no turn is running, nothing is queued to
+//     say, nothing is half-spoken and the microphone is shut. A handoff that
+//     interrupts a reply is worse than one that waits a turn, and a forced
+//     handoff (`handoff_now()`) waits at the same gate rather than jumping it.
+//
+//  2. **Never twice.** See `HandoffStage`: the only way back to `None` is
+//     through run_reset(), so the level that is still crossed cannot fire
+//     again while the first firing is in flight, and by the time it can, the
+//     child it would be reading has been replaced.
+//
+//  3. **Never against a number that is not one.** A fresh child's `ctx` is
+//     -1.0 until it first reports; `handoff_due()` answers `No` to that and
+//     the floor is never recorded from it.
+//
+//  4. **The summary is the one turn that must be allowed to fail.** It is
+//     asked for at the exact moment context is scarce, and it costs context
+//     itself. So nothing waits on it and nothing is conditional on it: a
+//     summary that errors, is cancelled, comes back empty or arrives after
+//     tipping the window over produces a handover *with no note*, which is
+//     still a handover. The alternative — skip the restart because the
+//     summary failed — leaves the session in the state that triggered it,
+//     having promised out loud to do something about it.
+//
+//  5. **The user must not be left talking into a session being torn down.**
+//     They cannot be: arming happens with the microphone shut, and it stays
+//     shut until `relatch_after_reset_` gives the latch back on the far side.
+//     Somebody mid-utterance is in Listening, which never reaches the branch
+//     that arms.
+
+bool VoiceSession::handing_off() const {
+  return handoff_stage_.load(std::memory_order_acquire) != HandoffStage::None;
+}
+
+bool VoiceSession::handoff_now() {
+  // The same two refusals reset() makes, for the same reasons.
+  if (!loaded_ || load_failed_) return false;
+  if (resetting()) return false;
+  if (handing_off()) return false;
+  // Armed, not started. It is consumed by the Idle branch, which is what
+  // makes a handoff asked for by name wait for the same settled moment as one
+  // the numbers asked for — including waiting for a reply in flight to
+  // finish, which is the rule M3.12 settled for the settings restart.
+  handoff_forced_.store(true, std::memory_order_release);
+  log("[handoff] asked for by name; it will start at the next gap");
+  return true;
+}
+
+void VoiceSession::tick_handoff(State s) {
+  switch (handoff_stage_.load(std::memory_order_acquire)) {
+    case HandoffStage::None:
+      return;
+    case HandoffStage::Speaking:
+      // Wait for the housekeeping line to have been *heard*, not merely
+      // queued. Three conditions and each one covers a way the other two lie:
+      // the state has not been noticed as finished yet (the Speaking branch
+      // below is what moves it, one frame after the queue drains), the queue
+      // is still playing, or a turn is somehow running. Muted, the queue is
+      // idle immediately and this passes on the next frame — which is right:
+      // the line was dropped, not delayed.
+      if (turn_running_) return;
+      if (s == State::Speaking) return;
+      if (speech_ && !speech_->idle()) return;
+      start_handoff_summary();
+      return;
+    case HandoffStage::Summarising:
+      // The turn thread moves this on, because only it knows when the note is
+      // written. Nothing to do here but wait.
+      return;
+    case HandoffStage::Restarting:
+      // Everything M3.6a and M3.12 already do, with a third reason on it.
+      begin_restart(RestartReason::Handoff);
+      return;
+  }
+}
+
+bool VoiceSession::begin_handoff_if_due() {
+  if (handing_off()) return false;
+  if (!eng_.llm) return false;
+
+  const UsageStats u = eng_.llm->usage();
+  // What this session costs before anybody has said anything. Recorded from
+  // the *first* reading only, and never from an unknown one.
+  if (u.ctx >= 0.0 && handoff_floor_ < 0.0) handoff_floor_ = u.ctx;
+
+  const bool forced = handoff_forced_.exchange(false, std::memory_order_acq_rel);
+  if (!forced) {
+    switch (handoff_due(u.ctx, cfg_.handoff_threshold, handoff_floor_)) {
+      case HandoffVerdict::No:
+        return false;
+      case HandoffVerdict::Unattainable:
+        // Said once per session, not once per frame. Deliberately not a
+        // permanent switch-off either: the floor is re-measured after every
+        // restart, and a first reading inflated by an unusually long opening
+        // turn should not cost the feature for the rest of the run.
+        if (!handoff_warned_) {
+          handoff_warned_ = true;
+          log("[handoff] the threshold is at or under what a fresh session already costs (" +
+              std::to_string(static_cast<int>(handoff_floor_ * 100.0 + 0.5)) +
+              "%), so handing over could not get under it; not handing over");
+        }
+        return false;
+      case HandoffVerdict::Yes:
+        break;
+    }
+  }
+
+  // **40% of what**, stated in the log rather than left to be worked out: the
+  // threshold is a fraction of this model's own window, and the same 40% is
+  // 80k tokens on a 200k model and 400k on a `[1m]` one. Both numbers, every
+  // time, so a reading in the log can never be compared against the wrong one.
+  std::string why = forced ? "asked for" : "context";
+  why += " at " + std::to_string(static_cast<int>(u.ctx * 100.0 + 0.5)) + "%";
+  if (u.ctx_window > 0)
+    why += " (~" + std::to_string(static_cast<long long>(u.ctx * (double)u.ctx_window)) + " of " +
+           std::to_string(u.ctx_window) + " tokens)";
+  if (!forced)
+    why += ", threshold " +
+           std::to_string(
+               static_cast<int>(normalise_handoff_threshold(cfg_.handoff_threshold) * 100.0 + 0.5)) +
+           "%";
+  log("[handoff] " + why + "; telling the user and starting the handover");
+
+  // **The line comes first.** announce() queues it and flush_announcements()
+  // is what actually takes the floor — shutting the microphone, marking a new
+  // reply, enqueuing the speech — so calling both here means the sentence is
+  // already on its way out before anything else in the sequence happens. Both
+  // are called rather than leaving the queue for the next frame, because the
+  // next frame is inside the stage machine and the stage machine's first job
+  // is to wait for this to finish.
+  announce(app_text(Msg::HandoffHousekeeping));
+  flush_announcements();
+  handoff_stage_.store(HandoffStage::Speaking, std::memory_order_release);
+  return true;
+}
+
+void VoiceSession::start_handoff_summary() {
+  // start_injected_turn()'s setup, with its one deliberate difference kept:
+  // no `cancel_` is raised, because there is nothing to cancel — this is only
+  // reached from a settled Idle.
+  if (turn_.joinable()) turn_.join();
+  cancel_ = false;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    // No line in the transcript, neither user nor assistant. Nobody said
+    // this: it is the app asking the session to write a note about itself,
+    // and the transcript is about to be cleared anyway. A `{true, …}` line
+    // would put words in the user's mouth and a `{false, …}` one would show
+    // the note as something Claude had said out loud.
+    set_state_locked(State::Thinking);
+    status_ = "housekeeping - writing a note for the next session...";
+  }
+  handoff_summary_.clear();
+  turn_running_ = true;
+  handoff_stage_.store(HandoffStage::Summarising, std::memory_order_release);
+  turn_ = std::thread([this] {
+    run_handoff_summary();
+    turn_running_ = false;
+    // The one transition this machine makes off the frame loop, and the last
+    // thing this thread does. Released after `turn_running_` so that a frame
+    // loop that sees `Restarting` cannot reach begin_restart() while the flag
+    // still says a turn is live.
+    handoff_stage_.store(HandoffStage::Restarting, std::memory_order_release);
+  });
+}
+
+void VoiceSession::run_handoff_summary() {
+  // **Nothing rides on this turn.** Not the pending list, not an injected
+  // prompt, not the language instruction, not folder evidence: it is not a
+  // conversational turn and the session it is addressed to is over in a
+  // second. It goes to the client raw, which is also why it cannot disturb
+  // any of the state those mechanisms keep.
+  const std::string ask = handoff_request();
+  if (ask.empty()) {
+    log("[handoff] no handover prompt to send; handing over with nothing carried");
+    return;
+  }
+  ChatResult r = eng_.llm->turn(ask, [](const std::string&) {}, &cancel_);
+  // Every one of these is a handover *without* a note rather than a handover
+  // that does not happen. See (4) above.
+  if (cancel_) {
+    log("[handoff] the note was interrupted; handing over with nothing carried");
+    return;
+  }
+  if (!r.ok) {
+    log("[handoff] the note failed: " + r.error + "; handing over with nothing carried");
+    return;
+  }
+  std::string note = trim(strip_aii_blocks(r.text));
+  if (note.empty()) {
+    log("[handoff] the note came back empty; handing over with nothing carried");
+    return;
+  }
+  // A cap, because this text is re-injected and a runaway note would cost the
+  // new session the context the handover exists to give it back. **clip_utf8,
+  // not a word boundary**: the last time model-written text was cut here it
+  // was cut at the nearest space, and Japanese has none, so two spoken
+  // summaries in three ended mid-character. This drops the whole code point
+  // instead. The limit is generous enough that it should never fire — a note
+  // this long is already not the summary that was asked for — and it says so
+  // in the log when it does.
+  constexpr std::size_t kNoteMax = 4000;
+  if (note.size() > kNoteMax) {
+    log("[handoff] the note ran to " + std::to_string(note.size()) + " bytes and was cut to " +
+        std::to_string(kNoteMax));
+    note = clip_utf8(std::move(note), kNoteMax);
+  }
+  handoff_summary_ = std::move(note);
+  log("[handoff] note written, " + std::to_string(handoff_summary_.size()) + " bytes");
+  // The note itself, only when asked for. Same switch and the same reason as
+  // the reply log in run_turn(): a conversation in a log file is a
+  // conversation on disk, and this app is built not to leave one. It is the
+  // only way to see what actually carried over.
+  if (std::getenv("AII_REPLY_LOG")) {
+    std::string one = handoff_summary_;
+    std::replace(one.begin(), one.end(), '\n', ' ');
+    std::replace(one.begin(), one.end(), '\r', ' ');
+    rend::log::info("[handoff-note] {}", one);
+  }
+}
+
+std::string VoiceSession::handoff_request() {
+  // Read at the moment it is used rather than at load, so that editing the
+  // file takes effect on the next handover and not on the next launch. It can
+  // afford to be: this happens once every several thousand turns, where the
+  // system prompt is a launch argument and genuinely cannot hot-reload.
+  const std::filesystem::path p = PromptStore::root() / "system" / "handoff.md";
+  std::string body;
+  {
+    std::ifstream f(p, std::ios::binary);
+    if (f) body.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+  }
+  body = trim(strip_html_comments(body));
+  if (!body.empty()) return body;
+  // The seeded file is missing or has been emptied. A built-in copy rather
+  // than nothing at all, and a line saying so — silently handing over with no
+  // note because a file could not be read is the avatar-seed failure again:
+  // wired up correctly, never arrives, nothing says so.
+  log("[handoff] cannot read " + p.string() + "; using the built-in wording");
+  return
+      "You are about to be replaced by a fresh session of yourself, because this "
+      "conversation has used up more of your context window than is comfortable. The user "
+      "knows; they have just been told you need a moment.\n\n"
+      "Write the note that your replacement will read. It gets nothing else - no transcript, "
+      "no history, none of this conversation's wording. Only this.\n\n"
+      "Cover, in a few short paragraphs and in the language this conversation is being held "
+      "in: what we are doing and why; what has been decided; what is outstanding or was about "
+      "to happen next; and anything the user has told you about themselves or their setup "
+      "that you would be embarrassed to have to ask for twice.\n\n"
+      "Write it as notes to yourself. No greeting, no sign-off, no preamble, and nothing "
+      "about the handover itself.";
+}
+
+std::string VoiceSession::carry_over_block(const std::string& note) {
+  // pending_context()'s idiom exactly: a `<context>` block, in English,
+  // composed by the app. The instruction after the note is three sentences
+  // and every one of them earns its place — what this is, that the wording is
+  // gone, and not to talk about it. The last is the one that was learned the
+  // hard way elsewhere in this file: a session handed a briefing will open by
+  // thanking you for the briefing unless it is told not to.
+  return "<context name=\"Handover\" kind=\"state\">\n"
+         "You wrote this to yourself a moment ago, just before this session started, because "
+         "the session before it had filled too much of its context window. It is all you have "
+         "of that conversation: the direction survived, the wording did not. Carry on from it, "
+         "and do not mention it, the handover or the restart unless you are asked.\n\n" +
+         note + "\n</context>\n\n";
 }
 
 void VoiceSession::start_turn(std::string text) {
@@ -1415,6 +1792,24 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
   // for it and did not ask.
   const std::string pending = is_injected ? std::string() : pending_context();
   if (!pending.empty()) log("[schedule] this turn carries the pending list");
+  // M3.15. The note the previous session wrote to this one, on the first turn
+  // after a handover and on no other. Consumed, so it costs one turn and not
+  // every turn: it is context for the session, not a standing instruction,
+  // and re-sending it would both cost tokens and invite the model to keep
+  // answering it.
+  //
+  // **On an injected turn too**, unlike the pending list above. The reason
+  // the pending list is held back is that a report turn handed the whole
+  // queue recites it; this is the opposite — a worker report is the first
+  // thing the new session says out loud, and saying it with no idea what the
+  // conversation was about is exactly the cold, contextless answer the
+  // handover exists to prevent.
+  std::string handover;
+  if (!carry_over_.empty()) {
+    handover = carry_over_block(carry_over_);
+    carry_over_.clear();
+    log("[handoff] this turn carries the note from the session before it");
+  }
   // M2c.2. The aside. It goes in front of the user's own words for the same
   // reason the pending block does — it is context for the answer, not part of
   // the question — and it is the only thing in the composed prompt that asks
@@ -1434,7 +1829,9 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
   // so it is not evidence of anything and is not counted.
   set_enabled_languages(eff);
   if (!is_injected) note_user_language(text);
-  const std::string sent = decorate_language(pending + rider_block + injected, eff);
+  // The handover goes in front of everything, including the pending list: it
+  // is who this session is, and the rest is what it is being asked.
+  const std::string sent = decorate_language(handover + pending + rider_block + injected, eff);
   if (!eff.both()) log("[lang] turn sent with the " + language_spec(eff) + "-only instruction");
   ChatResult r = eng_.llm->turn(sent, [&](const std::string& delta) {
     {

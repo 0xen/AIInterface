@@ -171,6 +171,15 @@ enum class Msg {
   SettingNoSuchKey,      // {key}
   SettingBadValue,       // {key}
 
+  // --- The context window filling up (M3.15) -----------------------------
+  // **The user's own words**, and the one line in this table that is spoken
+  // *before* the thing it describes rather than after it: the point of it is
+  // that the several seconds of silence are explained while they are
+  // happening. Said by the app and not by the model on purpose -- the model
+  // would have to be asked, which costs a turn, at the moment context is
+  // scarce, and it could refuse, wander or say it afterwards.
+  HandoffHousekeeping,
+
   Count,                 // not a message: the number of them, for the test
 };
 

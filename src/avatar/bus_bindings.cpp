@@ -493,6 +493,38 @@ void BusBindings::on_session(const BusMessage& m, std::string* error) {
     return;
   }
 
+  // M3.15. The script half of the handover, and the whole of it that could be
+  // built honestly today.
+  //
+  // **What a script already has.** `session.usage` publishes `ctx` — the CLI's
+  // own context fraction — on every change, and has since M2.9. So the policy
+  // half of "hand over at 40%" has been scriptable all along; what was missing
+  // was the *act*, and this is it. A Python script that wants a different rule
+  // (hand over at 30% after 9pm, never mid-task, only when the user has been
+  // quiet for a minute) writes eight lines against two messages it can already
+  // see, and does not need a line of C++.
+  //
+  // **Why `session` and not `settings`.** Handing over is not a setting: it is
+  // a thing the session does, like `reset` above it, and it is refused under
+  // the same two conditions by the same snapshot. The *threshold* is a setting
+  // and is deliberately not exposed here — it lives in `settings.json` under
+  // `handoff.threshold`, and a verb that wrote it would be a second owner of
+  // record for a value the panel does not yet draw a control for.
+  //
+  // `ok` is "accepted", not "finished", and it means less here than it does
+  // for `reset`: this arms a sequence that waits for a settled moment, speaks,
+  // spends a turn and only then restarts. A script watches `session.state` the
+  // way the window does.
+  if (m.verb == "handoff") {
+    if (!ctx_.session) return refuse("no voice in this run");
+    const VoiceSession::Snapshot snap = ctx_.session->snapshot();
+    if (snap.resetting) return refuse("a restart is already running");
+    if (!ctx_.session->handoff_now()) return refuse("a handover is already under way");
+    facts_now_ = true;
+    bus.publish(BusLine("session.handoff").flag("ok", true).str("echo", echo).done());
+    return;
+  }
+
   if (m.verb == "say") {
     if (!ctx_.session) return refuse("no voice this run (--no-voice)");
     const std::string text = m.str("text");
