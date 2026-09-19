@@ -48,6 +48,33 @@ inline constexpr const char* kAvatarVisibilityNames[kAvatarVisibilityCount] = {
 // no speech is lost while the meaning is still undecided.
 constexpr float kTalkHoldSeconds = 0.40f;
 
+// Reset's confirm, in seconds (user, 19 Sep 2026).
+//
+// **This throws a conversation away and there is no undo.** The old `claude`
+// child is gone by the time anything could regret it, and its context window
+// existed only in that process's memory — so an undo window is not a thing
+// that can be built here, and a reset that could be hit by accident is the
+// whole of the risk. A confirmation *dialog* is also not available: nothing in
+// this app may draw outside the window's composition surface, and an ImGui
+// popup is a floating window, so it would be silently clipped. That is why
+// the settings surface is a region rather than a popup, and it is why this is
+// a two-press gesture in the button's own slot rather than a modal.
+//
+// First press arms it — the icon changes, the plate changes, the tooltip says
+// what the second press will do. Second press does it. `kResetArmSeconds` is
+// how long the armed state lasts before it gives up on its own; four seconds
+// is long enough to read the tooltip and short enough that an armed button
+// never sits there waiting to be brushed.
+//
+// `kResetArmMinSeconds` is the other half, and it is the one that actually
+// stops the accident: a press is refused for this long after arming, so a
+// double-click — the most likely way to hit a button twice without meaning
+// to — cannot walk straight through the confirm. 350 ms is comfortably above
+// the Windows double-click default (500 ms *maximum* between clicks, typically
+// delivered in well under 200) and far below any deliberate second press.
+constexpr float kResetArmSeconds = 4.0f;
+constexpr float kResetArmMinSeconds = 0.35f;
+
 // M1f.2. The bounds of the auto-listen timeout *control*, in whole seconds.
 //
 // The floor is the user-facing one and is not the mechanism's: VoiceSession
@@ -400,6 +427,16 @@ struct AvatarUiState {
   // be reporting something that never happened.
   bool mic_dozed = false;
   unsigned listen_timeout_seq = 0;
+  // Reset's confirm is armed, and when (ImGui::GetTime()); 0 is disarmed.
+  //
+  // **Not persisted**, for a stronger version of the reason `settings_open` is
+  // not: this is a half-finished gesture, and an app that came back up with
+  // its erase-everything button already armed would be one keystroke from
+  // doing something nobody asked for. It is also dropped by anything that
+  // shows the user has moved on — the timeout, a press on any other transport
+  // button, the reset starting, or the session running out of things to
+  // reset. See kResetArmSeconds.
+  double reset_armed_at = 0.0;
   // What is in the message field (M1b.2). A fixed buffer rather than a
   // std::string because imgui_stdlib is not in this build, and a corner
   // window's typed message has no business being longer than this anyway.
@@ -502,6 +539,12 @@ struct AvatarUiResult {
   // mute is a level in `AvatarUiState`, not an event, so it needs nothing
   // here.
   bool stop = false;
+  // Reset confirmed: throw the conversation away and start the child again
+  // (user, 19 Sep 2026). Set on the *second* press of the two-press gesture
+  // and on no other frame — the first press only arms `reset_armed_at`, which
+  // is panel state and never reaches here. So main.cpp sees one event, on the
+  // frame the user actually meant it, and has nothing to decide.
+  bool reset = false;
   // The message field's contents, on the frame Enter sent them; the field has
   // already been cleared. Empty on every other frame, including the ones where
   // a send was refused — the text stays in the field then, never swallowed.

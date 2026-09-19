@@ -366,6 +366,8 @@ int main(int /*argc*/, char** /*argv*/) {
     // schedule to come due *between* two turns, which is otherwise only
     // reachable by guessing at how long a reply will take.
     double sayWait = 2.0;
+    int resetAfterSay = -1;   // --reset-after-say <n>; negative = never
+    double resetAt = -1.0;    // --reset-at <seconds of uptime>; negative = never
     // The message field's own escape hatch, and the reason this bug survived
     // three rounds of testing. Everything the panel draws could be put on
     // screen from the command line except the one thing the user actually
@@ -495,6 +497,27 @@ int main(int /*argc*/, char** /*argv*/) {
                 cancelRaceReps = _wtoi(wargv[++i]);
             else if (a == L"--say-wait" && i + 1 < wargc)
                 sayWait = _wtof(wargv[++i]);
+            // Reset's harness: press the transport row's reset button once,
+            // after `n` of the `--say` turns have been sent. Keyed off the say
+            // count rather than off a wall-clock offset because the whole
+            // claim being tested is an *ordering* one — this turn was heard,
+            // this one was not — and a turn that took a second longer than
+            // expected would otherwise move the reset to the wrong side of it.
+            //
+            // It calls VoiceSession::reset() directly, which is what the
+            // second press of the confirm reaches; the confirm itself is a
+            // panel gesture and is verified by looking at the row.
+            else if (a == L"--reset-after-say" && i + 1 < wargc)
+                resetAfterSay = _wtoi(wargv[++i]);
+            // The other question about reset, which the one above cannot ask:
+            // what it does to a microphone that is already open. With
+            // `startup.auto_listen` on that is the ordinary case, and it has no
+            // relationship to any turn — the latch is up from the first frame
+            // after the fade, before anything has been said. So this one is
+            // keyed to the clock, like `--listen-timeout-at`, and is meant to
+            // be set a few seconds after the engines are up.
+            else if (a == L"--reset-at" && i + 1 < wargc)
+                resetAt = _wtof(wargv[++i]);
             else if (a == L"--message" && i + 1 < wargc)
                 messageArg = utf8FromWide(wargv[++i]);
         }
@@ -1615,7 +1638,38 @@ int main(int /*argc*/, char** /*argv*/) {
             }
             session->update();
             snap = session->snapshot();
-            if (nextSay < sayTexts.size() && snap.state == aii::VoiceSession::State::Idle) {
+            // The reset harness, before the next say is considered: it fires
+            // on the first Idle frame after the nth turn has finished, so the
+            // turn after it is the first one the new child ever sees.
+            // Listening counts as well as Idle, and only when the latch is on:
+            // with `startup.auto_listen` the app comes up latched and never
+            // sits at Idle for a whole frame, so an Idle-only test could not
+            // reach the one case this harness most needs to drive — a reset
+            // pressed with the microphone already open. It cannot fire
+            // mid-turn either way, because Thinking and Speaking are neither.
+            const bool resetMoment =
+                snap.state == aii::VoiceSession::State::Idle ||
+                (snap.state == aii::VoiceSession::State::Listening && session->mic_open());
+            if (resetAfterSay >= 0 && static_cast<int>(nextSay) >= resetAfterSay && resetMoment &&
+                !session->resetting()) {
+                resetAfterSay = -1;
+                log::info("[harness] pressing reset");
+                session->reset();
+                lastSayDone = {};
+            }
+            if (resetAt >= 0.0 && t >= resetAt && !session->resetting()) {
+                resetAt = -1.0;
+                log::info("[harness] pressing reset at {:.2f}s (mic_open={})", t,
+                          session->mic_open() ? 1 : 0);
+                session->reset();
+                lastSayDone = {};
+            }
+            // `resetting()` is part of the guard because the session reports
+            // itself Idle throughout a reset — it genuinely is — and a say
+            // handed over in that second would be refused by start_turn() and
+            // lost, with `nextSay` already past it.
+            if (nextSay < sayTexts.size() && snap.state == aii::VoiceSession::State::Idle &&
+                !session->resetting()) {
                 const auto nowSay = std::chrono::steady_clock::now();
                 if (lastSayDone.time_since_epoch().count() == 0) lastSayDone = nowSay;
                 if (std::chrono::duration<double>(nowSay - lastSayDone).count() >= sayWait) {
@@ -1880,7 +1934,14 @@ int main(int /*argc*/, char** /*argv*/) {
         //
         // One shot, cleared by the frame that fires. A microphone the user
         // closes afterwards stays closed; the setting had its one say.
-        if (autoListenPending && session && !loading) {
+        // `resetting()` is part of the guard and not an optimisation: the
+        // session refuses to open the microphone while the child is being
+        // replaced (VoiceSession::set_mic_open), so a one-shot spent in that
+        // second would be spent on a call that did nothing and the setting
+        // would silently not work — the same failure the comment above
+        // `!loading` describes, arriving by the other door. Nothing is lost by
+        // waiting: the flag is still pending on the far side.
+        if (autoListenPending && session && !loading && !session->resetting()) {
             if (snap.state == aii::VoiceSession::State::Failed) {
                 // Nothing to listen with, and never will be this run. Cleared
                 // so the condition stops being asked, and said once, because
@@ -2320,6 +2381,12 @@ int main(int /*argc*/, char** /*argv*/) {
                 if (r.talk_pressed) session->talk_pressed();
                 if (r.talk_released) session->talk_released(r.talk_over_button, r.talk_held);
                 if (r.stop) session->stop();
+                // The second press of the transport row's confirm, never the
+                // first: the panel does the arming and only tells us when the
+                // user has said yes twice. reset() returns straight away and
+                // does the teardown on its own thread, so this does not stall
+                // the frame.
+                if (r.reset) session->reset();
                 // Mute is a level, not an event: the button and the S key both
                 // write the panel's flag and this pushes it down, so there is
                 // one place that decides what "muted" is. set_muted() is a

@@ -91,6 +91,23 @@ class VoiceSession {
     std::string load_stage;      // display name of the running stage, empty once loaded
     std::vector<Line> lines;
     std::vector<WorkerPool::Snapshot> workers;
+    // Reset (user, 19 Sep 2026). Two facts the transport row's fourth slot
+    // needs and cannot work out for itself.
+    //
+    // `resettable` is "is there anything to throw away", and it is defined as
+    // "the transcript is not empty" rather than as a turn counter, because
+    // reset clears the transcript: the two are then the same fact, and the
+    // rule the user can see on screen ("the button is live exactly when there
+    // is something in the chat") is the rule the code enforces.
+    //
+    // `resetting` is the second or so in which the old `claude` child is being
+    // torn down and a new one started. Deliberately not a sixth `State`: the
+    // session is genuinely idle throughout — no turn, no microphone, no
+    // speech — and a state nothing else in this app knows about would have to
+    // be taught to the avatar, to `anything_to_stop()` and to every switch on
+    // `State` in the panel, all to say something only the reset button draws.
+    bool resettable = false;
+    bool resetting = false;
     // M8.3, all three for the settings surface.
     VoiceLoad japanese_voice = VoiceLoad::Absent;
     std::string japanese_voice_error;   // empty unless japanese_voice == Failed
@@ -152,6 +169,59 @@ class VoiceSession {
   // 16 Sep 2026; nothing here can resume a paused worker turn, so the name was
   // the only pause-like thing about it. The behaviour is unchanged.
   void stop();
+  // Reset: throw the conversation away and start a fresh one (user, 19 Sep
+  // 2026). **Frame loop only**, and a no-op until the engines are up.
+  //
+  // The conversation is not a variable in this process. It lives inside the
+  // `claude -p --input-format stream-json` child, which is long-lived and runs
+  // with `--no-session-persistence`, so there is nothing on disk to delete and
+  // no message that means "forget". The only honest reset is to end that child
+  // and start another with the same options — same system prompt, same tool
+  // list, same model — which is what this does. There is exactly one child at
+  // any moment, by construction: the old one's destructor runs to completion
+  // before `build_llm()` is called, and it is the destructor that closes the
+  // pipe and waits.
+  //
+  // What it does, in order, and what it deliberately leaves alone:
+  //
+  //   * Everything stop() does first — the reply in flight is interrupted, the
+  //     speech queue is emptied, the microphone latch and any held Talk
+  //     gesture are dropped, running workers are paused. A turn must not be
+  //     writing into a session that no longer exists, so the turn thread is
+  //     joined before the child is replaced.
+  //   * **The latch comes back.** It is closed for the second the rebuild
+  //     takes and reopened afterwards if it was open, because closing it is
+  //     how the mechanism works rather than what the button means — see
+  //     `relatch_after_reset_`. A held Talk gesture is not reproduced.
+  //   * The transcript is cleared, and so is the injected-prompt set
+  //     (`PromptInjector::clear_session`, which has been waiting for exactly
+  //     this caller). A fresh context window has loaded nothing.
+  //   * Mute is untouched: it is a preference about this window, not a fact
+  //     about the conversation. Language selection, the listen timeout, the
+  //     avatar and the settings file likewise.
+  //   * **Workers are not killed.** A worker is a separate process doing work
+  //     the user asked for; clearing the chat is not a reason to throw away
+  //     ten minutes of a build. They are paused by stop(), exactly as Stop
+  //     pauses them, and reports they have already queued stay queued — every
+  //     one of them is a self-contained `<context …>` block naming the work,
+  //     so the fresh session can deliver it without ever having heard the
+  //     conversation that started it.
+  //   * **Schedules are not cancelled.** A schedule is a promise made to the
+  //     user in words. Reset clears what the AI remembers, not what the app
+  //     owes, and the new session is told what is outstanding on its first
+  //     turn anyway: pending_context() is built from the schedule book, which
+  //     this does not touch.
+  //
+  // It returns immediately; the teardown and relaunch run on `reset_`, because
+  // the child's destructor waits up to three seconds for it to exit and
+  // start() waits half a second for the new one, and a frame loop that stalls
+  // for that long is a window that stops compositing. While it runs,
+  // `resetting()` is true and update() hands the session over: nothing on the
+  // frame loop touches `turn_` or `eng_.llm` until it clears.
+  void reset();
+  // True from the moment reset() is called until the new child is up. Frame
+  // loop and snapshot only.
+  bool resetting() const { return resetting_.load(std::memory_order_acquire); }
   // M8.3. Which languages are on, pushed down from the panel every frame the
   // same way mute is: a level, not an edge, so there is one owner of record
   // (the settings file) and this is a no-op unless it changed.
@@ -304,6 +374,11 @@ class VoiceSession {
   // The same close and decode, but the text becomes a dictation for the
   // message field instead of a turn (M1b.3).
   void end_listening_unsent();
+  // reset()'s body, on `reset_`. Joins the turn thread, replaces the child,
+  // clears the transcript and the injected-prompt set, and publishes the new
+  // status. Nothing else may touch `turn_` or `eng_.llm` while it runs; see
+  // the guard at the top of update() and `resetting_`.
+  void run_reset();
   void start_turn(std::string text);
   // M2b.4. A turn nobody typed: the app telling Claude that something it
   // deferred has finished, so the report comes back in the AI's own words and
@@ -498,6 +573,33 @@ class VoiceSession {
   std::atomic<bool> ja_started_{false};
   std::string ja_error_;  // written by the loader before ja_failed_ is set
   std::thread turn_;
+  // The reset thread, and the flag that fences the frame loop off from `turn_`
+  // and `eng_.llm` while it owns them.
+  //
+  // The flag is the whole of the synchronisation and it is enough because of
+  // who writes it. It is set to true **on the frame loop**, before `reset_` is
+  // started; snapshot() and update() are frame-loop-only, so from that store
+  // onwards no frame can reach the client pointer the reset thread is about to
+  // swap. It is cleared by the reset thread with a release store once the new
+  // client is in place, and the frame loop's acquire load is what publishes
+  // it. No lock, and none that would not have to be held across a whole turn.
+  std::thread reset_;
+  std::atomic<bool> resetting_{false};
+  // The microphone latch was on when reset() was called, and is owed back.
+  //
+  // Reset has to close the latch on the way in — update() is handed to the
+  // reset thread for that second, so an open microphone would go undrained —
+  // but closing it is a side effect of the mechanism, not the point of the
+  // button. Stop drops the latch because stopping is what Stop *means*; reset
+  // means forget, and a user in conversation mode who cleared the context did
+  // not ask to be dropped out of conversation mode as well. With
+  // `startup.auto_listen` on (19 Sep 2026) the latch is the state the app
+  // chooses for itself at launch, so dropping it here would be reset quietly
+  // undoing a setting.
+  //
+  // Frame loop only, both ends: written by reset(), read and cleared by
+  // update() on the first frame after `resetting_` falls.
+  bool relatch_after_reset_ = false;
   std::atomic<bool> loaded_{false};
   std::atomic<bool> load_failed_{false};
   std::atomic<bool> turn_running_{false};

@@ -147,6 +147,11 @@ VoiceSession::~VoiceSession() {
   if (speech_) speech_->clear();
   if (workers_) workers_->pause_all();
   if (loader_.joinable()) loader_.join();
+  // Before `turn_`, because the reset thread is the one joining it, and before
+  // the engines go away, because it is the thread that writes `eng_.llm`.
+  // Quitting during the second a reset takes waits for it, the same as
+  // quitting during the startup load does.
+  if (reset_.joinable()) reset_.join();
   // Before speech_ and the engines go away: it is the thread that writes
   // eng_.voicevox. There is nothing to cancel it with — VOICEVOX's load is a
   // single blocking call — so quitting during the one second it takes waits
@@ -454,6 +459,45 @@ void VoiceSession::update() {
   // ordinary case.
   ensure_japanese_voice();
 
+  // A reset is running: the reset thread owns `turn_` and `eng_.llm` until it
+  // clears the flag, and everything below this line either joins that thread's
+  // thread (the reap immediately after) or starts a turn on that thread's
+  // client. Two joins of one `std::thread` is undefined behaviour, not a race
+  // to be lost occasionally, so this is a hard gate rather than a try.
+  //
+  // Workers are still serviced, because a worker is a separate process that
+  // reset did not kill and its report callbacks only ever queue — see
+  // queue_worker_report(), which takes `mutex_` and pushes. Nothing here takes
+  // the floor, and nothing needs to: the microphone is shut and the state is
+  // Idle for the whole of it.
+  if (resetting()) {
+    if (workers_) workers_->update();
+    return;
+  }
+  // The first frame after a reset finished, and the latch it closed is owed
+  // back. Here rather than at the end of run_reset() because the microphone is
+  // the frame loop's: begin_listening() starts the capture device and update()
+  // is the only thing that drains it. The status is rewritten afterwards
+  // because begin_listening() has its own, and "listening..." on its own would
+  // lose the one line that says what the button just did.
+  if (relatch_after_reset_) {
+    relatch_after_reset_ = false;
+    if (s == State::Idle) {
+      // The latch is a *level*, and the Idle branch at the bottom of this
+      // function is what turns it into an open capture device — the same path
+      // that reopens the microphone after every reply. So the level is what is
+      // restored here. Calling set_mic_open() instead opened the device on
+      // this line and the Idle branch opened it again on the same frame,
+      // because `s` was read before either of them ran; the log showed two
+      // `mic: open` lines a microsecond apart, which is the one trace in this
+      // file that is supposed to answer "did the microphone open?" exactly
+      // once per opening.
+      mic_open_ = true;
+      set_status("conversation cleared - Claude remembers nothing of it. listening...");
+      log("[reset] the microphone latch was on; it is on again");
+    }
+  }
+
   // Reap a finished turn thread.
   if (turn_.joinable() && !turn_running_) turn_.join();
   if (workers_) workers_->update();
@@ -730,6 +774,12 @@ void VoiceSession::toggle_mic() { set_mic_open(!mic_open_); }
 
 void VoiceSession::talk_pressed() {
   if (mic_open_) return;  // the latch is already on; the release mutes it
+  // Not while the conversation is being replaced: update() is handed to the
+  // reset thread for that second, so a microphone opened here would never be
+  // drained. This reaches begin_listening() directly rather than through
+  // set_mic_open(), so it needs its own guard — and it is the one that catches
+  // the SPACE hold, which never touches the button the panel disables.
+  if (resetting()) return;
   State s;
   {
     std::lock_guard<std::mutex> l(mutex_);
@@ -788,6 +838,15 @@ void VoiceSession::talk_released(bool over_button, bool held) {
 
 void VoiceSession::set_mic_open(bool open) {
   if (open == mic_open_) return;  // a level, not an edge: nothing to do
+  // Not while the conversation is being replaced. update() is handed over to
+  // the reset thread for that second, so a latch opened here would never be
+  // drained and a hold would never be finalised; the one guard covers the
+  // button, the SPACE gesture and toggle_mic() alike. Closing is always
+  // allowed — it is what reset() itself does on the way in.
+  if (open && resetting()) {
+    mic_open_ = false;
+    return;
+  }
   mic_open_ = open;
 
   State s;
@@ -1020,10 +1079,130 @@ void VoiceSession::stop() {
   }
 }
 
-bool VoiceSession::quitting_ok() const { return !turn_running_; }
+bool VoiceSession::quitting_ok() const { return !turn_running_ && !resetting(); }
+
+void VoiceSession::reset() {
+  // Nothing to reset before there is a client, and nothing that could be
+  // rebuilt after the load has failed: a failed load may never have reached
+  // build_llm() at all, and "restart the child" is not an answer to "the
+  // recogniser did not load".
+  if (!loaded_ || load_failed_) return;
+  if (resetting()) return;
+  // Reap the previous reset thread. Joinable here means finished, because
+  // `resetting_` is false and only the thread itself clears it.
+  if (reset_.joinable()) reset_.join();
+  // Noted before stop() drops it, and given back when the new child is up.
+  // A held Talk press is deliberately *not* remembered: a gesture in flight is
+  // in flight, and reproducing one the user is no longer making would be the
+  // app pressing its own button. See `relatch_after_reset_`.
+  relatch_after_reset_ = mic_open_;
+  // Everything Stop does, and for the same reasons — a reply half-spoken into
+  // a conversation that is about to stop existing, a latch that would reopen
+  // the microphone on the next frame, a Talk press whose release would
+  // finalise an utterance into a session that never heard its beginning.
+  stop();
+  // stop() only raises this for a turn it found Thinking or Speaking. Raised
+  // unconditionally here so that a turn in any other shape still unwinds
+  // rather than being waited on; run_reset() clears it after the join.
+  cancel_ = true;
+  log("[reset] clearing the conversation");
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    // A status line, not an app_strings entry: that table is for sentences the
+    // app *speaks*, and by its own terms excludes the window's chrome. Nothing
+    // about a reset is ever spoken — a new session announcing its own amnesia
+    // would be the app talking about itself, in a voice that has by definition
+    // heard nothing.
+    status_ = "clearing the conversation...";
+  }
+  // Set on this thread, before the thread that reads it exists. See the
+  // declaration: this store is the fence, not a lock.
+  resetting_.store(true, std::memory_order_release);
+  reset_ = std::thread([this] { run_reset(); });
+}
+
+void VoiceSession::run_reset() {
+  // The cancelled turn still owns `eng_.llm` until it unwinds. Joining it here
+  // rather than on the frame loop is the whole reason this is a thread:
+  // ClaudeCodeClient::turn() returns only once the CLI acknowledges the
+  // interrupt, which takes as long as it takes.
+  if (turn_.joinable()) turn_.join();
+  turn_running_ = false;
+  cancel_ = false;
+
+  // One child at a time, by construction. `unique_ptr::reset()` runs
+  // ClaudeCodeClient's destructor to completion — it closes the pipe, which is
+  // the CLI's EOF, waits three seconds and terminates if it has not gone — so
+  // the old conversation is over before build_llm() creates the next process.
+  // Doing it in one step (`build_llm` overwriting the pointer) would have had
+  // both alive at once, and two `claude` processes on one subscription is
+  // exactly the state this must never leave behind.
+  eng_.llm.reset();
+  std::string err;
+  const bool ok = build_llm(cfg_, eng_, [this](const std::string& s) { log(s); }, &err);
+  if (ok && eng_.llm) {
+    // Per-client, so it does not survive the swap. Same callback as load().
+    eng_.llm->set_on_activity([this](const std::string& what) {
+      const bool web = what == "WebSearch" || what == "WebFetch";
+      rend::log::info("[tool] {}", what);
+      set_status(web ? "searching the web..." : "thinking... (" + what + ")");
+    });
+  }
+
+  // A fresh context window has loaded nothing. Without this the inspector goes
+  // on claiming prompts are in Claude's head that the new child has never
+  // seen — which is the one thing that window exists not to do. Safe from this
+  // thread for the same reason it is safe from the turn thread: both of the
+  // objects it reads have exactly one writer at a time, and the turn thread is
+  // joined above.
+  injector_.clear_session();
+  publish_inventory();
+
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    // The transcript goes with the context. Keeping it was the alternative and
+    // it is the worse one: a transcript is read as "what this conversation has
+    // said", and leaving one on screen that the AI can no longer see would
+    // manufacture the exact confusion the button exists to remove — the user
+    // would refer back to it and be told, correctly and bafflingly, that
+    // Claude has no idea. An empty chat cannot be misread.
+    //
+    // Nothing is written in its place. A marker line would have to be `user`
+    // or `assistant`, and putting the app's own words in either mouth is a lie
+    // in the one record that is supposed to be verbatim. The status line below
+    // is the panel's channel for "what just happened", and it says it.
+    lines_.clear();
+    partial_.clear();
+    // `usage_` is deliberately kept: the subscription window is an account
+    // fact, not a conversation one, and a reset does not give any of it back.
+    if (ok) {
+      status_ = "conversation cleared - Claude remembers nothing of it. ready.";
+      set_state_locked(State::Idle);
+    } else {
+      // There is no AI any more and no way to get one, so this is Failed
+      // rather than a status line over a session that cannot answer.
+      status_ = "could not start a new Claude session: " + err;
+      set_state_locked(State::Failed);
+    }
+  }
+  log(ok ? "[reset] new session started; Claude remembers nothing from before"
+         : "[reset] could not start a new session: " + err);
+  resetting_.store(false, std::memory_order_release);
+}
 
 void VoiceSession::start_turn(std::string text) {
   if (text.empty()) return;
+  // The reset thread is joining `turn_`; joining it from here as well is
+  // undefined behaviour, and the turn would go to a child that is being torn
+  // down anyway. This is the single choke point for a user turn — say() and
+  // end_listening_and_send() both arrive here — so one guard covers the typed
+  // field, the microphone and the script bus alike. It is a fraction of a
+  // second and the panel already refuses the gesture; this is the backstop for
+  // the ways in that do not go through the panel.
+  if (resetting()) {
+    log("[reset] ignored a turn that arrived mid-reset");
+    return;
+  }
   // Wait for a cancelled turn to unwind before reusing the thread.
   cancel_ = true;
   if (turn_.joinable()) turn_.join();
@@ -2194,8 +2373,10 @@ PromptInventory VoiceSession::prompt_inventory() const {
   // against. Asked for before `mutex_` is taken, for the reason snapshot()
   // gives above its own call -- the client's reader thread calls back into us
   // while holding its lock, so taking ours first is the AB/BA deadlock.
+  // Skipped while the child is being replaced, for the reason snapshot()
+  // gives at the same call: the pointer is being swapped on another thread.
   UsageStats stats;
-  if (loaded_ && eng_.llm) stats = eng_.llm->usage();
+  if (loaded_ && !resetting() && eng_.llm) stats = eng_.llm->usage();
   std::lock_guard<std::mutex> l(mutex_);
   PromptInventory inv = inventory_;
   inv.uptime = up;
@@ -2208,8 +2389,16 @@ VoiceSession::Snapshot VoiceSession::snapshot() const {
   // Ask the client before taking our own lock. Its reader thread calls back
   // into us (on_delta) while holding its lock, so locking in the other order
   // here would be the classic AB/BA deadlock.
+  //
+  // `resetting` is tested first and is not an optimisation: the reset thread
+  // is replacing the object this pointer names, and `eng_.llm` is a plain
+  // unique_ptr, not an atomic one. The flag is what makes the swap safe, and
+  // it is safe because it was set on this thread — see the declaration. The
+  // usage numbers simply go stale for the second it takes, which is honest:
+  // they belong to a child that is on its way out.
+  const bool busy = resetting();
   UsageStats stats;
-  if (loaded_ && eng_.llm) stats = eng_.llm->usage();
+  if (loaded_ && !busy && eng_.llm) stats = eng_.llm->usage();
   // An atomic on the device callback's side, so it is read here rather than
   // mirrored into a member the frame loop would have to remember to clear.
   const float speaking = (loaded_ && speaker_) ? speaker_->level() : 0.0f;
@@ -2242,6 +2431,11 @@ VoiceSession::Snapshot VoiceSession::snapshot() const {
   s.load_progress = load_progress_;
   s.load_stage = load_stage_;
   s.lines = lines_;
+  s.resetting = busy;
+  // "Is there anything to throw away", answered from the one thing the user
+  // can see. Reset clears `lines_`, so this is false on a fresh session and
+  // false again the moment a reset finishes, with no counter to keep in step.
+  s.resettable = !lines_.empty();
   if (workers_) s.workers = workers_->snapshot();
   return s;
 }

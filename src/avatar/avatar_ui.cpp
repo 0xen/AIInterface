@@ -197,6 +197,55 @@ constexpr IconRows kIconSpeakerMuted = {
     ".............",
 };
 
+// Reset, two faces (user, 19 Sep 2026). A loop with an arrowhead is the one
+// glyph everybody already reads as "start again", and it is drawn here the way
+// every other icon in this row is: a ring in the same 2-cell stroke as the
+// speaker's cone and the microphone's cradle, broken at the top right so the
+// head has somewhere to come from. The head points down the right-hand arm,
+// which is the direction a refresh arrow has always travelled.
+//
+// The stroke is two cells and not three, which was the first attempt and read
+// as a blob at 26 px in a capture: a thick ring leaves a hole five cells wide,
+// and nothing legible fits in five cells. Two cells leave seven, which is what
+// the armed face's exclamation mark needs — and the gap between that mark's
+// bar and its dot is two cells rather than one, because one cell is two pixels
+// and two pixels of gap is not a gap, it is an artefact.
+constexpr IconRows kIconReset = {
+    ".............",
+    "....###.#####",
+    "..###....###.",
+    "..##......#..",
+    ".##.......##.",
+    ".##.......##.",
+    ".##.......##.",
+    ".##.......##.",
+    ".##.......##.",
+    "..##.....##..",
+    "..###...###..",
+    "....#####....",
+    ".............",
+};
+// Armed: the same loop with an exclamation mark inside it, in the mark ink.
+// The idiom the microphone set — the shape is the noun and the addition is the
+// verb — and the rule the user set with it: colour *and* a change of glyph,
+// never colour alone. The plate goes red underneath this, but the button still
+// says "careful" on a monitor, in a capture and to a colour-blind eye.
+constexpr IconRows kIconResetArmed = {
+    ".............",
+    "....###.#####",
+    "..###....###.",
+    "..##.ooo..#..",
+    ".##..ooo..##.",
+    ".##..ooo..##.",
+    ".##.......##.",
+    ".##.......##.",
+    ".##..ooo..##.",
+    "..##.ooo.##..",
+    "..###...###..",
+    "....#####....",
+    ".............",
+};
+
 // Stop. A square is the one transport glyph that needs no explaining, and at
 // 13 cells there is no room for anything that does.
 constexpr IconRows kIconStop = {
@@ -1739,7 +1788,8 @@ void message_field(AvatarUiState& state, const VoiceSession::Snapshot& snap, boo
 
 // ------------------------------------------------------------ the transport
 //
-// Three fixed slots. Stop hides itself when there is nothing to stop (user,
+// Four fixed slots (reset was the fourth, user 19 Sep 2026). Stop hides itself
+// when there is nothing to stop (user,
 // 16 Sep 2026) and its slot stays reserved when it does, because the row is
 // laid out from an origin and a slot index rather than by flowing one button
 // after another. That is not tidiness: the microphone button is the target of
@@ -1750,6 +1800,15 @@ void message_field(AvatarUiState& state, const VoiceSession::Snapshot& snap, boo
 // disappears *precisely* when the session starts and stops doing something —
 // i.e. at the moments a gesture is most likely to be in flight. So the slot is
 // empty, never closed up.
+//
+// Reset takes slot 3, at the end, and never vacates it: unlike Stop, its
+// availability is a steady condition of the session rather than a flicker that
+// tracks the AI starting and stopping work, so an empty slot on the end of the
+// row would just read as a button that had gone missing. It is drawn dim and
+// inert instead, which also gives it somewhere to say *why* it cannot be
+// pressed. Either way the invariant is the same one and it is satisfied more
+// strictly here than at slot 2: the slot's occupant never changes size and the
+// slots to its left were never a function of it.
 
 struct TransportSkin {
   ImVec4 bg, hovered, active, ink, mark;
@@ -1905,6 +1964,89 @@ bool anything_to_stop(const VoiceSession::Snapshot& snap, bool mic_on, bool mic_
   return false;
 }
 
+// The four faces of the reset button. Same rule as the microphone's six: each
+// one is something the session can actually report, and no face means "about
+// to" anything.
+enum class ResetFace {
+  Inert,    // nothing has been said this session, or there is no session
+  Ready,    // a conversation exists and one press will arm the confirm
+  Armed,    // armed: the next press throws it away
+  Working,  // the child is being replaced right now
+};
+
+ResetFace reset_face(const VoiceSession::Snapshot& snap, bool voice_enabled, bool loading,
+                     bool armed) {
+  // The same escape hatch AII_MIC_FACE gives the microphone, and for the same
+  // reason: `Working` lasts about a second and `Armed` needs a live
+  // conversation to reach, so without this there is no way to *look* at either,
+  // and "verified by looking at a capture" is the standard this panel is held
+  // to. `AII_RESET_FACE=0..3` pins one; `cycle` walks all four.
+  if (const char* pin = std::getenv("AII_RESET_FACE")) {
+    const int n = std::strcmp(pin, "cycle") == 0 ? static_cast<int>(ImGui::GetTime() * 0.5) % 4
+                                                 : std::atoi(pin);
+    return static_cast<ResetFace>(std::clamp(n, 0, 3));
+  }
+  if (snap.resetting) return ResetFace::Working;
+  if (loading || !voice_enabled || !snap.resettable) return ResetFace::Inert;
+  return armed ? ResetFace::Armed : ResetFace::Ready;
+}
+
+TransportSkin reset_skin(ResetFace face) {
+  switch (face) {
+    case ResetFace::Armed:
+      // The one plate in this row that means "this is about to be
+      // irreversible". It is the mute button's red family rather than the
+      // microphone's, because the microphone's red means "live" and this means
+      // the opposite of live.
+      return {ui_color(0.55f, 0.13f, 0.13f), ui_color(0.70f, 0.19f, 0.18f),
+              ui_color(0.42f, 0.09f, 0.09f), ui_color(1.00f, 0.93f, 0.92f), warn()};
+    case ResetFace::Working: {
+      // Dim like Inert, because the button really is unpressable, but in the
+      // accent rather than the dim ink: something is happening. That is a
+      // colour-only difference from Inert and it is the one place in this row
+      // that is allowed one, for the same reason MicFace::Unavailable is —
+      // the two are never in play at the same moment, they last for different
+      // orders of magnitude of time, and the status line names this one in
+      // words while it is on screen.
+      TransportSkin skin = neutral_skin(accent());
+      skin.hovered = skin.active = skin.bg;
+      return skin;
+    }
+    case ResetFace::Inert: {
+      // Flat under the pointer. A slot that lights up and then swallows the
+      // click is worse than one that never lit up: it says the button works.
+      TransportSkin skin = neutral_skin(dim());
+      skin.hovered = skin.active = skin.bg;
+      return skin;
+    }
+    default:
+      return neutral_skin(fg());
+  }
+}
+
+const char* reset_tooltip(ResetFace face) {
+  switch (face) {
+    // Says why, rather than saying nothing: this is the steady state of a
+    // fresh session, so it is the face the button wears most often on a quiet
+    // desktop, and "greyed out with no explanation" is the worst answer to
+    // "why can I not press this".
+    case ResetFace::Inert: return "Reset - nothing has been said yet";
+    case ResetFace::Working: return "Starting a new session...";
+    // Spells out both halves of what is about to happen, because they are
+    // different things and only one of them is visible: the chat clearing is
+    // the part the user will see, and Claude forgetting is the part they are
+    // actually asking for. And it says it cannot be undone, which is true —
+    // the child that held the conversation is gone.
+    case ResetFace::Armed:
+      return "Press again to clear the conversation.\n"
+             "Claude forgets everything said so far and the chat is emptied.\n"
+             "This cannot be undone.  (Or wait a moment to cancel.)";
+    default:
+      return "Reset - start a fresh conversation\n"
+             "(asks once more before it does)";
+  }
+}
+
 void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool voice_enabled,
                bool loading, bool mic_on, bool mic_hold, AvatarUiResult& out) {
   const ImGuiStyle& style = ImGui::GetStyle();
@@ -1918,7 +2060,13 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
     return ImVec2(origin.x + i * (kTransportButton + gap), origin.y);
   };
 
-  ImGui::BeginDisabled(loading);
+  // The two stretches in which the microphone has nothing to attach itself to:
+  // the engines are not up, or the child that would answer is being replaced.
+  // Mute is deliberately not included — it stays live through both, on the
+  // avatar-visibility disc's precedent, because it is a stored preference
+  // about this window rather than a control that routes into a session.
+  const bool busy = loading || snap.resetting;
+  ImGui::BeginDisabled(busy);
 
   // The fixed-slot claim, published rather than asserted. Behind the same
   // environment variable the gesture harness already uses, and printed only
@@ -1954,7 +2102,7 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
   // single click, because the session opens the microphone on the press —
   // before the gesture's meaning is known — so that neither reading of it loses
   // the words spoken while it was still undecided.
-  const MicFace face = mic_face(snap, voice_enabled, loading, mic_on, mic_hold, state.mic_dozed);
+  const MicFace face = mic_face(snap, voice_enabled, busy, mic_on, mic_hold, state.mic_dozed);
   transport_slot("##mic", slot_pos(0), mic_icon(face), mic_skin(face));
   // One line per edge of the gesture, with everything needed to decide *why* a
   // release was judged off the button: the item's rect, where ImGui thinks the
@@ -2043,9 +2191,12 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
                                   ui_color(0.25f, 0.11f, 0.12f), ui_color(0.88f, 0.74f, 0.73f),
                                   bad()}
                   : neutral_skin(fg());
-  if (transport_slot("##mute", slot_pos(1), state.muted ? kIconSpeakerMuted : kIconSpeaker,
-                     mute_skin))
-    state.muted = !state.muted;
+  // Kept rather than consumed, because slot 3 disarms its confirm on any other
+  // transport gesture and this is one. `state.muted` alone cannot say it — it
+  // is a level that main.cpp also writes.
+  const bool mute_clicked = transport_slot(
+      "##mute", slot_pos(1), state.muted ? kIconSpeakerMuted : kIconSpeaker, mute_skin);
+  if (mute_clicked) state.muted = !state.muted;
   if (ImGui::IsItemHovered())
     ImGui::SetTooltip("%s", state.muted ? "Claude's voice is muted - click to unmute\n"
                                           "(replies still arrive as text)"
@@ -2066,6 +2217,54 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
     ImGui::SetCursorScreenPos(slot_pos(2));
     ImGui::Dummy(ImVec2(kTransportButton, kTransportButton));
   }
+
+  // --- slot 3: reset (user, 19 Sep 2026) ---
+  //
+  // Throws the conversation away: the `claude` child that holds it is ended
+  // and a new one started, so the next thing said starts from nothing. The
+  // transcript goes with it — see VoiceSession::run_reset() for why keeping it
+  // would be the worse of the two defensible answers.
+  //
+  // **Two presses, in this one slot.** There is no undo to offer (the context
+  // window lived in a process that no longer exists) and no dialog to draw
+  // (nothing may be composited outside this window, so an ImGui popup would be
+  // silently clipped — the same constraint that made the settings surface a
+  // region). So the confirm is the button itself changing, which costs no
+  // geometry and cannot be clipped. See kResetArmSeconds.
+  const double now = ImGui::GetTime();
+  // Anything that shows the user has moved on disarms it. The three transport
+  // gestures are checked here rather than at each button because this is where
+  // the armed flag lives, and because "the user did something else" is one
+  // rule, not three.
+  if (state.reset_armed_at > 0.0) {
+    const bool moved_on = out.talk_pressed || out.stop || mute_clicked || snap.resetting ||
+                          !snap.resettable || loading || !voice_enabled;
+    if (moved_on || now - state.reset_armed_at > kResetArmSeconds) state.reset_armed_at = 0.0;
+  }
+  const ResetFace reset = reset_face(snap, voice_enabled, loading, state.reset_armed_at > 0.0);
+  const bool reset_live = reset == ResetFace::Ready || reset == ResetFace::Armed;
+  // Drawn in every state, unlike Stop: the slot is never vacated, so there is
+  // nothing here that could move and nothing that could look missing. Inert
+  // means the click is dropped, not that the button is absent — and the
+  // tooltip is still offered, because "why can I not press this" deserves an
+  // answer.
+  if (transport_slot("##reset", slot_pos(3), reset == ResetFace::Armed ? kIconResetArmed
+                                                                      : kIconReset,
+                     reset_skin(reset)) &&
+      reset_live) {
+    if (reset == ResetFace::Ready) {
+      state.reset_armed_at = now;
+    } else if (now - state.reset_armed_at >= kResetArmMinSeconds) {
+      // The second press, and the only frame `out.reset` is ever true. The
+      // minimum dwell is what a double-click runs into: without it the second
+      // half of an accidental double-click would arm and fire in the same
+      // gesture, which is precisely the accident this whole mechanism exists
+      // to prevent.
+      out.reset = true;
+      state.reset_armed_at = 0.0;
+    }
+  }
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", reset_tooltip(reset));
 }
 
 }  // namespace
