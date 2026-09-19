@@ -218,13 +218,17 @@ void WorkerStripWindow::set_rows(std::vector<WorkerStripRow> rows) {
   p_->rows = std::move(rows);
 }
 
-void WorkerStripWindow::dock(const RECT& widget, unsigned band, int right_edge) {
+void WorkerStripWindow::dock(const RECT& widget, int right_edge) {
   Impl& s = *p_;
   const unsigned want = strip_height(s.rows.size());
   const int x = right_edge - static_cast<int>(s.w) - kDockGap;
-  // The panel's top, not the window's: the band above it is transparent air,
-  // and a strip floating beside it would not read as part of the widget.
-  const int y = static_cast<int>(widget.top) + static_cast<int>(band);
+  // **Bottom-anchored**: the strip's bottom edge is the widget's bottom edge,
+  // and the column grows upward from it as workers arrive. From `want` rather
+  // than `s.h`, which is the whole point on this window — it changes height at
+  // runtime, and an origin computed from the old height would put the new
+  // height at the old top edge for a frame, which is the bottom edge jumping a
+  // slot every time a worker starts or stops.
+  const int y = static_cast<int>(widget.bottom) - static_cast<int>(want);
   const bool resize = want != s.h;
   if (!resize && x == s.x && y == s.y && s.shown) return;
 

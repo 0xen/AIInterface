@@ -45,11 +45,14 @@ namespace {
 constexpr unsigned kStripW = 48;
 constexpr float kButton = 40.0f;
 constexpr float kButtonGap = 6.0f;
-// 3 px, not 4: with the three buttons the strip ships with, 3 px of padding
-// makes it exactly 138 px — the height of the panel in its shortest layout
-// (chat shut, no registered buttons), which is what it is docked against. A
-// strip that overhung the widget's bottom edge by a couple of pixels would be
-// two pixels of always-on-top window eating desktop clicks for nothing.
+// The strip's own frame, the same on all four sides. It matters most at the
+// bottom now: the strip is bottom-anchored (see dock()), its bottom edge is
+// laid on the widget's bottom edge, and this is the only thing between the
+// last button and that edge. 3 px keeps the two panel surfaces ending on
+// exactly the same line — a strip that overhung the widget's bottom edge in
+// order to get the *button* flush would be a few pixels of always-on-top
+// window hanging below the widget and eating desktop clicks, which is the
+// same overhang this number was chosen to avoid in the first place.
 constexpr float kStripPad = 3.0f;
 // Air between the strip's right edge and the widget's left edge. Zero would
 // read as one window with a seam down it; this reads as two pieces of one
@@ -220,13 +223,18 @@ unsigned SidebarWindow::width() const { return p_->w; }
 unsigned SidebarWindow::height() const { return p_->h; }
 int SidebarWindow::left() const { return p_->x; }
 
-void SidebarWindow::dock(const RECT& widget, unsigned band) {
+void SidebarWindow::dock(const RECT& widget) {
   Impl& s = *p_;
   const unsigned want =
       strip_height(ButtonRegistry::instance().snapshot_for(ButtonSurface::Sidebar).size());
   const int x = static_cast<int>(widget.left) - static_cast<int>(s.w) - kDockGap;
-  // The panel's top, not the window's: the band above it is transparent air.
-  const int y = static_cast<int>(widget.top) + static_cast<int>(band);
+  // **Bottom-anchored**: the strip's bottom edge is the widget's bottom edge,
+  // and the column grows upward from it. From `want` rather than `s.h`, which
+  // is the whole point — the origin and the size have to come from the same
+  // button count and be applied together, or the frame a button appears on is
+  // a frame where the strip is the new height at the old origin and its bottom
+  // edge visibly jumps.
+  const int y = static_cast<int>(widget.bottom) - static_cast<int>(want);
   const bool resize = want != s.h;
   if (!resize && x == s.x && y == s.y && s.shown) return;
 
