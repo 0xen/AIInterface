@@ -16,7 +16,9 @@
 // a compiler nor a dump of one configuration would notice.
 //
 // Also checked, because they are the ways this could fail silently rather than
-// loudly: no unexpanded `{{` survives into Claude's context; every
+// loudly: no unexpanded `{{` survives into Claude's context -- asserted over
+// the whole composed `system_prompt()`, which runs *both* the section pass and
+// the digest substitutions, and not over the section pass alone; every
 // configuration still says what to do instead (the worker block); an unknown
 // key keeps its prose and is reported rather than deleting a paragraph; and a
 // dropped paragraph leaves no blank gap behind it.
@@ -94,8 +96,13 @@ int main() {
     const std::string label = "[" + tool_summary(p) + "]";
 
     check(problems.empty(), label + " expands with nothing to report");
-    check(!has(text, "{{") && !has(text, "}}"),
-          label + " leaves no unexpanded section in Claude's context");
+    // Section tags only. This pass is one of *two* substitution mechanisms --
+    // see the block after the loop -- and `{{settings}}` / `{{scripts}}` are
+    // deliberately none of its business, so asserting "no `{{` at all" here
+    // asks this function for a guarantee it was never given. The guarantee is
+    // still asserted, over the string that actually becomes `--system-prompt`.
+    check(!has(text, "{{#") && !has(text, "{{^") && !has(text, "{{/"),
+          label + " leaves no unexpanded section behind");
     check(!text.empty() && has(text, "put other Claude instances to work"),
           label + " still says what to do instead of the tools it lacks");
     check(!has(text, "\n\n\n"), label + " leaves no gap where a paragraph was dropped");
@@ -132,6 +139,56 @@ int main() {
     // to a worker, and the read paragraph must not still say it is.
     check(has(text, "a project gone through, a file changed") == (!writes && tool_group_active(p, kToolGroupFileRead)),
           label + " calls a file change a worker's job only when it cannot make one");
+  }
+
+  // ---- what actually reaches Claude ---------------------------------------
+  //
+  // The invariant this file has always carried is "nothing with `{{` in it
+  // ever reaches Claude". When it was written, `expand_tool_sections` was the
+  // only thing that could put a `{{` out of the prose, so checking its output
+  // *was* checking the prompt. That stopped being true twice in one day:
+  // M3.14 added `{{settings}}` and M10.5 added `{{scripts}}`, both substituted
+  // by `system_prompt()` and neither visible to the section pass. The test
+  // went red for a real reason -- its model of the world had one mechanism in
+  // it and the world had two.
+  //
+  // So the check moves to the string `build_llm` hands over, which runs both
+  // mechanisms and appends `pre-prompt.md`. It is the stronger place for it:
+  // a third mechanism added tomorrow is covered here for free, where scoping
+  // this to tool sections would have narrowed the test until it was green and
+  // left the gap it was meant to find.
+  //
+  // The digests are set to sentinels rather than left empty on purpose. An
+  // empty digest substitutes to nothing, which means a `{{settings}}` quietly
+  // deleted from the Markdown would pass a `{{` check while the model lost
+  // the whole of what this app is set to -- silently, which is the failure
+  // mode this file exists for. Asserting the sentinel is *in* the prompt is
+  // what makes the slot's presence, and not just its absence of braces, the
+  // thing under test.
+  std::printf("\n-- the whole prompt, both substitution passes --\n");
+  {
+    // Keep `pre-prompt.md` inside the test's own directory. `local_prompt()`
+    // seeds it from the shipped asset if it is missing, and the real one sits
+    // next to the exe where the user may have rewritten it.
+    const fs::path pre = dir / "pre-prompt.md";
+    _putenv_s("AII_PRE_PROMPT", pre.string().c_str());
+    const char* kSettingsMark = "SETTINGS-DIGEST-SENTINEL";
+    const char* kScriptsMark = "SCRIPTS-DIGEST-SENTINEL";
+    set_settings_digest(std::string("model.name = ") + kSettingsMark + "\n");
+    set_actions_digest(std::string("tidy_desktop  ") + kScriptsMark + "  NOT ARMED\n");
+
+    for (int mask = 0; mask < combos; ++mask) {
+      ToolPolicy p;
+      for (int i = 0; i < kToolGroupCount; ++i) p.on[i] = (mask & (1 << i)) != 0;
+      const std::string prompt = system_prompt(p);
+      const std::string label = "[" + tool_summary(p) + "]";
+      check(!has(prompt, "{{") && !has(prompt, "}}"),
+            label + " nothing with `{{` in it reaches Claude");
+      check(has(prompt, kSettingsMark), label + " the settings digest is really in there");
+      check(has(prompt, kScriptsMark), label + " the actions digest is really in there");
+    }
+    set_settings_digest({});
+    set_actions_digest({});
   }
 
   std::printf("\n-- the syntax itself --\n");

@@ -272,10 +272,17 @@ void ApprovalWindow::draw(float dt, const std::vector<ApprovalRow>& rows, Approv
 
   // ---- the question, in the user's own framing -------------------------
   ImGui::PushStyleColor(ImGuiCol_Text, bright);
-  ImGui::TextUnformatted(rows.size() > 1 ? "New scripts have been created" : "A new script has been created");
+  const bool many = rows.size() > 1;
+  ImGui::TextUnformatted(many ? "New scripts have been created" : "A new script has been created");
   ImGui::PopStyleColor();
   ImGui::PushStyleColor(ImGuiCol_Text, dim);
-  ImGui::TextWrapped("Would you like to see it? Nothing runs until you confirm.");
+  // The second line agrees with the first. It used to be fixed, so two queued
+  // scripts read "New scripts have been created / Would you like to see it?".
+  // The singular keeps the user's own wording ("we have created a new script.
+  // Would you like to see it?") to the letter; the plural changes the one word
+  // English makes it change.
+  ImGui::TextWrapped(many ? "Would you like to see them? Nothing runs until you confirm."
+                          : "Would you like to see it? Nothing runs until you confirm.");
   ImGui::PopStyleColor();
   ImGui::Spacing();
   ImGui::Separator();
@@ -305,7 +312,7 @@ void ApprovalWindow::draw(float dt, const std::vector<ApprovalRow>& rows, Approv
   }
   ImGui::EndChild();
 
-  if (rows.size() > 1) {
+  if (many) {
     ImGui::Separator();
     if (ImGui::SmallButton("Confirm all")) out->arm_all = true;
     ImGui::SameLine();
