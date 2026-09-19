@@ -1,7 +1,11 @@
 # StageLatest.cmake -- assembles the runnable application into <source>/latest.
 #
 # Run as `cmake -P` from a POST_BUILD step on `avatar`; see
-# src/avatar/CMakeLists.txt. Arguments:
+# src/avatar/CMakeLists.txt. That step exists only when AII_STAGE_LATEST is ON,
+# which since 19 Sep 2026 it is not by default -- staging is for release
+# packaging. Nothing here runs, warns or checks anything on an ordinary build;
+# LATEST_DIR does not have to exist beforehand, the copies below create it.
+# Arguments:
 #
 #   MANIFEST    a file written by file(GENERATE) listing exactly what the app
 #               needs, one entry per line, in one of two forms:
