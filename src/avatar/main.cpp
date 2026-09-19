@@ -1521,25 +1521,25 @@ int main(int /*argc*/, char** /*argv*/) {
         // M4.2: the strip is part of this block, not a follower of it. It is
         // docked here — in the same breath as the widget's own height and
         // avatar band, before this frame's input is read — because the widget
-        // is anchored to the bottom-right corner, so growing it moves its
-        // *top* edge: opening the chat lifts the panel 265 px and the strip
-        // has to arrive with it. A dock done anywhere later in the frame would
-        // leave the strip one present behind, which on a 265 px jump is not a
-        // subtlety — it is a visible slide.
+        // is anchored to the bottom-right corner and a strip docked later in
+        // the frame arrives one present behind whatever the widget just did.
         //
-        // Every frame, not only on a resize: the widget can also move because
-        // the work area changed or the watermark margin was recomputed, and
-        // SidebarWindow::dock() is a no-op when nothing has actually moved.
+        // Both strips are anchored to the widget's *bottom* edge and grow
+        // upward (the user's own rule: overflowing up is fine, overflowing
+        // down puts buttons underneath the widget). That edge is the one the
+        // widget never moves, so opening the chat — which lifts the panel
+        // 265 px — no longer moves either strip at all; what still moves them
+        // is the work area changing or the watermark margin being recomputed,
+        // which is why this runs every frame. dock() is a no-op when nothing
+        // has actually moved.
         if (hwnd) GetWindowRect(hwnd, &widgetRect);
         dockEdge = widgetRect.left;
         if (sidebar) {
-            sidebar->dock(widgetRect, band);
+            sidebar->dock(widgetRect);
             dockEdge = sidebar->left();
         }
         // M9: the worker strip is part of this same block, and for the same
-        // reason — it is docked against the panel's top edge, which moves 265 px
-        // when the chat opens, and a strip docked later in the frame arrives one
-        // present behind as a visible slide.
+        // reason.
         //
         // Sized and docked from the rows the *previous* frame's snapshot built
         // (see stripRows). The snapshot is taken well below this point, and
@@ -1549,7 +1549,7 @@ int main(int /*argc*/, char** /*argv*/) {
         // wrong, which is a half-drawn icon.
         if (workerStrip) {
             workerStrip->set_rows(stripRows);
-            workerStrip->dock(widgetRect, band, dockEdge);
+            workerStrip->dock(widgetRect, dockEdge);
             dockEdge = workerStrip->left();
         }
 

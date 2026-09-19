@@ -79,10 +79,10 @@ struct WorkerStripResult {
 };
 
 // How many worker slots the strip will draw. The same physical bound as
-// `kSidebarButtonsMax`: the strip is docked to the top of the panel, which at
-// its shortest is ~168 px, and eight 40 px buttons plus their gaps is already
-// taller than the widget ever is with the chat shut. Past this the strip stops
-// looking like part of the widget.
+// `kSidebarButtonsMax`: the strip is bottom-anchored to the widget and grows
+// upward, and eight 40 px slots plus their gaps is already taller than the
+// widget ever is with the chat shut. Past this the strip stops looking like
+// part of the widget and starts looking like a column standing beside it.
 constexpr std::size_t kWorkerSlotsMax = 8;
 
 class WorkerStripWindow {
@@ -102,15 +102,23 @@ class WorkerStripWindow {
   void set_rows(std::vector<WorkerStripRow> rows);
 
   // Docks the strip so its **right edge** sits `kDockGap` px left of
-  // `right_edge`, with its top at the panel's top — the same rule the primary
-  // strip uses, so the two columns line up. `right_edge` is the primary strip's
-  // left edge when there is one and the widget's when there is not.
+  // `right_edge` and its **bottom edge** on the widget's bottom edge — the same
+  // rule the primary strip uses, so the two columns line up along the bottom
+  // and both grow upward. `right_edge` is the primary strip's left edge when
+  // there is one and the widget's when there is not.
+  //
+  // Bottom-anchoring matters more here than it does on the primary strip: this
+  // window resizes every time a worker starts or finishes, and a top-anchored
+  // column grew *downward* on each one — straight off the bottom of the widget
+  // and underneath it, which is the defect the user reported. Anchored to the
+  // bottom, a worker appearing lifts the top edge by one slot and the bottom
+  // edge does not move at all.
   //
   // Call at the **top of the frame**, in the same block that applies the
   // widget's own height and avatar band and before any of that frame's input is
-  // read: the widget is anchored bottom-right, so growing it moves its top edge
+  // read: the widget moves when the work area or the watermark margin changes,
   // and a strip docked later in the frame arrives one present behind.
-  void dock(const RECT& widget, unsigned band, int right_edge);
+  void dock(const RECT& widget, int right_edge);
 
   // One frame: its own ImGui pass, its own present. Call it beside the primary
   // strip's draw, before the widget's own ImGui frame.
