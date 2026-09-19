@@ -946,7 +946,15 @@ int main(int /*argc*/, char** /*argv*/) {
         // the name, and the load that follows resolves it — so the avatar's
         // very first frame is already in the user's colours.
         avatarSource.set_theme(themeName);
-        avatarSource.open(dir, clipName, spriteNames);
+        // The fallback is "default" on the settings path and nothing at all
+        // under AII_AVATAR_DIR: that override exists to point the loader at a
+        // particular directory, including a broken one, and an override that
+        // quietly loaded something else instead would make the failure paths
+        // untestable. Asking for "default" and failing is not a special case
+        // — the fallback resolves to the directory that just failed, and is
+        // skipped.
+        avatarSource.open(dir, clipName, spriteNames,
+                          avatarDirOverride.empty() ? "default" : std::string());
     }
     aii::AvatarGrid grid;
 
@@ -998,7 +1006,7 @@ int main(int /*argc*/, char** /*argv*/) {
     std::uint32_t height = extent.height;
     // The loader's frame state. Both recorders below read it: the loading
     // screen covers the whole window, so it also decides whether the avatar
-    // placeholder draws at all. During the M1.5 handoff the two overlap —
+    // draws at all. During the M1.5 handoff the two overlap —
     // `loading` stays true while the loader still has any opacity left, and
     // `avatarAlpha` rises from 0 over the same frames.
     bool loading = false;
@@ -2055,7 +2063,8 @@ int main(int /*argc*/, char** /*argv*/) {
             // Seeded on the way in, like the first one: an avatar the user has
             // never opened before has no copy under %APPDATA% yet, and this is
             // the call that makes one (and refreshes a stale one).
-            avatarSource.open(aii::seed_avatar_definition(avatarName), clipName, spriteNames);
+            avatarSource.open(aii::seed_avatar_definition(avatarName), clipName, spriteNames,
+                              "default");
         }
         if (uiState.theme != avatarSource.theme()) {
             const std::string wanted = uiState.theme;

@@ -78,7 +78,7 @@ struct AvatarGrid {
   std::uint32_t width = 16;   // the default the milestone specifies
   std::uint32_t height = 16;
   // Cells per pixel, or 0 to derive one that fits the grid to the band (the
-  // M2.1 rule, still what the placeholder wants). A stage has to state its
+  // M2.1 rule, and what a bare character-sized grid wants). A stage has to state its
   // own scale: it is sized *from* a scale chosen for the character, so
   // deriving one back from the stage size would not generally agree.
   std::uint32_t scale = 0;
@@ -91,13 +91,6 @@ struct AvatarGrid {
   void clear();
   void set(AvatarLayer layer, std::uint32_t x, std::uint32_t y, std::uint32_t rgba);
 };
-
-// Stand-in art until M2.2 defines the file format and M2.3 authors the real
-// slime: a 16x16 black-and-white blob with a face, plus one overlay cell so
-// the two-layer composite is exercised. A blob rather than a test pattern so
-// the window does not look broken in the meantime, and so scale, centring
-// and the fades are all obviously right or obviously wrong.
-void avatar_placeholder_blob(AvatarGrid& grid);
 
 class AvatarRenderer {
  public:

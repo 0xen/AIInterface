@@ -399,16 +399,36 @@ std::vector<std::string> avatar_definition_names();
 //
 // Everything that can go wrong here is a file the user is mid-edit, so
 // nothing throws and nothing fails hard: compose() always leaves a drawable
-// grid, dropping back to avatar_placeholder_blob() when there has never been
-// a good definition, and *keeping the last good one* when a reload is what
-// broke. Losing tuned art to a stray keystroke would be worse than showing it
-// one save stale.
+// grid, *keeping the last good definition* when a reload is what broke.
+// Losing tuned art to a stray keystroke would be worse than showing it one
+// save stale.
+//
+// What it will not do is draw a substitute. There used to be a 16x16 blob
+// compiled into the binary for the never-loaded case, and it cost this
+// project a day: the user reported the avatar "looks static", and it was not
+// a frozen clip, it was that blob, reached because the definition directory
+// was wrong. A shape that only appears when the real art fails makes a broken
+// install look like a working app with a different bug. So the only art this
+// program draws is art it loaded from a file: a definition that will not load
+// falls back to `default` by *loading* it, and a `default` that will not load
+// leaves the band empty and says so.
 class AvatarSource {
  public:
   // `dir` is the definition directory; `clip` is the clip to start on, empty
   // for the definition's default; `sprites` are accessories to force on (the
   // single name "all" turns on every sprite the definition declares).
-  void open(std::filesystem::path dir, std::string clip, std::vector<std::string> sprites);
+  //
+  // `fallback_name` is the definition to load instead if `dir` will not load
+  // — "default" from main.cpp, empty for a caller that means *exactly this
+  // directory* (AII_AVATAR_DIR, whose whole purpose is to reach the failure
+  // paths). It is a name rather than a path because it is resolved through
+  // seed_avatar_definition() and only when it is needed: a fallback that
+  // seeded on every open would touch the user's %APPDATA% copy of `default`
+  // on every launch, which is a file write for a case that almost never
+  // happens. The fallback is taken at most once per open(), so a `default`
+  // that is itself broken cannot re-enter it.
+  void open(std::filesystem::path dir, std::string clip, std::vector<std::string> sprites,
+            std::string fallback_name = {});
 
   // M1c.4: the whole of the theme mechanism's outside, deliberately narrow.
   //
@@ -455,7 +475,7 @@ class AvatarSource {
   // wall-clock time. `dt` is the frame's own delta, in seconds.
   void update(float dt);
 
-  // Writes the current frame into the grid, or the placeholder if there is no
+  // Writes the current frame into the grid, or clears it if there is no
   // definition to write. The band is passed because the stage is sized to it;
   // pass the same values the renderer's write_slot is given, or the art will
   // be laid out for a band it is not drawn into.
@@ -535,6 +555,14 @@ class AvatarSource {
   std::int32_t slide_cell_y() const;
 
   std::filesystem::path dir_;
+  // The definition to fall back to, cleared the moment it is taken so the
+  // fallback cannot recurse. Set by open(), never by a reload: a hot edit
+  // that breaks the art keeps the art, it does not fall back.
+  std::string fallback_name_;
+  // What the failed name was and why, carried into the status line the
+  // successful fallback writes. Cleared by that line, so the complaint is
+  // said once — loudly — and a later hot reload of the fallback is clean.
+  std::string fallback_note_;
   AvatarDefinition def_;
   bool loaded_ = false;
   std::string status_;
