@@ -108,6 +108,15 @@ class VoiceSession {
     // `State` in the panel, all to say something only the reset button draws.
     bool resettable = false;
     bool resetting = false;
+    // M3.12. What the `claude` child that is running *now* was launched with —
+    // the `--model` argument ("" = no flag) and the tool policy. The settings
+    // surface draws its picker and its tick boxes against these, and since a
+    // change to either restarts the child (apply_llm_settings), they are the
+    // only honest source: they are written by the restart thread when the new
+    // child is up, so a restart that failed to start one does not claim the
+    // new values are in force.
+    std::string model_in_force;
+    ToolPolicy tools_in_force;
     // M8.3, all three for the settings surface.
     VoiceLoad japanese_voice = VoiceLoad::Absent;
     std::string japanese_voice_error;   // empty unless japanese_voice == Failed
@@ -219,6 +228,34 @@ class VoiceSession {
   // `resetting()` is true and update() hands the session over: nothing on the
   // frame loop touches `turn_` or `eng_.llm` until it clears.
   void reset();
+  // M3.12: a changed model or tool grant, taken up **now** (user, 19 Sep 2026:
+  // "restart immediately, lose context"). **Frame loop only.**
+  //
+  // `--model` and `--allowedTools` are fixed when the child starts, so there
+  // is no level to push down and the three honest answers were: wait for the
+  // next launch (what M3.8 and M3.11 shipped, and what the amber lines said),
+  // restart and replay the conversation (M3.6, unbuilt), or restart and lose
+  // it. This is the third. It is the same machinery reset() uses, down to the
+  // thread, because it is the same act: one child ends and another starts.
+  //
+  // What differs from reset() is only what it *means*, and that is two things:
+  //
+  //   * The new child is built from a Config this has just written, so it is
+  //     the first thing in this app that changes `cfg_` after load(). Safe
+  //     because the write happens on the frame loop before `resetting_` is
+  //     released, and the only reader of these two fields is `build_llm` on
+  //     the restart thread, after it acquires.
+  //   * The status line says a setting was applied rather than that the
+  //     conversation was cleared. The user did not ask to forget; they asked
+  //     for a different model, and losing the conversation is the price of it,
+  //     which is a sentence about the price rather than about the act.
+  //
+  // Returns false and does nothing when the values already match what is in
+  // force, when the engines are not up, and while a restart is already
+  // running — the last of which is what keeps a hand running down the tick
+  // boxes to one restart rather than three. The caller is expected to let a
+  // change settle and to wait for a reply in flight; see main.cpp.
+  bool apply_llm_settings(const ToolPolicy& tools, const std::string& model_arg);
   // True from the moment reset() is called until the new child is up. Frame
   // loop and snapshot only.
   bool resetting() const { return resetting_.load(std::memory_order_acquire); }
@@ -374,10 +411,19 @@ class VoiceSession {
   // The same close and decode, but the text becomes a dictation for the
   // message field instead of a turn (M1b.3).
   void end_listening_unsent();
-  // reset()'s body, on `reset_`. Joins the turn thread, replaces the child,
-  // clears the transcript and the injected-prompt set, and publishes the new
-  // status. Nothing else may touch `turn_` or `eng_.llm` while it runs; see
-  // the guard at the top of update() and `resetting_`.
+  // Why the child is being replaced. The mechanism is identical either way —
+  // this decides one status line and one log line, and nothing else. It is not
+  // a mode: a restart for a setting still clears the transcript, still keeps
+  // the workers and the schedules, still gives the latch back.
+  enum class RestartReason { Reset, Settings };
+  // The shared body of reset() and apply_llm_settings(), on the frame loop:
+  // everything stop() does, the latch noted, the fence released and the thread
+  // started. See both callers for what each of them means by it.
+  void begin_restart(RestartReason why);
+  // begin_restart()'s tail, on `reset_`. Joins the turn thread, replaces the
+  // child, clears the transcript and the injected-prompt set, and publishes
+  // the new status. Nothing else may touch `turn_` or `eng_.llm` while it
+  // runs; see the guard at the top of update() and `resetting_`.
   void run_reset();
   void start_turn(std::string text);
   // M2b.4. A turn nobody typed: the app telling Claude that something it
@@ -585,6 +631,16 @@ class VoiceSession {
   // it. No lock, and none that would not have to be held across a whole turn.
   std::thread reset_;
   std::atomic<bool> resetting_{false};
+  // Which of the two callers started the restart that is running. Written on
+  // the frame loop before `resetting_` is released and read only by the
+  // restart thread, which is the same fence the `cfg_` write uses.
+  RestartReason restart_reason_ = RestartReason::Reset;
+  // What the running child was launched with, mirrored into the snapshot.
+  // Written by the restart thread under `mutex_` **only when the new child
+  // came up**, and by load() for the first one, so the settings surface can
+  // never be told that a model is in force that nothing is running on.
+  std::string model_in_force_;
+  ToolPolicy tools_in_force_;
   // The microphone latch was on when reset() was called, and is owed back.
   //
   // Reset has to close the latch on the way in — update() is handed to the

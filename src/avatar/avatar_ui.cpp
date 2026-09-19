@@ -922,16 +922,74 @@ void listen_timeout_section(AvatarUiState& state) {
 // than an empty selection.
 //
 // **A picker cannot reach the running Claude**, exactly as a tick box cannot
-// (M3.8). `--model` is fixed when the child process starts. So the change
-// lands at the next app start, and the moment the picker differs from what was
-// launched an amber line names the model Claude is actually holding. A setting
-// that appears to do nothing is the worst failure a setting has.
+// (M3.8). `--model` is fixed when the child process starts. M3.12 answers that
+// the way the user chose — the child is restarted on the new model at once and
+// the conversation goes with it — so the line under the picker no longer names
+// the next app start. It names the restart that is happening, and the model
+// Claude is still holding until it finishes. A setting that appears to do
+// nothing is the worst failure a setting has; one that quietly throws a
+// conversation away without saying so is the second.
 //
 // **Workers are not in this.** They are separate `claude` processes with their
 // own grant and their own prompt (`WorkerPool::spawn` sets no model at all),
 // and the user said "the base model you would like to use", which is the thing
 // they talk to. One control that silently changed both would be one control
 // meaning two things. Said in a dim line rather than left to be discovered.
+// ---- M3.12: the line both sections say it with --------------------------------
+//
+// Model and Tools have the same fact to state and it is now a four-state one,
+// so it is written once. `still` is the section's own clause for what the
+// running child is holding *until* the restart lands — the only part of the
+// sentence the two sections do not share — and it is always present, because
+// "in a moment" is a promise and the user is entitled to know what is true
+// meanwhile.
+//
+// The tense is the point. Before M3.12 the amber line described a state that
+// would last until the app was next started; now it describes something that
+// finishes in about a second, so it says what is happening rather than what is
+// prevented.
+void llm_restart_line(const AvatarOptions& options, const std::string& still) {
+  ImGui::PushStyleColor(ImGuiCol_Text, warn());
+  if (options.llm_restart_running)
+    ImGui::TextWrapped("Restarting Claude on it now, and the conversation so far goes with it. %s",
+                       still.c_str());
+  else if (options.llm_restart_waiting_turn)
+    ImGui::TextWrapped("Saved. Claude restarts on it as soon as this reply finishes, and the "
+                       "conversation so far goes with it. %s",
+                       still.c_str());
+  else if (options.llm_restart_pending)
+    ImGui::TextWrapped("Saved. Claude is restarting on it, and the conversation so far goes with "
+                       "it. %s",
+                       still.c_str());
+  else if (options.llm_restart_live)
+    // Live, and yet nothing is pending: the setting and the running child
+    // disagree over something the control was never moved to ask for — an
+    // AII_MODEL naming a dated id the picker cannot produce is the case that
+    // reaches this. Restarting on it uninvited would throw a conversation away
+    // to honour a choice nobody made this run, so it says what a change here
+    // would do instead.
+    ImGui::TextWrapped("Changing this restarts Claude on it, and the conversation so far goes with "
+                       "it. %s",
+                       still.c_str());
+  else
+    // No child to restart: --no-voice, or the engines have not come up. The
+    // old promise, and here it is the true one.
+    ImGui::TextWrapped("Saved, and it reaches Claude when one is next started. %s", still.c_str());
+  ImGui::PopStyleColor();
+}
+
+// M3.12. Said before the gesture rather than after it, because after it the
+// conversation is already gone. There is no confirm - a modal cannot be drawn
+// in this window at all (an ImGui popup is a floating window and would be
+// clipped at the widget's edge), and a two-press arm like Reset's belongs to a
+// button that means one thing, not to a picker and three tick boxes.
+const char kRestartWarning[] =
+    "\n\nChanging this restarts Claude straight away: the\n"
+    "model and the tool list are fixed when it starts,\n"
+    "so the conversation so far is lost. Workers,\n"
+    "schedules and anything they have already found\n"
+    "are kept.";
+
 void model_section(AvatarUiState& state, const AvatarOptions& options) {
   if (state.settings_scroll_model) ImGui::SetScrollHereY(0.0f);
   settings_heading("Model");
@@ -942,30 +1000,32 @@ void model_section(AvatarUiState& state, const AvatarOptions& options) {
       const ModelChoice& c = model_choice(i);
       const bool sel = i == state.model;
       if (ImGui::Selectable(c.label, sel)) state.model = i;
-      if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", c.tip);
+      // The cost is in the tooltip of the row that would incur it, and only
+      // when there is something running to lose: on a --no-voice run the
+      // sentence would be a threat the app cannot carry out.
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s%s", c.tip, options.llm_restart_live ? kRestartWarning : "");
       if (sel) ImGui::SetItemDefaultFocus();
     }
     ImGui::EndCombo();
   }
-  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", picked.tip);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("%s%s", picked.tip, options.llm_restart_live ? kRestartWarning : "");
 
   ImGui::PushStyleColor(ImGuiCol_Text, dim());
   ImGui::TextWrapped("%s", kModelWorkersNote);
   ImGui::PopStyleColor();
 
-  // The honest part, the same two cases the Tools section has. `picked.arg` is
-  // what the next launch would pass; `options.model_in_force` is what this one
-  // did. They differ the instant the picker moves — and permanently when
-  // AII_MODEL named something the picker cannot produce, which the amber line
+  // The honest part, the same cases the Tools section has. `picked.arg` is
+  // what a child started now would be given; `options.model_in_force` is what
+  // the one that is running was given. They differ from the instant the picker
+  // moves until the restart it causes has a new child up — and permanently
+  // when AII_MODEL named something the picker cannot produce, which this
   // covers without a special case, because it names the value rather than
   // assuming it is one of ours.
   if (picked.arg != options.model_in_force) {
-    ImGui::PushStyleColor(ImGuiCol_Text, warn());
-    ImGui::TextWrapped("Saved, and it reaches Claude when you next start the app. Right now Claude "
-                       "is running on %s. The model is fixed when Claude starts and cannot be "
-                       "changed under a conversation that is already running.",
-                       model_label(options.model_in_force).c_str());
-    ImGui::PopStyleColor();
+    llm_restart_line(options, "Until then Claude is running on " +
+                                  model_label(options.model_in_force) + ".");
   } else {
     ImGui::PushStyleColor(ImGuiCol_Text, dim());
     ImGui::TextWrapped("In force now: %s.", model_label(options.model_in_force).c_str());
@@ -1001,12 +1061,13 @@ void model_section(AvatarUiState& state, const AvatarOptions& options) {
 // **A toggle cannot reach the running Claude.** `--allowedTools` is fixed when
 // the child process starts. The honest options were: restart it and replay the
 // conversation (M3.6, unbuilt), restart it and lose the conversation, or wait
-// for the next launch. This is the third, and the entire reason the section
-// has an amber line in it: a setting that appears to do nothing is the worst
-// failure a setting has, and this one genuinely cannot do anything until the
-// app restarts. It therefore never pretends. The line names what is in force
-// *now* and what a restart would change it to, and it appears the instant a
-// box is ticked rather than being a permanent disclaimer nobody reads.
+// for the next launch. M3.8 shipped the third and said so; the user has since
+// chosen the second ("restart immediately, lose context"), so ticking a box
+// here ends the `claude` child and starts another on the new grant, and the
+// conversation goes with it. The line under the boxes still exists and still
+// never pretends — it now names a restart that is happening rather than one
+// that is being waited for, and the cost is in each box's tooltip *before* the
+// click, since afterwards there is nothing left to warn about.
 void tools_section(AvatarUiState& state, const AvatarOptions& options) {
   // M3.8's pose flag; see AvatarUiState::settings_scroll_tools. Held rather
   // than applied once, exactly as Timing's is, and taken *before* the heading
@@ -1033,7 +1094,8 @@ void tools_section(AvatarUiState& state, const AvatarOptions& options) {
                           "until you say otherwise.\n\n%s",
                           g.tip_on);
       else
-        ImGui::SetTooltip("%s", state.tools.on[i] ? g.tip_on : g.tip_off);
+        ImGui::SetTooltip("%s%s", state.tools.on[i] ? g.tip_on : g.tip_off,
+                          options.llm_restart_live ? kRestartWarning : "");
     }
     // The warning belongs under the row it is about, not in a footnote: a
     // greyed control with no visible reason reads as a bug.
@@ -1057,12 +1119,8 @@ void tools_section(AvatarUiState& state, const AvatarOptions& options) {
     ImGui::TextWrapped("Not in use this run: the API backend has no tools.");
     ImGui::PopStyleColor();
   } else if (state.tools != options.tools_in_force) {
-    ImGui::PushStyleColor(ImGuiCol_Text, warn());
-    ImGui::TextWrapped("Saved, and it reaches Claude when you next start the app. Right now Claude "
-                       "still holds what it was launched with: %s. The tools are fixed when Claude "
-                       "starts and cannot be changed under a conversation that is already running.",
-                       tool_summary(options.tools_in_force).c_str());
-    ImGui::PopStyleColor();
+    llm_restart_line(options, "Until then Claude still holds what it was launched with: " +
+                                  tool_summary(options.tools_in_force) + ".");
   } else {
     ImGui::PushStyleColor(ImGuiCol_Text, dim());
     ImGui::TextWrapped("In force now: %s.", tool_summary(state.tools).c_str());

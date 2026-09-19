@@ -11,6 +11,7 @@
 
 #include "core/app_strings.h"
 #include "core/language.h"
+#include "core/model_choice.h"
 #include "core/schedule.h"
 #include "core/sentence_splitter.h"
 #include "core/text_util.h"
@@ -263,6 +264,14 @@ void VoiceSession::load() {
 
   enter(0);
   if (!build_llm(cfg_, eng_, logger, &err)) return fail(err);
+  // M3.12. The first child, recorded the way every later one is: what is in
+  // force is what a `build_llm` that returned true was given, and nothing
+  // else. The settings surface reads this out of the snapshot.
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    model_in_force_ = cfg_.model_override;
+    tools_in_force_ = cfg_.tools;
+  }
   // M3.7. A web search adds seconds to a turn in which the microphone is shut
   // and nothing is spoken, and from outside that is indistinguishable from the
   // app having died. The avatar already covers the shape of it — the turn is
@@ -1088,6 +1097,42 @@ void VoiceSession::reset() {
   // recogniser did not load".
   if (!loaded_ || load_failed_) return;
   if (resetting()) return;
+  begin_restart(RestartReason::Reset);
+}
+
+bool VoiceSession::apply_llm_settings(const ToolPolicy& tools, const std::string& model_arg) {
+  // The same two refusals reset() makes, and for the same reasons. A setting
+  // saved while the recogniser is still coming up is not lost: it is in the
+  // file, and the child this run is about to build reads it.
+  if (!loaded_ || load_failed_) return false;
+  // Already restarting. This is the whole of the "a hand running down three
+  // tick boxes must not start three children" answer on this side — the
+  // caller debounces so that the common case never gets here at all, and this
+  // is the backstop for the ways in that do not, including a second change
+  // made during the second the rebuild takes. That change is not lost either:
+  // it is still in the panel, still differs from what comes up in force, and
+  // the caller offers it again on the next frame.
+  if (resetting()) return false;
+  // Nothing to do. The comparison is against the *running* child rather than
+  // against the last request, so a box ticked and unticked again before the
+  // restart fires resolves to no restart at all, and a picker moved back to
+  // where it started costs nothing.
+  if (cfg_.tools == tools && cfg_.model_override == model_arg) return false;
+  // The first write to `cfg_` after load(), and the one that makes this more
+  // than a reset: `build_llm` composes the system prompt from `cfg_.tools` and
+  // puts `cfg_.model_override` on the command line, so the new child is the
+  // new settings by construction and there is no second place that has to be
+  // told. Written here, on the frame loop, before the release store in
+  // begin_restart(); the restart thread's acquire is what publishes it.
+  cfg_.tools = tools;
+  cfg_.model_override = model_arg;
+  log("[restart] settings changed: " + model_label(model_arg) + ", tools: " + tool_summary(tools));
+  begin_restart(RestartReason::Settings);
+  return true;
+}
+
+void VoiceSession::begin_restart(RestartReason why) {
+  restart_reason_ = why;
   // Reap the previous reset thread. Joinable here means finished, because
   // `resetting_` is false and only the thread itself clears it.
   if (reset_.joinable()) reset_.join();
@@ -1105,15 +1150,19 @@ void VoiceSession::reset() {
   // unconditionally here so that a turn in any other shape still unwinds
   // rather than being waited on; run_reset() clears it after the join.
   cancel_ = true;
-  log("[reset] clearing the conversation");
+  const bool settings = why == RestartReason::Settings;
+  log(settings ? "[restart] restarting Claude on the new settings"
+               : "[reset] clearing the conversation");
   {
     std::lock_guard<std::mutex> l(mutex_);
     // A status line, not an app_strings entry: that table is for sentences the
     // app *speaks*, and by its own terms excludes the window's chrome. Nothing
     // about a reset is ever spoken — a new session announcing its own amnesia
     // would be the app talking about itself, in a voice that has by definition
-    // heard nothing.
-    status_ = "clearing the conversation...";
+    // heard nothing. The same goes for a restart the settings surface asked
+    // for: the surface is where the user is looking and where it is said.
+    status_ = settings ? "restarting Claude on the new settings..."
+                       : "clearing the conversation...";
   }
   // Set on this thread, before the thread that reads it exists. See the
   // declaration: this store is the fence, not a lock.
@@ -1171,12 +1220,35 @@ void VoiceSession::run_reset() {
     // or `assistant`, and putting the app's own words in either mouth is a lie
     // in the one record that is supposed to be verbatim. The status line below
     // is the panel's channel for "what just happened", and it says it.
+    // M3.12. The transcript goes for a settings restart too, and the argument
+    // above is the whole reason: a transcript the new child cannot see is a
+    // trap whatever ended the old one. The one difference is how surprising
+    // it is — pressing a button called Reset announces the loss, nudging a
+    // tick box does not — and that is answered where the surprise would
+    // happen rather than by keeping a transcript that lies: the control says
+    // what it costs before it is touched (its tooltip), while it is being
+    // applied (the amber line under it) and after (the status line below).
     lines_.clear();
     partial_.clear();
     // `usage_` is deliberately kept: the subscription window is an account
     // fact, not a conversation one, and a reset does not give any of it back.
     if (ok) {
-      status_ = "conversation cleared - Claude remembers nothing of it. ready.";
+      // What is running, recorded only now. Before this line the surface was
+      // still drawing the old child's model and grant, which is what it was
+      // still talking to.
+      model_in_force_ = cfg_.model_override;
+      tools_in_force_ = cfg_.tools;
+      // Two sentences for the same event, because the event is not the same.
+      // Reset was asked for as an act of forgetting and says so. A settings
+      // restart was asked for as "use this model" and the forgetting is its
+      // price, so it names the thing that was wanted first and the price
+      // second — "Claude remembers nothing of it" as the whole of the news
+      // would read as an answer to a question the user did not ask.
+      status_ = restart_reason_ == RestartReason::Settings
+                    ? "new settings applied - Claude restarted on " +
+                          model_label(cfg_.model_override) +
+                          " and holds nothing of the conversation before it. ready."
+                    : "conversation cleared - Claude remembers nothing of it. ready.";
       set_state_locked(State::Idle);
     } else {
       // There is no AI any more and no way to get one, so this is Failed
@@ -1185,8 +1257,14 @@ void VoiceSession::run_reset() {
       set_state_locked(State::Failed);
     }
   }
-  log(ok ? "[reset] new session started; Claude remembers nothing from before"
-         : "[reset] could not start a new session: " + err);
+  if (restart_reason_ == RestartReason::Settings)
+    log(ok ? "[restart] new session started on " + model_label(cfg_.model_override) +
+                 ", tools: " + tool_summary(cfg_.tools) +
+                 "; Claude remembers nothing from before"
+           : "[restart] could not start a new session: " + err);
+  else
+    log(ok ? "[reset] new session started; Claude remembers nothing from before"
+           : "[reset] could not start a new session: " + err);
   resetting_.store(false, std::memory_order_release);
 }
 
@@ -1370,6 +1448,22 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
     return;  // the caller already moved the state on
   }
   splitter.flush();
+  // AII_REPLY_LOG: the reply as one line, off unless asked for. main.cpp logs
+  // every turn that is *sent* (`send:`) and nothing logs what came back, so a
+  // scripted run could prove what the model was asked and not what it knew —
+  // which is the only question a restart-and-forget change can be tested on
+  // without a screenshot of a chat window. Off by default because a
+  // transcript in a log file is a conversation on disk, and this app is built
+  // not to leave one (`--no-session-persistence`).
+  if (std::getenv("AII_REPLY_LOG")) {
+    std::lock_guard<std::mutex> l(mutex_);
+    if (!lines_.empty() && !lines_.back().user) {
+      std::string one = lines_.back().text;
+      std::replace(one.begin(), one.end(), '\n', ' ');
+      std::replace(one.begin(), one.end(), '\r', ' ');
+      rend::log::info("[reply] {}", one);
+    }
+  }
   const std::string usage = eng_.llm->status_line();
   bool injected_turn_failed = false;
   {
@@ -2436,6 +2530,12 @@ VoiceSession::Snapshot VoiceSession::snapshot() const {
   // can see. Reset clears `lines_`, so this is false on a fresh session and
   // false again the moment a reset finishes, with no counter to keep in step.
   s.resettable = !lines_.empty();
+  // M3.12. What the child that is running right now was launched with. Not
+  // `cfg_`: between apply_llm_settings() and the new child being up, `cfg_`
+  // is what has been *asked for*, and the surface's whole job in that second
+  // is to say what is still in force.
+  s.model_in_force = model_in_force_;
+  s.tools_in_force = tools_in_force_;
   if (workers_) s.workers = workers_->snapshot();
   return s;
 }
