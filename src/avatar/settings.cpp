@@ -299,6 +299,23 @@ const SettingKey kSettingKeys[] = {
     {"tools.file_write", SettingValue::Bool, SettingCost::Restart, Msg::SettingRestartTools,
      "settings.tools", "on or off", "off"},
 
+    // -- M10.5. The two consent switches, and **the model may read them but
+    //    not write them.** Every other `NotSettable` row here is one nothing
+    //    running owns; these are ones the *user* owns, which is a different
+    //    reason for the same answer and has its own sentence.
+    //
+    //    They are listed rather than hidden for M3.14's reason -- an invisible
+    //    key is one the model invents a story about -- and they are refused
+    //    because a gate the gated party can open is not a gate. Note the
+    //    asymmetry with `tools.file_write`, which *is* settable: that one says
+    //    "may put bytes on disk" and costs a restart to change; these say "may
+    //    your own code run inside me", cost nothing to change, and are
+    //    therefore exactly the pair worth keeping out of reach.
+    {"scripts.authoring", SettingValue::Opaque, SettingCost::NotSettable, Msg::SettingYoursAlone,
+     "", "on or off; the user's own switch, in the panel under Scripts", "off"},
+    {"scripts.auto_allow", SettingValue::Opaque, SettingCost::NotSettable, Msg::SettingYoursAlone,
+     "", "on or off; when off, a new script asks before it may run", "off"},
+
     // -- in the file, and not this app's to write. Each says its own why.
     {"inspector.placed", SettingValue::Opaque, SettingCost::NotSettable, Msg::SettingWindowOwns, "",
      "written by the inspector window", "false"},

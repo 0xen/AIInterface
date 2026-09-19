@@ -315,6 +315,24 @@ class VoiceSession {
   void set_listen_timeout(float seconds);
   float listen_timeout() const;
   void say(const std::string& text);   // send typed/scripted text as the user turn
+
+  // M10.2/M10.5. What actions exist and whether the app will load them, pushed
+  // down as a level every frame from the frame loop — the same shape as
+  // `set_muted` and `set_listen_timeout`, and for the same reason: the
+  // settings file and the store stay the one owner of record, and this is a
+  // no-op unless something changed. Any thread.
+  struct ActionFact {
+    std::string name;
+    bool armed = false;
+    bool in_digest = true;
+  };
+  void set_actions(std::vector<ActionFact> list, bool authoring);
+  // One or more actions were created or armed. Reaches the model through
+  // `pending_context()` on the next *user* turn, which is what makes "write me
+  // a script for that" → "now use it" work without recomposing the system
+  // prompt (which is a launch argument, and since M3.12 replacing the child
+  // discards the conversation). Costs nothing on every other turn.
+  void note_action_news(const std::vector<std::string>& names);
   bool quitting_ok() const;            // true once no worker is mid-turn
 
   // M2b.4. A schedule that has come due. Called from the frame loop's tick
@@ -552,6 +570,20 @@ class VoiceSession {
   // So a voice change and a clicked change are one code path, and the voice
   // one cannot restart anything the button could not.
   void apply_setting(const Command& c);
+  // M10.2/M10.5. The `run name=` verb.
+  //
+  // **Copied from `apply_setting` and deliberately not from `button`.** The
+  // `button` verb is applied *inside* `parse_commands()`
+  // (`worker_pool.cpp:336`) and never returned to the caller, so a verb added
+  // by copying it would execute during parsing, on whatever thread happened to
+  // be parsing, with no session to refuse it and nowhere to say why. This one
+  // is dispatched from `run_commands()` like every other real verb.
+  //
+  // It never runs anything itself. It checks the name against the level this
+  // session was handed, speaks the refusal if there is one, and otherwise
+  // posts one inbound bus line — which `apply_pending()` applies on the frame
+  // loop, where the authoritative store lives and the check is made again.
+  void apply_run(const Command& c);
   // Speak a line from the app itself (worker reports) and show it.
   void announce(const std::string& text);
   // Same, where what is shown and what is spoken differ: a worker report is
@@ -652,6 +684,22 @@ class VoiceSession {
   // with no confirmation attached, so asking again later still asks again —
   // the pair only lets a confirmation through, never a change.
   std::string asked_setting_;
+  // M10.2/M10.5. What actions exist, pushed down as a level every frame from
+  // the frame loop, exactly as mute, the language selection and the listen
+  // timeout are. **A copy and not a pointer**: the store is rescanned on the
+  // frame loop and read here on the turn thread, and a pointer would be a read
+  // of a vector mid-write. It is a handful of short strings a second.
+  struct ActionLevel {
+    std::string name;
+    bool armed = false;
+    bool in_digest = true;
+  };
+  std::vector<ActionLevel> actions_;
+  bool actions_authoring_ = false;
+  // Actions created or armed since the last turn composed a context. Drained
+  // by `pending_context()`, which is const, hence mutable — the same way the
+  // rest of that function's state is read under `mutex_`.
+  mutable std::vector<std::string> action_news_;
   // When this session began, for the inspector's "how long ago". Steady, so a
   // clock change mid-session cannot make a prompt look like it was injected in
   // the future. Set once, in the constructor, so it covers the load as well.

@@ -649,9 +649,14 @@ namespace {
 // know what a settings file is, and a value it can neither parse nor validate
 // is exactly the right amount of knowledge to hand it.
 std::string g_settings_digest;
+// M10.5. The same shape and the same reasoning, one file along: the list of
+// actions this machine has, generated because it is different on every machine
+// and after every turn the model writes a file in.
+std::string g_actions_digest;
 }  // namespace
 
 void set_settings_digest(std::string text) { g_settings_digest = std::move(text); }
+void set_actions_digest(std::string text) { g_actions_digest = std::move(text); }
 
 const std::string& system_prompt(const ToolPolicy& policy) {
   // Keyed on the policy rather than computed once and for all — see the
@@ -666,9 +671,12 @@ const std::string& system_prompt(const ToolPolicy& policy) {
   // untrue.
   static ToolPolicy cached_for;
   static std::string cached_digest;
+  static std::string cached_actions;
   static std::string cached;
   static bool have = false;
-  if (have && cached_for == policy && cached_digest == g_settings_digest) return cached;
+  if (have && cached_for == policy && cached_digest == g_settings_digest &&
+      cached_actions == g_actions_digest)
+    return cached;
 
   PromptStore store;
   std::string err;
@@ -693,6 +701,12 @@ const std::string& system_prompt(const ToolPolicy& policy) {
     // the collapse pass would then have to reason about.
     text.replace(at, std::strlen("{{settings}}"), trim_end(g_settings_digest));
   }
+  // M10.5. Same rule, same place, same reason: a list of what exists on this
+  // machine cannot be written in the Markdown, and the prose around it stays
+  // in the Markdown where the user can edit it.
+  if (const size_t at = text.find("{{scripts}}"); at != std::string::npos) {
+    text.replace(at, std::strlen("{{scripts}}"), trim_end(g_actions_digest));
+  }
   std::string composed = expand_tool_sections(text, policy, &section_problems);
   for (const std::string& p : section_problems) std::fprintf(stderr, "[prompts] %s\n", p.c_str());
   // Appended, never substituted, and last so that it has the final word. Not
@@ -705,6 +719,7 @@ const std::string& system_prompt(const ToolPolicy& policy) {
   cached = std::move(composed);
   cached_for = policy;
   cached_digest = g_settings_digest;
+  cached_actions = g_actions_digest;
   have = true;
   return cached;
 }

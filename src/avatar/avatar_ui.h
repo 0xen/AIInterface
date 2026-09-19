@@ -257,6 +257,18 @@ struct AvatarOptions {
   std::string script_status;
   bool script_status_ok = true;
 
+  // M10.5. One row per action the app has found: its name, its one-line
+  // description, and whether the user has armed it. Handed in as a value
+  // rather than reached for, exactly as every other row on this panel is --
+  // the store is the frame loop's and the panel only draws.
+  struct ScriptRow {
+    std::string name;
+    std::string description;
+    bool armed = false;
+    bool in_digest = true;
+  };
+  std::vector<ScriptRow> scripts;
+
   // M3.8. What the conversational instance was *actually launched with*, as
   // opposed to what the tick boxes say. The two differ the moment a toggle is
   // changed and stay different until the app is next started, because
@@ -467,6 +479,24 @@ struct AvatarUiState {
   // Seeded by main.cpp before the first frame from `Config::model_override`,
   // so the default is not spelled twice.
   int model = kModelChoiceDefault;
+  // M10.5. The two consent switches, and the panel is their **only** writer --
+  // `kSettingKeys` marks both `NotSettable` so the ```aii``` block cannot
+  // reach them. `authoring` decides whether the app loads and offers what it
+  // finds in `scripts\actions\`; `auto_allow` decides whether a newly found
+  // one is armed on sight or asks first. Both default off, and the user's own
+  // framing was about the asking case: *"if this is disabled, have a pop-up
+  // appear"*.
+  bool scripts_authoring = false;
+  bool scripts_auto_allow = false;
+  // M10.5. The Scripts rows. **Wishes, not acts**: the panel records which
+  // button was pressed and the frame loop is what arms, deletes or opens
+  // Explorer. Arming is the security-relevant one, so it happens in exactly one
+  // place with one caller -- and deleting a file is emphatically not something
+  // to do from inside an ImGui frame. Cleared by main.cpp once acted on.
+  std::string script_arm;
+  std::string script_delete;
+  std::string script_reveal;   // absolute path to show in Explorer
+  bool scripts_open_folder = false;
   // M1f.3. The latched microphone shut itself on silence, and nothing has
   // happened since. What the microphone button draws while this is true is a
   // face of its own (MicFace::Dozed) rather than the bare Idle capsule, which

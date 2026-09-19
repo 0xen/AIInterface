@@ -27,12 +27,21 @@
           "kind": "global",
           "enabled": true,
           "pos": [320, 240]
+        },
+        {
+          "id": "scripts",
+          "title": "Scripts",
+          "file": "system/scripts.md",
+          "kind": "global",
+          "enabled": true,
+          "pos": [320, 400]
         }
       ],
       "links": [
         { "from": "start", "to": "voice", "order": 0, "enabled": true },
         { "from": "start", "to": "workers", "order": 1, "enabled": true },
-        { "from": "start", "to": "settings", "order": 2, "enabled": true }
+        { "from": "start", "to": "settings", "order": 2, "enabled": true },
+        { "from": "start", "to": "scripts", "order": 3, "enabled": true }
       ]
     },
     "project": {

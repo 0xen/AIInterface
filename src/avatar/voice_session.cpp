@@ -2295,18 +2295,37 @@ std::string VoiceSession::pending_context() const {
   const std::vector<Schedule> book = ScheduleBook::instance().list();
   std::vector<ScheduledWorker> running;
   std::size_t ready = 0;
+  // M10.5. Drained here, on a *user* turn only — `pending_context()`'s existing
+  // rule (`voice_session.cpp:1786`), and a newly written action follows a user
+  // turn by construction, so honouring it costs nothing.
+  //
+  // **This is the half of the prompt cost that is free.** The system prompt's
+  // action list is fixed when the `claude` child starts, and since M3.12
+  // restarting it discards the conversation — so the only way a script written
+  // five minutes ago becomes callable *now* is this block, which is a line on
+  // the turns after something happened and nothing on every other turn.
+  std::vector<std::string> news;
+  std::vector<ActionLevel> actions;
   {
     std::lock_guard<std::mutex> l(mutex_);
     running = scheduled_workers_;
     ready = pending_turns_.size();
+    news.swap(action_news_);
+    actions = actions_;
   }
-  if (book.empty() && running.empty() && ready == 0) return std::string();
+  if (book.empty() && running.empty() && ready == 0 && news.empty()) return std::string();
 
   const auto now = std::chrono::steady_clock::now();
   std::string b;
   b += "<context name=\"Pending\" kind=\"state\">\n";
-  b += "Things you promised the user earlier and have not delivered yet. This list is the "
-       "app's, not your memory: trust it over anything you recall.\n\n";
+  // The framing sentence is about promises, and a block that carries only a
+  // newly written script has not promised anything — so it says what it is
+  // instead. One `if`, rather than one sentence covering two unrelated facts.
+  b += (book.empty() && running.empty() && ready == 0)
+           ? "What the app itself has changed since your last turn. This is the app's, not "
+             "your memory: trust it over anything you recall.\n\n"
+           : "Things you promised the user earlier and have not delivered yet. This list is the "
+             "app's, not your memory: trust it over anything you recall.\n\n";
   if (!book.empty()) {
     b += "Still to come:\n";
     for (const Schedule& s : book) {
@@ -2336,6 +2355,28 @@ std::string VoiceSession::pending_context() const {
     // left to say, and it will be said as soon as there is a gap to say it in.
     b += "Finished, and waiting for a gap to tell them about: " + std::to_string(ready) +
          (ready == 1 ? " thing\n\n" : " things\n\n");
+  }
+  if (!news.empty()) {
+    b += "Scripts that have appeared or been allowed since the last turn:\n";
+    for (const std::string& n : news) {
+      bool armed = false;
+      bool known = false;
+      for (const ActionLevel& a : actions)
+        if (a.name == n) {
+          armed = a.armed;
+          known = true;
+        }
+      if (!known) continue;
+      b += "- " + n + (armed ? ": allowed, you can run it now.\n"
+                             : ": waiting to be allowed. Tell the user to open the settings "
+                               "panel, find it under Scripts and press Confirm. Do not try to "
+                               "run it until they have.\n");
+    }
+    b += "\n";
+  }
+  if (book.empty() && running.empty() && ready == 0) {
+    b += "</context>\n\n";
+    return b;
   }
   b += "If they ask what is pending, say it the way a person would - what it is and roughly "
        "how long, in the language you are speaking. Never read out an id or say the word id; "
@@ -2850,6 +2891,12 @@ void VoiceSession::run_commands(const std::string& reply_text) {
       apply_setting(c);
       continue;
     }
+    // M10.2/M10.5. Not a worker verb, so it is handled before the `workers_`
+    // guard: calling an action has nothing to do with whether a pool exists.
+    if (c.verb == "run") {
+      apply_run(c);
+      continue;
+    }
     if (c.verb == "load") {
       if (injector_.request(c.name)) log("[prompts] queued " + c.name + " for the next turn");
       else log("[prompts] refused load name=" + c.name + " (no such prompt in the store)");
@@ -2977,6 +3024,70 @@ void VoiceSession::apply_setting(const Command& c) {
   // sentence already said what it did, and a second voice repeating it is the
   // app talking over the conversation. The one that costs something says so.
   if (key->cost == SettingCost::NextLaunch) announce(app_text(key->say));
+}
+
+void VoiceSession::set_actions(std::vector<ActionFact> list, bool authoring) {
+  std::lock_guard<std::mutex> l(mutex_);
+  actions_.clear();
+  actions_.reserve(list.size());
+  for (ActionFact& f : list)
+    actions_.push_back(ActionLevel{std::move(f.name), f.armed, f.in_digest});
+  actions_authoring_ = authoring;
+}
+
+void VoiceSession::note_action_news(const std::vector<std::string>& names) {
+  if (names.empty()) return;
+  std::lock_guard<std::mutex> l(mutex_);
+  for (const std::string& n : names) {
+    if (std::find(action_news_.begin(), action_news_.end(), n) == action_news_.end())
+      action_news_.push_back(n);
+  }
+  // Bounded, like everything else that a script or the model can drive. A
+  // model that wrote forty files in a turn must cost a line, not a page.
+  while (action_news_.size() > 8) action_news_.erase(action_news_.begin());
+}
+
+// M10.2/M10.5. Calling an action.
+//
+// **Every refusal here names the action and is spoken**, and none of them is a
+// silent no-op. That is M3.14's finding applied one file along: the hazard of a
+// call that quietly did nothing is that the model invents a reason for it, and
+// an invented reason is what the user hears. The unarmed case in particular
+// does not merely refuse — it is the user's own instruction that the model be
+// told to send them to arm it, and the sentence it speaks carries that step.
+void VoiceSession::apply_run(const Command& c) {
+  Msg say = Msg::Count;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    const ActionLevel* found = nullptr;
+    for (const ActionLevel& a : actions_)
+      if (a.name == c.name) found = &a;
+    // A name, never a path and never a body: resolved against the set the app
+    // built by looking at a directory, and anything else is the model having
+    // invented one.
+    if (!found) say = Msg::ScriptNoSuchAction;
+    else if (!actions_authoring_) say = Msg::ScriptAuthoringOff;
+    else if (!found->in_digest) say = Msg::ScriptPastCap;
+    else if (!found->armed) say = Msg::ScriptNotArmed;
+  }
+  if (say != Msg::Count) {
+    log("[action] refused run name=" + c.name);
+    announce(app_text(say, c.name));
+    return;
+  }
+
+  // Posted, not run. `run_commands()` is on the turn thread — the thread that
+  // produces the reply — and an action that took a second there would stall
+  // speech. This lands in `apply_pending()` on the frame loop, which resolves
+  // the name to a path against the authoritative store and publishes the
+  // dispatch the Python side is waiting on. Fire and forget by design: the
+  // model does not get a return value in the turn that asked.
+  std::string err;
+  if (!AppBus::instance().post(BusLine("script.run").str("name", c.name).done(), &err)) {
+    log("[action] could not post run name=" + c.name + ": " + err);
+    return;
+  }
+  log("[action] run name=" + c.name);
 }
 
 void VoiceSession::publish_inventory() {

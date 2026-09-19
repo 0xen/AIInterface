@@ -174,6 +174,7 @@
 #include <string>
 #include <vector>
 
+#include "action_store.h"
 #include "avatar_controller.h"
 #include "avatar_def.h"
 #include "avatar_ui.h"
@@ -237,6 +238,11 @@ class BusBindings {
     // is the most sensitive thing this app holds and it does not leave the
     // process because a script happened to connect.
     bool publish_text = false;
+    // M10.2. The authoritative set of actions, owned by the frame loop. The
+    // `script.run` verb resolves a *name* against it and publishes the path;
+    // nothing on the bus may name a path, which is what stops the untrusted
+    // end introducing a file the app did not already find.
+    ActionStore* actions = nullptr;
   };
 
   void install(Context ctx);
