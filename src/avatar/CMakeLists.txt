@@ -72,13 +72,85 @@ aii_copy_runtime_dlls(avatar)
 
 # Our HLSL, compiled by the engine's dxc rule into data/shaders next to the
 # executable (SPIR-V plus DXIL; the D3D12 backend swaps .spv for .dxil).
-rend_add_shaders(avatar_shaders
-  SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
-  OUTPUT_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/data/shaders"
-  STAGES
+# Named rather than inlined because the staging step at the bottom of this
+# file has to know which shader artifacts *this* build declares, rather than
+# whatever happens to be lying in the build tree.
+set(AII_SHADER_STAGES
     "avatar_grid.hlsl|VSMain|vs_6_0|avatar_grid.vert.spv"
     "avatar_grid.hlsl|PSMain|ps_6_0|avatar_grid.frag.spv"
     "loader.hlsl|VSMain|vs_6_0|loader.vert.spv"
     "loader.hlsl|PSMain|ps_6_0|loader.frag.spv")
+rend_add_shaders(avatar_shaders
+  SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+  OUTPUT_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/data/shaders"
+  STAGES ${AII_SHADER_STAGES})
 set_target_properties(avatar_shaders PROPERTIES FOLDER "assets")
 add_dependencies(avatar avatar_shaders)
+
+# ---- latest/: the runnable application, in one folder ----------------------
+# `build\bin\<config>\` is a build tree, not a place to hand someone: it
+# accumulates (a shader whose .hlsl was deleted is still there; an executable
+# built while an option was on is not removed when it goes off), and its path
+# changes with the configuration. So the build also assembles exactly what the
+# app needs into `latest/` beside the sources.
+#
+# What goes in is enumerated, not swept up: the executable, the four DLLs it
+# loads by name, the Python host trio (only when it is built -- it is
+# LoadLibrary'd, and only on a run that has a script), and the shader
+# artifacts this build declares. Nothing else in the build tree is required to
+# start the app. cmake/StageLatest.cmake also removes anything a previous
+# build staged that this one does not want, so latest/ cannot go stale behind
+# a name that says it is current.
+#
+# It is one config at a time -- whatever was built most recently, named in
+# BUILD-INFO.txt -- and every file in it comes from that same build, so the
+# folder is never a mixture.
+if(AII_STAGE_LATEST)
+  set(_aii_bin "$<TARGET_FILE_DIR:avatar>")
+  set(_aii_manifest_lines
+    "copy|$<TARGET_FILE_NAME:avatar>|$<TARGET_FILE:avatar>"
+    "copy|$<TARGET_FILE_NAME:rend::engine>|$<TARGET_FILE:rend::engine>")
+  if(AII_BUILD_SCRIPTS)
+    # python*.dll is a glob because the engine's FetchPython.cmake picks the
+    # CPython version; hard-coding python313.dll here would rot silently.
+    list(APPEND _aii_manifest_lines
+      "copy|$<TARGET_FILE_NAME:rend_pyhost>|$<TARGET_FILE:rend_pyhost>"
+      "copy|$<TARGET_FILE_NAME:aii_pyhost>|$<TARGET_FILE:aii_pyhost>"
+      "glob|.|${_aii_bin}/python*.dll")
+  endif()
+  foreach(_dll sherpa-onnx-c-api.dll onnxruntime.dll onnxruntime_providers_shared.dll)
+    list(APPEND _aii_manifest_lines "copy|${_dll}|${SHERPA_DIR}/lib/${_dll}")
+  endforeach()
+  list(APPEND _aii_manifest_lines
+    "copy|voicevox_core.dll|${VV_CORE_DIR}/c_api/lib/voicevox_core.dll")
+
+  foreach(_stage IN LISTS AII_SHADER_STAGES)
+    string(REPLACE "|" ";" _parts "${_stage}")
+    list(GET _parts 3 _artifact)
+    set(_artifacts "${_artifact}")
+    if(REND_DXIL)
+      string(REGEX REPLACE "[.]spv$" ".dxil" _dxil "${_artifact}")
+      list(APPEND _artifacts "${_dxil}")
+    endif()
+    foreach(_a IN LISTS _artifacts)
+      list(APPEND _aii_manifest_lines
+        "copy|data/shaders/${_a}|${_aii_bin}/data/shaders/${_a}")
+    endforeach()
+  endforeach()
+
+  set(_aii_manifest "${CMAKE_BINARY_DIR}/aii-latest-$<CONFIG>.manifest")
+  string(JOIN "\n" _aii_manifest_text ${_aii_manifest_lines})
+  file(GENERATE OUTPUT "${_aii_manifest}" CONTENT "${_aii_manifest_text}\n")
+
+  # Last POST_BUILD step on avatar, so the DLL copies above, the Python host's
+  # own copy step and the shader target have all run by the time it looks.
+  add_custom_command(TARGET avatar POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+      "-DMANIFEST=${_aii_manifest}"
+      "-DLATEST_DIR=${AII_LATEST_DIR}"
+      "-DCONFIG=$<CONFIG>"
+      "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+      -P "${CMAKE_SOURCE_DIR}/cmake/StageLatest.cmake"
+    COMMENT "Staging the runnable app into ${AII_LATEST_DIR}"
+    VERBATIM)
+endif()

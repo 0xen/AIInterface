@@ -32,6 +32,20 @@ cmake --build build --config Release
 `avatar.exe` lands in `build\bin\Release\` next to `rend.dll` and the engine DLLs, and it is
 the only executable there: the tests and `voiceloop` are behind the options below.
 
+The build also assembles the app into `latest\` at the root of the checkout — `avatar.exe`,
+the DLLs it loads, `data\shaders\` and nothing else — so the thing you just built is always
+in the same place whichever configuration you built. `latest\BUILD-INFO.txt` records which
+configuration and commit it came from, and anything a previous build put there that the
+current one does not want is deleted, so it never quietly goes stale. It holds only the app;
+the tests and `voiceloop` stay in the build tree. `-DAII_STAGE_LATEST=OFF` turns it off and
+`AII_LATEST_DIR` moves it. `latest\` is gitignored. (Staging happens when `avatar.exe`
+relinks, so a build with nothing to do does not touch it — if you delete `latest\`, build
+something before expecting it back.)
+
+**It is not a package you can copy elsewhere.** The models, the VOICEVOX core and `assets\`
+are compiled in as absolute paths into this checkout (`docs\RELEASE-HANDOVER.md`, B1), so
+`latest\avatar.exe` runs on the machine that built it and nowhere else.
+
 ### Building the development targets
 
 | Option | Default | Builds |

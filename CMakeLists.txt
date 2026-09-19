@@ -81,6 +81,14 @@ endfunction()
 option(AII_BUILD_TESTS "Build the unit tests (default OFF; -DAII_BUILD_TESTS=ON to run them)" OFF)
 option(AII_BUILD_VOICELOOP "Build the milestone-1 console voice loop (no window)" OFF)
 
+# Building the app also assembles it into `latest/` -- one folder holding the
+# executable and everything it loads, so "run the build I just made" does not
+# mean remembering which configuration's bin directory it went to. Only the
+# app is staged: the tests and voiceloop above are development tools and do
+# not belong beside the thing the user runs. See src/avatar/CMakeLists.txt.
+option(AII_STAGE_LATEST "Assemble the runnable app into <source>/latest after each build" ON)
+set(AII_LATEST_DIR "${CMAKE_SOURCE_DIR}/latest" CACHE PATH "Where the build stages the runnable app")
+
 if(AII_BUILD_VOICELOOP)
   # ---- voiceloop: the console push-to-talk loop (milestone 1) ----
   add_executable(voiceloop src/main.cpp)

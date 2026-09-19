@@ -1,5 +1,6 @@
 models/
 build/
+latest/
 out/
 .vs/
 *.user
