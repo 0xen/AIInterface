@@ -57,6 +57,8 @@
 //                 (M1f.5), which is below the fold as well.
 //     --settings-tools  the same, held scrolled to the Tools section (M3.8),
 //                 which is likewise below the fold.
+//     --settings-model  the same, held scrolled to the Model section (M3.11),
+//                 which sits just above Tools.
 //     --listen-timeout-at S:V  at S seconds, write V seconds into the
 //                 auto-listen control's own fields, exactly as a hand on it
 //                 would; V of 0 is "never". How "a change reaches a
@@ -114,6 +116,7 @@
 #include "script_host.h"
 #include "core/button_registry.h"
 #include "core/config.h"
+#include "core/model_choice.h"
 #include "core/schedule.h"
 #include "core/worker_pool.h"
 #include "imgui_layer.h"
@@ -344,6 +347,10 @@ int main(int /*argc*/, char** /*argv*/) {
     bool autoListenPending = false;
     bool autoListenInForce = false;
     aii::ToolPolicy toolsInForce;
+    // M3.11's pair of the same, for the model picker: the pose flag and the
+    // `--model` argument the child was actually launched with ("" = no flag).
+    bool settingsScrollModel = false;
+    std::string modelInForce;
     // --inspector: open the prompt inspector on the first frame, as if the
     // sidebar button had been clicked. Nothing else about it differs.
     bool inspectorOpen = false;
@@ -476,6 +483,7 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (a == L"--settings-tools") { settingsOpen = true; settingsScrollTools = true; }
             // M1f.5's, same reason again: Startup is below the fold too.
             else if (a == L"--settings-startup") { settingsOpen = true; settingsScrollStartup = true; }
+            else if (a == L"--settings-model") { settingsOpen = true; settingsScrollModel = true; }
             else if (a == L"--listen-timeout-at" && i + 1 < wargc) {
                 const std::wstring spec = wargv[++i];
                 const size_t colon = spec.find(L':');
@@ -597,6 +605,36 @@ int main(int /*argc*/, char** /*argv*/) {
         const aii::ToolGroup& g = aii::tool_group(i);
         voiceCfg.tools.on[i] = settings.get_bool("tools", g.key, voiceCfg.tools.on[i]);
     }
+    // M3.11. The base model, read here for the same reason and in the same
+    // breath: `--model` is on the same command line and is settled at the same
+    // moment. The stored value is a *key* from the table in
+    // `core/model_choice.h`, not a model string, and this is the one place
+    // that translation happens.
+    //
+    // Two things this must never do. It must never put a string the CLI does
+    // not accept on the command line — a stale or mistyped key would start a
+    // child that fails every turn, with nothing on screen to say why — so an
+    // unknown key falls back to the CLI's own default and is logged as having
+    // done so. And it must not throw away an `AII_MODEL` naming something the
+    // picker cannot produce (a dated id, pinned by hand for a test): the
+    // environment override wins for that run, and the settings surface says
+    // which model is actually in force rather than showing the picker's row
+    // as though it were.
+    if (voiceCfg.model_override.empty()) {
+        const std::string key = settings.get_string("model", "name",
+                                                    aii::model_choice(aii::kModelChoiceDefault).key);
+        const int idx = aii::model_choice_for_key(key);
+        if (idx < 0)
+            log::warn("[model] settings.json names `{}`, which this build does not know - "
+                      "falling back to the CLI's default", key);
+        voiceCfg.model_override = aii::model_choice(idx < 0 ? aii::kModelChoiceDefault : idx).arg;
+    } else {
+        log::info("[model] AII_MODEL is set, so settings.json is not applied this run");
+    }
+    log::info("[model] conversational instance: {} ({})",
+              aii::model_label(voiceCfg.model_override),
+              voiceCfg.model_override.empty() ? std::string("no --model flag")
+                                              : "--model " + voiceCfg.model_override);
     log::info("[tools] conversational instance: {} ({})",
               aii::tool_summary(voiceCfg.tools),
               aii::tool_list(voiceCfg.tools).empty() ? std::string("--tools \"\"")
@@ -970,6 +1008,13 @@ int main(int /*argc*/, char** /*argv*/) {
     autoListenInForce = uiState.auto_listen;
     autoListenPending = uiState.auto_listen;
     log::info("[auto-listen] start listening: {}", uiState.auto_listen ? "on" : "off");
+    // M3.11. The same shape for the model. `model_choice_for_arg` is -1 when
+    // AII_MODEL named something off the list, and the picker then shows the
+    // default row while `modelInForce` holds the real value — which is exactly
+    // the disagreement the section's amber line exists to name.
+    uiState.settings_scroll_model = settingsScrollModel;
+    uiState.model = std::max(0, aii::model_choice_for_arg(voiceCfg.model_override));
+    modelInForce = voiceCfg.model_override;
     log::info("[listen-timeout] setting: {} ({:.1f} s configured, default {:.1f} s)",
               uiState.listen_timeout_on ? std::to_string(uiState.listen_timeout_sec) + " s"
                                         : std::string("never"),
@@ -1499,25 +1544,25 @@ int main(int /*argc*/, char** /*argv*/) {
         // M4.2: the strip is part of this block, not a follower of it. It is
         // docked here — in the same breath as the widget's own height and
         // avatar band, before this frame's input is read — because the widget
-        // is anchored to the bottom-right corner, so growing it moves its
-        // *top* edge: opening the chat lifts the panel 265 px and the strip
-        // has to arrive with it. A dock done anywhere later in the frame would
-        // leave the strip one present behind, which on a 265 px jump is not a
-        // subtlety — it is a visible slide.
+        // is anchored to the bottom-right corner and a strip docked later in
+        // the frame arrives one present behind whatever the widget just did.
         //
-        // Every frame, not only on a resize: the widget can also move because
-        // the work area changed or the watermark margin was recomputed, and
-        // SidebarWindow::dock() is a no-op when nothing has actually moved.
+        // Both strips are anchored to the widget's *bottom* edge and grow
+        // upward (the user's own rule: overflowing up is fine, overflowing
+        // down puts buttons underneath the widget). That edge is the one the
+        // widget never moves, so opening the chat — which lifts the panel
+        // 265 px — no longer moves either strip at all; what still moves them
+        // is the work area changing or the watermark margin being recomputed,
+        // which is why this runs every frame. dock() is a no-op when nothing
+        // has actually moved.
         if (hwnd) GetWindowRect(hwnd, &widgetRect);
         dockEdge = widgetRect.left;
         if (sidebar) {
-            sidebar->dock(widgetRect, band);
+            sidebar->dock(widgetRect);
             dockEdge = sidebar->left();
         }
         // M9: the worker strip is part of this same block, and for the same
-        // reason — it is docked against the panel's top edge, which moves 265 px
-        // when the chat opens, and a strip docked later in the frame arrives one
-        // present behind as a visible slide.
+        // reason.
         //
         // Sized and docked from the rows the *previous* frame's snapshot built
         // (see stripRows). The snapshot is taken well below this point, and
@@ -1527,7 +1572,7 @@ int main(int /*argc*/, char** /*argv*/) {
         // wrong, which is a half-drawn icon.
         if (workerStrip) {
             workerStrip->set_rows(stripRows);
-            workerStrip->dock(widgetRect, band, dockEdge);
+            workerStrip->dock(widgetRect, dockEdge);
             dockEdge = workerStrip->left();
         }
 
@@ -2373,6 +2418,9 @@ int main(int /*argc*/, char** /*argv*/) {
             // M1f.5. What this run started under, beside what the box says.
             avatarOptions.auto_listen_in_force = autoListenInForce;
             avatarOptions.voice_enabled = session != nullptr;
+            // M3.11. Same pair, same reason: `--model` is fixed at process
+            // start too, so the picker and this are drawn against each other.
+            avatarOptions.model_in_force = modelInForce;
             const aii::AvatarUiResult r =
                 aii::draw_avatar_ui(uiState, snap, avatarOptions, session != nullptr,
                                     session && session->mic_open(),
@@ -2449,6 +2497,12 @@ int main(int /*argc*/, char** /*argv*/) {
             // take one.
             for (int i = 0; i < aii::kToolGroupCount; ++i)
                 settings.set_bool("tools", aii::tool_group(i).key, uiState.tools.on[i]);
+            // M3.11. The picked model's *key*, under "model". A key and not a
+            // model string, so that a value written today still resolves
+            // through the table tomorrow when the alias behind it has moved on
+            // — and so that an entry dropped from the table degrades to the
+            // CLI's default at the next read rather than onto a command line.
+            settings.set_string("model", "name", aii::model_choice(uiState.model).key);
             // The scrim and the caption belong to the loader, not the panel:
             // the loading screen has to look the same whether or not there is
             // anything underneath it. The foreground draw list puts them over

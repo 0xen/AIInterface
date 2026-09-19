@@ -86,13 +86,26 @@ class SidebarWindow {
   // that geometry now, and a strip that arrived a frame after the widget grew
   // would be seen as a slide.
   //
-  // `widget` is the widget's window rect in screen pixels and `band` is the
-  // avatar band inside it, so the strip's top is the *panel's* top rather than
-  // the window's: the band is 260 px of transparent air and a strip floating
-  // beside it would not read as part of the widget. It also means showing or
-  // hiding the avatar does not move the strip at all — the widget grows
-  // upward from a fixed bottom edge, so the panel does not move either.
-  void dock(const RECT& widget, unsigned band);
+  // `widget` is the widget's window rect in screen pixels, and the strip is
+  // anchored to its **bottom** edge: the strip's bottom edge is the widget's
+  // bottom edge, and every button the registry gains extends the column
+  // *upward*.
+  //
+  // It used to hang from the panel's top (`widget.top + band`) and grow down,
+  // which is the defect the user reported: past a few buttons the column ran
+  // off the bottom of the widget and the last ones ended up underneath it.
+  // Bottom-anchoring is also the stabler of the two rules — the widget is
+  // anchored to the bottom-right corner of the work area, so `widget.bottom`
+  // is the one edge of it that never moves. Opening the chat, showing or
+  // hiding the avatar, and the band being reserved by mode all move the
+  // widget's *top* edge by hundreds of pixels and none of them move the strip
+  // at all. That is why `band` is no longer a parameter.
+  //
+  // Gaining or losing a button moves the top edge by exactly one button plus
+  // one gap; the new height and the new origin are derived from the same count
+  // and applied in one SetWindowPos, so the bottom edge does not move by a
+  // pixel while the column changes length.
+  void dock(const RECT& widget);
 
   // One frame: its own ImGui pass over the registry, then its own present.
   // Call it *before* the widget's own ImGui frame, so a tooltip picked up here

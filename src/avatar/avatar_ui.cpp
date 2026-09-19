@@ -900,6 +900,79 @@ void listen_timeout_section(AvatarUiState& state) {
   }
 }
 
+// ---- M3.11: which model the one you talk to runs on --------------------------
+//
+// The user asked for it in one line: "make a setting to choose what base model
+// you would like to use". Three decisions, all of them visible on screen
+// rather than only here.
+//
+// **A short list of aliases, not a text field and not dated ids.** The CLI
+// takes `opus`/`sonnet`/`haiku` as well as full model names. A pinned dated id
+// rots — the day it is retired the app starts a child that fails every turn —
+// and a free-text field lets a typo do the same thing today, with no way for
+// the window to say why until the first reply has already failed. So the
+// control is a picker over a table whose every entry completed a real turn on
+// this machine (`core/model_choice.h` names the probes), and the escape hatch
+// for anything else is `AII_MODEL`, which the section says is in force when it
+// is.
+//
+// **Default is a real entry, and it is the default.** Not passing `--model` at
+// all is what this app did before the setting existed and is still what it
+// does out of the box; it has to stay reachable, so it is the first row rather
+// than an empty selection.
+//
+// **A picker cannot reach the running Claude**, exactly as a tick box cannot
+// (M3.8). `--model` is fixed when the child process starts. So the change
+// lands at the next app start, and the moment the picker differs from what was
+// launched an amber line names the model Claude is actually holding. A setting
+// that appears to do nothing is the worst failure a setting has.
+//
+// **Workers are not in this.** They are separate `claude` processes with their
+// own grant and their own prompt (`WorkerPool::spawn` sets no model at all),
+// and the user said "the base model you would like to use", which is the thing
+// they talk to. One control that silently changed both would be one control
+// meaning two things. Said in a dim line rather than left to be discovered.
+void model_section(AvatarUiState& state, const AvatarOptions& options) {
+  if (state.settings_scroll_model) ImGui::SetScrollHereY(0.0f);
+  settings_heading("Model");
+  settings_row("Base model");
+  const ModelChoice& picked = model_choice(state.model);
+  if (ImGui::BeginCombo("##model_pick", picked.label)) {
+    for (int i = 0; i < kModelChoiceCount; ++i) {
+      const ModelChoice& c = model_choice(i);
+      const bool sel = i == state.model;
+      if (ImGui::Selectable(c.label, sel)) state.model = i;
+      if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", c.tip);
+      if (sel) ImGui::SetItemDefaultFocus();
+    }
+    ImGui::EndCombo();
+  }
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", picked.tip);
+
+  ImGui::PushStyleColor(ImGuiCol_Text, dim());
+  ImGui::TextWrapped("%s", kModelWorkersNote);
+  ImGui::PopStyleColor();
+
+  // The honest part, the same two cases the Tools section has. `picked.arg` is
+  // what the next launch would pass; `options.model_in_force` is what this one
+  // did. They differ the instant the picker moves — and permanently when
+  // AII_MODEL named something the picker cannot produce, which the amber line
+  // covers without a special case, because it names the value rather than
+  // assuming it is one of ours.
+  if (picked.arg != options.model_in_force) {
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("Saved, and it reaches Claude when you next start the app. Right now Claude "
+                       "is running on %s. The model is fixed when Claude starts and cannot be "
+                       "changed under a conversation that is already running.",
+                       model_label(options.model_in_force).c_str());
+    ImGui::PopStyleColor();
+  } else {
+    ImGui::PushStyleColor(ImGuiCol_Text, dim());
+    ImGui::TextWrapped("In force now: %s.", model_label(options.model_in_force).c_str());
+    ImGui::PopStyleColor();
+  }
+}
+
 // ---- M3.8: what the one you talk to is allowed to do ------------------------
 //
 // The user asked for this section in so many words: "create a subsection
@@ -1174,6 +1247,11 @@ void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   // M3.8. Above Timing rather than below it: this is the section that decides
   // what Claude can do to the user's machine, and it does not belong under a
   // heading about endpointing.
+  // M3.11. Directly above Tools: both are facts about the `claude` child that
+  // are fixed when it starts, both carry the same "at the next start" line,
+  // and reading them together is how "what am I talking to, and what may it
+  // do" is one question rather than two.
+  model_section(state, options);
   tools_section(state, options);
 
   settings_heading("Voice");
