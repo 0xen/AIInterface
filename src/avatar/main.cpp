@@ -63,6 +63,14 @@
 //                 auto-listen control's own fields, exactly as a hand on it
 //                 would; V of 0 is "never". How "a change reaches a
 //                 microphone that is already latched" is measured.
+//     --model-at S:key  at S seconds, move the Model picker to that row, and
+//     --tool-at S:key:0|1  at S seconds, tick that tool group on or off —
+//                 both written into the panel's own fields, as a hand would.
+//                 M3.12: a change to either restarts the `claude` child at
+//                 once and throws the conversation away, so these are how the
+//                 restart, the settle window and the wait for a reply in
+//                 flight are driven from outside. AII_REPLY_LOG=1 logs what
+//                 came back, which is what such a run is read against.
 //
 //   SPACE / Talk    click (or tap) toggles the mic: conversation mode. While
 //                   the mic is on, a pause in speech sends that utterance and
@@ -351,6 +359,50 @@ int main(int /*argc*/, char** /*argv*/) {
     // `--model` argument the child was actually launched with ("" = no flag).
     bool settingsScrollModel = false;
     std::string modelInForce;
+    // ---- M3.12: a model or tool change restarts the child, and when --------
+    //
+    // (user, 19 Sep 2026: "restart immediately, lose context".)
+    //
+    // The *doing* is VoiceSession::apply_llm_settings(); the deciding is here,
+    // because only the frame loop has the clock, the panel and the turn state
+    // in one place. Three rules, all of them visible in the log:
+    //
+    //   1. **Armed by a change to the control, not by a disagreement.** A run
+    //      started with AII_MODEL naming a dated id comes up with the picker
+    //      already differing from what is in force, permanently and through no
+    //      gesture of the user's. Arming on the difference would restart the
+    //      child one second after launch, on a choice nobody made. So what is
+    //      watched is the panel moving.
+    //   2. **It settles before it fires.** A hand running down the three tick
+    //      boxes is three changes in half a second and must be one restart,
+    //      not three: the timer restarts on every change and the restart goes
+    //      when it has been still for `kLlmSettleSeconds`. Closing the
+    //      settings surface fires it at once — the gesture is finished by
+    //      definition — which is also what makes a change arriving from
+    //      anywhere but the open surface prompt rather than delayed.
+    //   3. **A reply in flight is finished first.** Reset interrupts one
+    //      because interrupting is what Reset means. Nudging a tick box does
+    //      not mean "cut this off half-spoken", and the wait costs seconds
+    //      against a conversation that is about to end anyway. The section
+    //      says it is waiting, so nothing looks stuck.
+    //
+    // `llmPanelModel`/`llmPanelTools` are the panel's values as of the last
+    // frame that looked, and `llmSettleFrom` is negative when nothing is
+    // armed.
+    std::string llmPanelModel;
+    aii::ToolPolicy llmPanelTools;
+    double llmSettleFrom = -1.0;
+    // How still the controls have to be. Long enough for a second tick box,
+    // short enough that "immediately" is still the honest word for it.
+    constexpr double kLlmSettleSeconds = 0.75;
+    // The harness: `--model-at S:key` and `--tool-at S:key:0|1` write the
+    // panel's own fields at S seconds in, which is exactly what a hand on the
+    // control writes and nothing more. There is no other way to drive this
+    // from outside — the picker is a combo inside a scrolling region — and the
+    // claim under test is precisely that the child that comes up afterwards is
+    // a different child running on the new flags.
+    std::vector<std::pair<double, std::string>> modelAt;
+    std::vector<std::pair<double, std::string>> toolAt;
     // --inspector: open the prompt inspector on the first frame, as if the
     // sidebar button had been clicked. Nothing else about it differs.
     bool inspectorOpen = false;
@@ -526,6 +578,24 @@ int main(int /*argc*/, char** /*argv*/) {
             // be set a few seconds after the engines are up.
             else if (a == L"--reset-at" && i + 1 < wargc)
                 resetAt = _wtof(wargv[++i]);
+            // M3.12's harness. `--model-at 20:sonnet` and
+            // `--tool-at 20:web:0` move the panel's own control at 20 seconds
+            // in; everything after that — the settle, the wait for a reply,
+            // the restart, the file — is the ordinary path.
+            else if (a == L"--model-at" && i + 1 < wargc) {
+                const std::wstring spec = wargv[++i];
+                const size_t colon = spec.find(L':');
+                if (colon != std::wstring::npos)
+                    modelAt.emplace_back(_wtof(spec.substr(0, colon).c_str()),
+                                         utf8FromWide(spec.substr(colon + 1).c_str()));
+            }
+            else if (a == L"--tool-at" && i + 1 < wargc) {
+                const std::wstring spec = wargv[++i];
+                const size_t colon = spec.find(L':');
+                if (colon != std::wstring::npos)
+                    toolAt.emplace_back(_wtof(spec.substr(0, colon).c_str()),
+                                        utf8FromWide(spec.substr(colon + 1).c_str()));
+            }
             else if (a == L"--message" && i + 1 < wargc)
                 messageArg = utf8FromWide(wargv[++i]);
         }
@@ -1015,6 +1085,13 @@ int main(int /*argc*/, char** /*argv*/) {
     uiState.settings_scroll_model = settingsScrollModel;
     uiState.model = std::max(0, aii::model_choice_for_arg(voiceCfg.model_override));
     modelInForce = voiceCfg.model_override;
+    // M3.12. The panel as it stands before anyone has touched it. Seeded from
+    // the panel rather than from `voiceCfg`, because the case that matters is
+    // exactly the one where they differ (AII_MODEL naming something off the
+    // table): nothing was changed, so nothing is armed, and the first restart
+    // this run does has to be one the user asked for.
+    llmPanelModel = aii::model_choice(uiState.model).arg;
+    llmPanelTools = uiState.tools;
     log::info("[listen-timeout] setting: {} ({:.1f} s configured, default {:.1f} s)",
               uiState.listen_timeout_on ? std::to_string(uiState.listen_timeout_sec) + " s"
                                         : std::string("never"),
@@ -1665,8 +1742,41 @@ int main(int /*argc*/, char** /*argv*/) {
         }
         if (width == 0 || height == 0) continue;
 
+        // M3.12's harness, beside M1f.2's and for the same reason: written
+        // into the panel's own fields, where a hand would write them.
+        for (auto it = modelAt.begin(); it != modelAt.end();) {
+            if (t < it->first) { ++it; continue; }
+            const int id = aii::model_choice_for_key(it->second);
+            if (id < 0) log::warn("[harness] no such model key: {}", it->second);
+            else {
+                uiState.model = id;
+                log::info("[harness] model picker set to {} at t={:.1f}s",
+                          aii::model_choice(id).label, t);
+            }
+            it = modelAt.erase(it);
+        }
+        for (auto it = toolAt.begin(); it != toolAt.end();) {
+            if (t < it->first) { ++it; continue; }
+            const size_t colon = it->second.find(':');
+            const std::string key = it->second.substr(0, colon);
+            const bool on = colon != std::string::npos && it->second.substr(colon + 1) != "0";
+            int group = -1;
+            for (int i = 0; i < aii::kToolGroupCount; ++i)
+                if (key == aii::tool_group(i).key) group = i;
+            if (group < 0) log::warn("[harness] no such tool group: {}", key);
+            else {
+                uiState.tools.on[group] = on;
+                log::info("[harness] tool '{}' ticked {} at t={:.1f}s", key, on ? "on" : "off", t);
+            }
+            it = toolAt.erase(it);
+        }
+
         // ---- voice loop tick ----
         aii::VoiceSession::Snapshot snap;
+        // M3.12. What the settings sections are told about the restart this
+        // frame; see the declarations above for what decides them.
+        bool llmRestartPending = false;
+        bool llmRestartWaitingTurn = false;
         if (session) {
             // M2c.2's harness, and it has to be **before** update(). The thing
             // under test is what happens when a user turn starts while a
@@ -1683,6 +1793,52 @@ int main(int /*argc*/, char** /*argv*/) {
             }
             session->update();
             snap = session->snapshot();
+            // ---- M3.12: take a changed model or tool grant up now ----
+            //
+            // What is in force is the session's answer, not a variable kept in
+            // step here: it moves when the new child is up, so the surface
+            // never claims a model is running that nothing is running on.
+            modelInForce = snap.model_in_force;
+            toolsInForce = snap.tools_in_force;
+            const std::string modelWanted = aii::model_choice(uiState.model).arg;
+            // The `api` backend has no tools at all — build_llm composes
+            // against an empty policy there whatever the boxes say — so a box
+            // ticked on that backend is not a reason to restart anything: the
+            // conversation would be thrown away to change nothing. The section
+            // already says the row does not apply.
+            const aii::ToolPolicy toolsWanted =
+                voiceCfg.backend == "api" ? toolsInForce : uiState.tools;
+            if (modelWanted != llmPanelModel || toolsWanted != llmPanelTools) {
+                llmPanelModel = modelWanted;
+                llmPanelTools = toolsWanted;
+                llmSettleFrom = t;  // rule 2: every change restarts the timer
+                log::info("[restart] a setting moved at t={:.1f}s (model {}, tools {})", t,
+                          aii::model_label(modelWanted), aii::tool_summary(toolsWanted));
+            }
+            // Moved back to what is already running — a box ticked and
+            // unticked again — so there is nothing to apply and nothing to
+            // warn about. This is also how the armed flag is cleared after a
+            // restart has landed.
+            if (modelWanted == modelInForce && toolsWanted == toolsInForce) llmSettleFrom = -1.0;
+            // Not while the engines are still coming up, and not after they
+            // have failed: there is no child to replace in either case. The
+            // change stays armed and goes when there is one — or never, which
+            // is the same answer the rest of the window is giving.
+            if (llmSettleFrom >= 0.0 && snap.state != aii::VoiceSession::State::Loading &&
+                snap.state != aii::VoiceSession::State::Failed) {
+                const bool inFlight = snap.state == aii::VoiceSession::State::Thinking ||
+                                      snap.state == aii::VoiceSession::State::Speaking;
+                llmRestartPending = true;
+                llmRestartWaitingTurn = inFlight;  // rule 3
+                // Closing the surface is the gesture finishing, so it does not
+                // wait out the rest of the settle window.
+                const bool settled = !uiState.settings_open || t - llmSettleFrom >= kLlmSettleSeconds;
+                if (settled && !inFlight && !session->resetting()) {
+                    if (session->apply_llm_settings(toolsWanted, modelWanted))
+                        log::info("[restart] applying at t={:.1f}s: model {}, tools {}", t,
+                                  aii::model_label(modelWanted), aii::tool_summary(toolsWanted));
+                }
+            }
             // The reset harness, before the next say is considered: it fires
             // on the first Idle frame after the nth turn has finished, so the
             // turn after it is the first one the new child ever sees.
@@ -2421,6 +2577,15 @@ int main(int /*argc*/, char** /*argv*/) {
             // surface's job is to show the gap and name the restart.
             avatarOptions.tools_in_force = toolsInForce;
             avatarOptions.tools_supported = voiceCfg.backend != "api";
+            // M3.12. The three states of the restart a change now causes, and
+            // whether there is a child here to restart at all: a --no-voice
+            // run, a session still loading and one that has failed all have to
+            // read as "at the next start" rather than as a promise.
+            avatarOptions.llm_restart_live = session != nullptr && !loading &&
+                                             snap.state != aii::VoiceSession::State::Failed;
+            avatarOptions.llm_restart_pending = llmRestartPending;
+            avatarOptions.llm_restart_waiting_turn = llmRestartWaitingTurn;
+            avatarOptions.llm_restart_running = snap.resetting;
             // M1f.5. What this run started under, beside what the box says.
             avatarOptions.auto_listen_in_force = autoListenInForce;
             avatarOptions.voice_enabled = session != nullptr;

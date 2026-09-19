@@ -268,7 +268,9 @@ struct AvatarOptions {
   // will.
   //
   // Seeded once, before the first frame, from the same value `build_llm` was
-  // given. Nothing writes it afterwards.
+  // given, and rewritten from the session's snapshot every frame afterwards:
+  // since M3.12 a change to a box restarts the child, so this moves when the
+  // new child is up and not before.
   ToolPolicy tools_in_force;
   // False on the `api` backend, which is not the Claude Code CLI and has no
   // tools of any kind. The toggles are then inert and say so rather than
@@ -302,8 +304,40 @@ struct AvatarOptions {
   // stale key read out of `settings.json` — and say what it is.
   //
   // Seeded once, before the first frame, from the same value `build_llm` was
-  // given. Nothing writes it afterwards.
+  // given, and rewritten from the session's snapshot every frame afterwards:
+  // since M3.12 a change to the picker restarts the child, so this moves when
+  // the new child is up and not before.
   std::string model_in_force;
+
+  // ---- M3.12: the restart a model or tool change now costs -----------------
+  //
+  // (user, 19 Sep 2026, asked to choose between leaving the change for the
+  // next start, restarting and losing the conversation, and restarting with
+  // the conversation replayed: "restart immediately, lose context".)
+  //
+  // Four facts the Model and Tools sections need and cannot work out for
+  // themselves, because the decision of *when* to restart is main.cpp's (it
+  // owns the clock, the session and the turn state) and only the sections can
+  // say it on screen.
+  //
+  // `llm_restart_live` is "there is a `claude` child here that could be
+  // restarted at all" — false on a --no-voice run and before the engines are
+  // up, where the setting really does have to wait for the next start and the
+  // section must not promise otherwise.
+  bool llm_restart_live = false;
+  // A change has been seen and a restart is coming: the settle window, which
+  // is what makes a hand running down three tick boxes one restart and not
+  // three.
+  bool llm_restart_pending = false;
+  // ... and it is waiting for a reply that is in flight. Interrupting one is
+  // what Reset means and is not what nudging a tick box means, so the restart
+  // waits — and the line says so rather than leaving a pending change looking
+  // stuck.
+  bool llm_restart_waiting_turn = false;
+  // The second or so in which the old child is going and the new one is
+  // starting: `Snapshot::resetting`, passed through so the sections do not
+  // have to be handed the whole snapshot.
+  bool llm_restart_running = false;
 };
 
 struct AvatarUiState {
