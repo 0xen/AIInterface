@@ -116,6 +116,7 @@
 #include "script_host.h"
 #include "core/button_registry.h"
 #include "core/config.h"
+#include "core/cwd_policy.h"
 #include "core/model_choice.h"
 #include "core/schedule.h"
 #include "core/worker_pool.h"
@@ -274,6 +275,18 @@ void colourToFloats(std::uint32_t c, float* f) {
 
 int main(int /*argc*/, char** /*argv*/) {
     SetConsoleOutputCP(CP_UTF8);
+    // **The folder every worker falls back to**, captured here and nowhere
+    // else: this is the directory the user launched the app from, which is the
+    // directory the conversational instance is told it is in, and after the
+    // user's decision ("use same folder as primary agent") it is where a worker
+    // goes when no folder was named. Read once at startup rather than per spawn
+    // because `current_path()` is process state and anything may move it; the
+    // answer must not depend on what happened since. See core/cwd_policy.h.
+    {
+        std::error_code ec;
+        const std::filesystem::path here = std::filesystem::current_path(ec);
+        if (!ec) aii::set_app_dir(here.string());
+    }
     bool opaque = false;
     bool vulkan = false;
     bool voiceEnabled = true;

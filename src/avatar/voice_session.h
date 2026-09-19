@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -446,6 +447,10 @@ class VoiceSession {
   // schedules anything sends byte-for-byte what it sent before this existed.
   // Any thread; called from the turn thread.
   std::string pending_context() const;
+  // Records one turn's *input* text as evidence that a folder was named, and
+  // returns the whole window joined up. See `folder_evidence_`.
+  void note_folder_evidence(const std::string& text);
+  std::string folder_evidence() const;
   // M2b.4. The text handed to Claude when a scheduled worker finishes.
   static std::string scheduled_report_prompt(WorkerPool::State state, const std::string& shown);
   // M2c.1. The text handed to Claude when one or more *live* workers finish.
@@ -667,6 +672,18 @@ class VoiceSession {
   // injected turn describing it, is the app talking about itself. Checked and
   // erased by the report callback.
   std::vector<std::string> silenced_workers_;
+  // The folders this conversation can be said to have named, as raw text: what
+  // the user typed or dictated, and what the *app* composed and handed to the
+  // model (a worker's report, a pending list). It is the evidence
+  // `resolve_worker_cwd()` weighs a `cwd=` against before a worker is started
+  // at bypassPermissions in it -- see core/cwd_policy.h.
+  //
+  // Only the **input** side of a turn is recorded, never Claude's reply. That
+  // is the whole guarantee: a folder the model invented and then said out loud
+  // must not become the corroboration for the same folder next turn. Written
+  // on the turn thread, read on the turn thread, and guarded anyway because
+  // the panel may come for it later.
+  std::deque<std::string> folder_evidence_;
   std::vector<float> chunk_;
 };
 

@@ -10,6 +10,7 @@
 #include "rend/core/log.h"
 
 #include "core/app_strings.h"
+#include "core/cwd_policy.h"
 #include "core/language.h"
 #include "core/schedule.h"
 #include "core/sentence_splitter.h"
@@ -1263,6 +1264,12 @@ void VoiceSession::start_injected_turn(std::string sent, std::string fallback) {
 
 void VoiceSession::run_turn(std::string text, bool is_injected, std::string fallback,
                             std::vector<PendingTurn> rider) {
+  // Everything that goes *into* a turn is evidence that a folder was named;
+  // nothing that comes out of one ever is. `text` here is either what the user
+  // said or what the app composed on their behalf (a worker's own report, a
+  // pending list) -- never Claude's reply, which is where an invented folder
+  // would otherwise get to corroborate itself. See folder_evidence_.
+  note_folder_evidence(text);
   speech_->mark_new_reply();
   // The one place a reply becomes sound, and therefore the only place mute can
   // honestly be applied. Clearing the queue alone (what silence() used to do)
@@ -1769,6 +1776,27 @@ bool VoiceSession::take_silenced_worker(const std::string& name) {
 // running, and reports that are finished but not yet spoken. The user does not
 // experience those as three mechanisms. They experience one promise, and it is
 // not kept until they hear it.
+// The evidence window behind `resolve_worker_cwd()`. Sixteen turns because a
+// folder is often named once, early ("we're in the Renderer checkout today")
+// and spawned into several turns later; and capped in bytes as well, because a
+// pasted log is a turn too and there is no reason to carry a megabyte of it.
+void VoiceSession::note_folder_evidence(const std::string& text) {
+  if (text.empty()) return;
+  std::lock_guard<std::mutex> l(mutex_);
+  folder_evidence_.push_back(text.size() > 4096 ? text.substr(0, 4096) : text);
+  while (folder_evidence_.size() > 16) folder_evidence_.pop_front();
+}
+
+std::string VoiceSession::folder_evidence() const {
+  std::lock_guard<std::mutex> l(mutex_);
+  std::string out;
+  for (const std::string& t : folder_evidence_) {
+    out += t;
+    out += '\n';
+  }
+  return out;
+}
+
 std::string VoiceSession::pending_context() const {
   const std::vector<Schedule> book = ScheduleBook::instance().list();
   std::vector<ScheduledWorker> running;
@@ -2232,7 +2260,7 @@ namespace {
 // "schedule refused".
 //
 // Returns an empty string on success, or the sentence to say.
-std::string create_schedule(const Command& c, std::string* detail) {
+std::string create_schedule(const Command& c, const std::string& evidence, std::string* detail) {
   // M2b.2. The mapping itself now lives in `build_schedule()`, beside the book,
   // because the bus is a second door onto the same policy and the shape-is-the-
   // grade rule is the part that must not be written twice. What stays here is
@@ -2242,7 +2270,15 @@ std::string create_schedule(const Command& c, std::string* detail) {
   req.in = c.in;
   req.say = c.say;
   req.task = c.task;
-  req.cwd = c.cwd;
+  // The same gate as `spawn`, and it matters more here, not less: a deferred
+  // worker starts minutes later at bypassPermissions, possibly with nobody at
+  // the desk to notice which folder it landed in. A `cwd=` the conversation
+  // never named is dropped and the app's own folder used instead; the log line
+  // below carries the reason. See core/cwd_policy.h.
+  const CwdDecision where = resolve_worker_cwd(c.cwd, evidence);
+  if (!c.task.empty() && !where.honoured)
+    rend::log::info("[schedule] {}", where.why);
+  req.cwd = c.task.empty() ? std::string() : where.dir;
   req.name = c.name;
   req.label = c.label;
   req.grade = c.grade;
@@ -2281,6 +2317,10 @@ void VoiceSession::run_commands(const std::string& reply_text) {
   // "cancel everything" is one request with one answer rather than one
   // sentence per item. Applied on the frame loop; see apply_cancels().
   std::vector<std::uint64_t> cancels;
+  // What this conversation can be said to have named a folder in. Taken once
+  // per reply rather than per command, because a block may hold several spawns
+  // and they are all answering the same turn.
+  const std::string evidence = folder_evidence();
   for (const Command& c : parse_commands(reply_text)) {
     if (c.verb == "cancel") {
       // The id comes from the list this app gave the model a moment ago, so a
@@ -2319,7 +2359,7 @@ void VoiceSession::run_commands(const std::string& reply_text) {
     // worker only wants one when it fires, which is M2b.4's problem.
     if (c.verb == "schedule") {
       std::string detail;
-      const std::string refusal = create_schedule(c, &detail);
+      const std::string refusal = create_schedule(c, evidence, &detail);
       log("[schedule] " + std::string(refusal.empty() ? "" : "refused: ") + detail);
       if (!refusal.empty()) announce(refusal);
       continue;
@@ -2327,8 +2367,21 @@ void VoiceSession::run_commands(const std::string& reply_text) {
     if (!workers_) continue;
     std::string err;
     if (c.verb == "spawn") {
-      if (workers_->spawn(c.name, c.cwd, c.task, &err)) {
-        log("[worker] spawned " + c.name + " in " + (c.cwd.empty()? std::string("(app dir)") : c.cwd));
+      // **The folder is the app's decision, not the model's** (core/cwd_policy.h).
+      // A worker starts at bypassPermissions, so "which directory" is the one
+      // field in this block that can do real damage, and it was also the one
+      // field the model was measured inventing -- three spawns in ten landed in
+      // a `Documents` folder nobody had mentioned (M3.8). Three prompt wordings
+      // failed to move that, so it is settled here instead: an absent or
+      // uncorroborated `cwd=` becomes the folder the app itself was launched
+      // from, which is the folder the user is looking at and the same one the
+      // instance they are talking to is in. Not announced -- like `button` and
+      // `load`, this is the model's housekeeping and the user asked for a
+      // worker, not a report about where it went. The log has the reason.
+      const CwdDecision where = resolve_worker_cwd(c.cwd, evidence);
+      if (!where.honoured) log("[worker] " + where.why);
+      if (workers_->spawn(c.name, where.dir, c.task, &err)) {
+        log("[worker] spawned " + c.name + " in " + where.dir);
       } else {
         // `err` is a client error string ("CreateProcess failed (2): claude
         // --flags ...") and is spoken, so it goes through the same mapping the

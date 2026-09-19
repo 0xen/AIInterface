@@ -34,6 +34,7 @@ add_library(aii_core STATIC
   src/core/app_strings.cpp
   src/core/button_registry.cpp
   src/core/config.cpp
+  src/core/cwd_policy.cpp
   src/core/engines.cpp
   src/core/language.cpp
   src/core/model_choice.cpp
@@ -108,12 +109,24 @@ if(AII_BUILD_TESTS)
   # text_util.cpp comes along because schedule.cpp now clips its strings with the
   # shared clip_utf8; it is standard-library-only too, so the rule above holds.
   add_executable(schedule_test tests/schedule_test.cpp src/core/schedule.cpp
+                               src/core/cwd_policy.cpp
                                src/core/text_util.cpp)
   target_include_directories(schedule_test PRIVATE src)
   target_link_libraries(schedule_test PRIVATE winmm)
   target_compile_definitions(schedule_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   if(MSVC)
     target_compile_options(schedule_test PRIVATE /utf-8 /W4)
+  endif()
+
+  # ---- cwd_policy_test: where a worker lands, and who decides it ----
+  # Same rule as schedule_test: cwd_policy.cpp is standard-library-only, so the
+  # one decision that can point a bypassPermissions child at a directory is
+  # testable without an engine DLL anywhere near it.
+  add_executable(cwd_policy_test tests/cwd_policy_test.cpp src/core/cwd_policy.cpp)
+  target_include_directories(cwd_policy_test PRIVATE src)
+  target_compile_definitions(cwd_policy_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(cwd_policy_test PRIVATE /utf-8 /W4)
   endif()
 
   # ---- clip_utf8_test: the shared byte cap that must not split a character ----

@@ -5,6 +5,7 @@
 #include "core/app_strings.h"
 #include "core/button_registry.h"
 #include "core/config.h"
+#include "core/cwd_policy.h"
 #include "core/text_util.h"
 
 namespace aii {
@@ -91,14 +92,20 @@ bool WorkerPool::spawn(const std::string& name, const std::string& cwd, const st
   auto w = std::make_unique<Worker>();
   w->name = name;
   w->task = task;
-  w->cwd = cwd;
+  // The last stop on the way to a bypassPermissions process: whatever the
+  // callers did or did not decide, a worker never starts in "wherever the
+  // child happens to inherit". An empty cwd becomes the app's own folder here,
+  // explicitly, so the panel row and the log name a real directory instead of
+  // a blank -- see core/cwd_policy.h for why this is the app's decision and
+  // not the model's.
+  w->cwd = cwd.empty() ? app_dir() : cwd;
 
   ClaudeCodeClient::Options o;
   o.exe = exe_;
   o.system_prompt = kWorkerPrompt;
   o.effort = "medium";
   o.tools = "default";  // every built-in tool; the conversational instance gets two
-  o.cwd = cwd;
+  o.cwd = w->cwd;
   o.bypass_permissions = bypass_;  // nothing here can answer a permission prompt
   // Deliberately NOT suppress_cli_context (M3.5): a worker is a coding agent
   // running inside a repo the user pointed it at, so that repo's `CLAUDE.md`,
