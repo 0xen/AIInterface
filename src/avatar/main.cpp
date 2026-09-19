@@ -2048,7 +2048,13 @@ int main(int /*argc*/, char** /*argv*/) {
         // outside the `controllerOwnsAvatar` test's block but inside its
         // condition — a run pinned to `--clip` has no policy to ask.
         if (appeared.summoned && controllerOwnsAvatar) {
-            controller.appear();
+            // `engagement.mic_on` and not `snap`: the snapshot was taken at the
+            // top of this frame and the auto-listen latch above opened the
+            // microphone after it, so on the boot path the snapshot still says
+            // Idle while the thing that summoned the avatar is the microphone.
+            // The entrance has to know, or it pre-empts itself on the next
+            // frame -- see AvatarController::appear().
+            controller.appear(engagement.mic_on);
             log::info("avatar: summoned at {:.2f}s (pop {:.0f} ms)", t,
                       aii::AvatarAppearance::kPopSeconds * 1000.0f);
         }

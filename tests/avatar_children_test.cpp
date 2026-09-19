@@ -204,6 +204,41 @@ int main(int argc, char** argv) {
           "a worker already in flight at startup sends nobody: " + r.trail());
   }
 
+  // ---- the entrance the microphone summoned (19 Sep 2026) ------------------
+  //
+  // Not a child, but the same object and the same kind of ordering window, and
+  // it is cheaper to assert here than to boot the app. M1f.5 latches the
+  // microphone *below* the frame's snapshot, so the frame that summons the
+  // avatar hands the controller a snapshot that still says Idle. The entrance
+  // must not treat the next frame's Listening -- its own cause, one frame late
+  // -- as an interruption.
+  {
+    const auto entrance_run = [&def](bool mic_open_at_summon) {
+      aii::AvatarController ctl;
+      ctl.note_definition(def);
+      aii::VoiceSession::Snapshot snap;
+      snap.state = aii::VoiceSession::State::Idle;
+      snap.usage_stats.ctx = -1.0;
+      ctl.update(snap, 1.0f / 60.0f);  // the seeding frame
+      ctl.appear(mic_open_at_summon);
+      // The summon frame: the snapshot is the stale one, as it is in main().
+      ctl.update(snap, 1.0f / 60.0f);
+      // Every frame after it, the microphone is open and the session says so.
+      snap.state = aii::VoiceSession::State::Listening;
+      int wake_frames = 0;
+      for (int i = 0; i < 60; ++i) {
+        if (ctl.update(snap, 1.0f / 60.0f).clip == "wake") ++wake_frames;
+      }
+      return wake_frames;
+    };
+    check(entrance_run(true) == 60,
+          "an entrance the microphone summoned plays through the microphone (" +
+              std::to_string(entrance_run(true)) + "/60 frames)");
+    check(entrance_run(false) <= 2,
+          "an entrance something else summoned still yields to the microphone (" +
+              std::to_string(entrance_run(false)) + "/60 frames)");
+  }
+
   std::printf("\n%s\n", failures ? "FAILURES" : "all good");
   return failures ? 1 : 0;
 }
