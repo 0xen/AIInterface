@@ -631,6 +631,20 @@ struct AvatarUiResult {
 // microphone button needs both to tell its five faces apart — a hold and a
 // latch look identical from the snapshot, and a SPACE hold never touches the
 // button at all.
+// M2.9. Why `text` cannot be sent right now, or null if it can — as one short
+// phrase, in the words the message field puts under itself.
+//
+// It is here, and not file-static in avatar_ui.cpp where it began, because the
+// field is no longer the only door into `VoiceSession::say()`. The bus's
+// `session.say` verb is the same act, and `say()` refuses all of these in
+// silence — it returns without a sound while the engines are down or the
+// microphone is open, and treats a send mid-reply as a barge-in — so the
+// caller is what knows, and two callers with two copies of that switch would
+// be two apps' worth of answers to "why did nothing happen". The same reason
+// `build_schedule()` moved into core for M2b.2.
+const char* send_refusal(const VoiceSession::Snapshot& snap, bool voice_enabled,
+                         const char* text);
+
 AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot& snap,
                               const AvatarOptions& options, bool voice_enabled, bool mic_on,
                               bool mic_hold, std::uint32_t width, std::uint32_t top, bool submit);

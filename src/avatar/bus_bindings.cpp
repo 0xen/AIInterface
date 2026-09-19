@@ -8,7 +8,10 @@
 #include <system_error>
 
 #include "core/button_registry.h"
+#include "core/language.h"
+#include "core/model_choice.h"
 #include "core/schedule.h"
+#include "core/tool_policy.h"
 #include "core/worker_pool.h"
 
 namespace aii {
@@ -71,6 +74,10 @@ void BusBindings::install(Context ctx) {
   // M2b.2. Scheduling without the conversational instance: the family the
   // ```aii``` verb's `grade=` was parsed and then withheld for.
   bus.add_family("schedule", [this](const BusMessage& m, std::string* e) { on_schedule(m, e); });
+  // M2.9. The transport row and the settings surface — every control the user
+  // can work with the pointer, worked by the same calls the controls make.
+  bus.add_family("session", [this](const BusMessage& m, std::string* e) { on_session(m, e); });
+  bus.add_family("settings", [this](const BusMessage& m, std::string* e) { on_settings(m, e); });
 }
 
 float BusBindings::lease_from(const BusMessage& m) const {
@@ -409,6 +416,257 @@ void BusBindings::on_schedule(const BusMessage& m, std::string* error) {
   if (error) *error = "unknown verb";
 }
 
+// ----------------------------------------------------------------- session
+
+// M2.9. The transport row from a script.
+//
+// Every verb here is the call the control itself makes, and that is the whole
+// design. `mic` is `toggle_mic()`, which the header calls the one path into
+// the latch — the microphone button's short click, the SPACE click and
+// `--auto-listen` all go through it. `mute` writes `AvatarUiState::muted`,
+// which is what the button and the S key write; main.cpp pushes it into the
+// session later in this same frame and mirrors it into `settings.json`, so a
+// scripted mute is remembered exactly as a clicked one is. `stop` and `reset`
+// are the session's own, and `say` is the message field's.
+//
+// The refusals are the panel's refusals, not new ones. `send_refusal()` was
+// file-static in avatar_ui.cpp until this family existed; it is in the header
+// now so the field and this verb answer "why did nothing happen" with the same
+// sentence. Reset's two guards are the session's — `resetting` and
+// `resettable` — so a script can no more start two resets at once, or reset an
+// empty conversation, than the button can.
+void BusBindings::on_session(const BusMessage& m, std::string* error) {
+  AppBus& bus = AppBus::instance();
+  const std::string echo = m.str("echo");
+  const auto refuse = [&](const std::string& reason) {
+    // A refused control is logged and published, never spoken. The toolbar
+    // family's rule and the schedule family's: the app does not announce
+    // another program's mistake in the user's ear.
+    if (error) *error = reason;
+    bus.publish(BusLine("session.refused")
+                    .str("verb", m.verb)
+                    .str("reason", reason)
+                    .str("echo", echo)
+                    .done());
+  };
+
+  if (m.verb == "mute") {
+    if (!ctx_.ui) return refuse("no panel in this run");
+    // `on` omitted means flip it, which is what the button does. Given, it is
+    // a level and idempotent — the form a script should be using.
+    ctx_.ui->muted = m.has("on") ? m.flag("on", true) : !ctx_.ui->muted;
+    facts_now_ = true;
+    return;
+  }
+
+  if (m.verb == "mic") {
+    if (!ctx_.session) return refuse("no voice in this run");
+    const bool want = m.has("on") ? m.flag("on", true) : !ctx_.session->mic_open();
+    if (want != ctx_.session->mic_open()) ctx_.session->toggle_mic();
+    facts_now_ = true;
+    // `set_mic_open()` declines in silence while a reset is running and before
+    // the engines are up. Silence is right for a button that is drawn disabled
+    // at the same moment; a script cannot see the button, so it is told.
+    if (want && !ctx_.session->mic_open()) return refuse("the microphone cannot open yet");
+    return;
+  }
+
+  if (m.verb == "stop") {
+    if (!ctx_.session) return refuse("no voice in this run");
+    ctx_.session->stop();
+    facts_now_ = true;  // stop drops the latch, and that is a fact worth saying
+    bus.publish(BusLine("session.stopped").str("echo", echo).done());
+    return;
+  }
+
+  if (m.verb == "reset") {
+    if (!ctx_.session) return refuse("no voice in this run");
+    const VoiceSession::Snapshot snap = ctx_.session->snapshot();
+    if (snap.resetting) return refuse("a reset is already running");
+    if (!snap.resettable) return refuse("there is nothing to reset");
+    ctx_.session->reset();
+    facts_now_ = true;
+    // `ok` is "accepted", not "finished": reset() returns straight away and
+    // does the teardown on its own thread. A script waits for `session.state`
+    // to come back, the same way the window does.
+    bus.publish(BusLine("session.resetting").flag("ok", true).str("echo", echo).done());
+    return;
+  }
+
+  if (m.verb == "say") {
+    if (!ctx_.session) return refuse("no voice this run (--no-voice)");
+    const std::string text = m.str("text");
+    const VoiceSession::Snapshot snap = ctx_.session->snapshot();
+    if (const char* why = send_refusal(snap, true, text.c_str())) return refuse(why);
+    ctx_.session->say(text);
+    bus.publish(BusLine("session.said").flag("ok", true).str("text", text).str("echo", echo).done());
+    return;
+  }
+
+  if (m.verb == "get") {
+    facts_now_ = true;  // and the two levels, so `get` answers in full
+    BusLine line("session.info");
+    if (ctx_.session) {
+      const VoiceSession::Snapshot snap = ctx_.session->snapshot();
+      line.str("state", VoiceSession::state_name(snap.state))
+          .flag("mic", ctx_.session->mic_open())
+          .flag("resetting", snap.resetting)
+          .flag("resettable", snap.resettable)
+          .str("status", snap.status);
+    } else {
+      line.str("state", "none").flag("mic", false);
+    }
+    line.flag("muted", ctx_.ui ? ctx_.ui->muted : (ctx_.session && ctx_.session->muted()));
+    bus.publish(line.str("echo", echo).done());
+    return;
+  }
+
+  if (error) *error = "unknown verb";
+}
+
+// ---------------------------------------------------------------- settings
+
+// M2.9. The settings surface from a script.
+//
+// Every one of these writes the field the control writes, in `AvatarUiState`,
+// and then stops. That is deliberately all: `AvatarUiState` is the owner of
+// record for these values, and main.cpp is the one place that mirrors them
+// into `settings.json` and pushes the live ones into the session. Writing the
+// file here, or calling a setter here, would make a scripted change and a
+// clicked change two different things — and two settings that a script could
+// hold at odds with what the panel is drawing.
+//
+// It also means a script inherits whatever a control's field comes to mean.
+// `model` and the tool grants are written to disk and reach the `claude` child
+// when it next starts, which is what the surface says in amber under them
+// today; on the day a change restarts the child instead, it will restart it
+// for a script too, because there is nothing here that would have to be
+// told.
+void BusBindings::on_settings(const BusMessage& m, std::string* error) {
+  AppBus& bus = AppBus::instance();
+  const std::string echo = m.str("echo");
+  const auto refuse = [&](const std::string& reason) {
+    if (error) *error = reason;
+    bus.publish(BusLine("settings.refused")
+                    .str("key", m.verb)
+                    .str("reason", reason)
+                    .str("echo", echo)
+                    .done());
+  };
+  // One event for the whole family rather than one per verb: these are all the
+  // same act — set this field to this value — and `key`/`value` says which,
+  // where `schedule.created` and `schedule.cancelled` are genuinely different
+  // outcomes and earn their own names.
+  const auto changed = [&](const std::string& value) {
+    bus.publish(BusLine("settings.changed")
+                    .str("key", m.verb)
+                    .str("value", value)
+                    .str("echo", echo)
+                    .done());
+  };
+  const auto on_off = [](bool b) { return std::string(b ? "on" : "off"); };
+
+  if (!ctx_.ui) return refuse("no panel in this run");
+  AvatarUiState& ui = *ctx_.ui;
+
+  if (m.verb == "model") {
+    const std::string name = m.str("name");
+    // By the `settings.json` key, which is the stable on-disk spelling and the
+    // one a person hand-editing the file already knows. A name this build has
+    // never heard of is refused rather than written: an unknown `--model`
+    // starts a child in which every turn fails, which is the failure the
+    // picker exists to make unreachable.
+    const int idx = model_choice_for_key(name);
+    if (idx < 0) return refuse("no such model: " + name);
+    ui.model = idx;
+    return changed(model_choice(idx).key);
+  }
+
+  if (m.verb == "tools") {
+    const std::string group = m.str("group");
+    int id = -1;
+    for (int i = 0; i < kToolGroupCount; ++i)
+      if (group == tool_group(i).key) id = i;
+    if (id < 0) return refuse("no such tool group: " + group);
+    // The surface draws an unoffered group disabled; a script gets the same
+    // answer as a word, so a hand-written line cannot grant what the panel
+    // refuses to offer.
+    if (!tool_group(id).offered) return refuse("that group is not offered yet");
+    ui.tools.on[id] = m.flag("on", true);
+    return changed(group + "=" + on_off(ui.tools.on[id]));
+  }
+
+  if (m.verb == "language") {
+    LanguageSelection sel{m.flag("english", ui.lang_english), m.flag("japanese", ui.lang_japanese)};
+    // The checkboxes lock the last one on rather than letting it be cleared.
+    // The same invariant, said rather than drawn.
+    if (!sel.english && !sel.japanese) return refuse("at least one language has to stay on");
+    ui.lang_english = sel.english;
+    ui.lang_japanese = sel.japanese;
+    return changed(language_spec(sel));
+  }
+
+  if (m.verb == "listen_timeout") {
+    const double s = m.num("seconds", 0.0);
+    // 0 is never, which is the spelling the mechanism, the config and the file
+    // all share. The rest is the DragInt's own clamp.
+    if (s < 0.0) return refuse("seconds cannot be negative");
+    if (s > 0.0 && (s < 15.0 || s > 600.0)) return refuse("15 to 600 seconds, or 0 for never");
+    ui.listen_timeout_on = s > 0.0;
+    if (s > 0.0) ui.listen_timeout_sec = static_cast<int>(s);
+    return changed(std::to_string(static_cast<int>(s)));
+  }
+
+  if (m.verb == "auto_listen") {
+    ui.auto_listen = m.flag("on", true);
+    return changed(on_off(ui.auto_listen));
+  }
+
+  if (m.verb == "chat") {
+    ui.chat_open = m.flag("on", true);
+    return changed(on_off(ui.chat_open));
+  }
+
+  if (m.verb == "open") {
+    ui.settings_open = m.flag("on", true);
+    return changed(on_off(ui.settings_open));
+  }
+
+  if (m.verb == "avatar_mode") {
+    const std::string v = m.str("value");
+    for (int i = 0; i < kAvatarVisibilityCount; ++i) {
+      if (v == kAvatarVisibilityNames[i]) {
+        ui.avatar_mode = static_cast<AvatarVisibility>(i);
+        return changed(v);
+      }
+    }
+    return refuse("no such avatar mode: " + v);
+  }
+
+  if (m.verb == "get") {
+    // Read off the panel, not off the file: the panel is the owner of record
+    // and the file is written from it, so this is the value that is in force
+    // even on the frame before the debounced write has happened.
+    bus.publish(
+        BusLine("settings.info")
+            .str("model", model_choice(ui.model).key)
+            .str("tools", tool_list(ui.tools))
+            .str("language", language_spec({ui.lang_english, ui.lang_japanese}))
+            .flag("auto_listen", ui.auto_listen)
+            .num("listen_timeout", listen_timeout_seconds(ui), 0)
+            .str("avatar", ui.avatar_name)
+            .str("theme", ui.theme)
+            .str("avatar_mode", kAvatarVisibilityNames[static_cast<int>(ui.avatar_mode)])
+            .flag("chat", ui.chat_open)
+            .flag("settings_open", ui.settings_open)
+            .str("echo", echo)
+            .done());
+    return;
+  }
+
+  if (error) *error = "unknown verb";
+}
+
 void BusBindings::set_script_status(std::string text, bool ok) {
   script_status_ = std::move(text);
   script_status_ok_ = ok;
@@ -446,8 +704,45 @@ void BusBindings::stamp_cells(AvatarGrid& grid) const {
 
 // ----------------------------------------------------------------- publish
 
+// M2.9. The two levels of the transport row, as facts rather than as replies.
+//
+// They are published from here — on change, coalesced under their own key,
+// exactly like `session.state` — and not from the verbs that set them, because
+// a level is a fact about the app and not an answer to anybody. The mute may
+// have come from this script, from the button, from the S key or from a second
+// script, and the same event has to arrive in all four cases; an `echo` on it
+// would be a lie three times out of four.
+//
+// `facts_now_` is what a verb leaves behind, and it is the whole of why a
+// script does not have to guess: muting an app that was already muted moves
+// nothing, so on-change alone would leave the caller waiting for an event that
+// is never coming. One frame later it gets the level anyway.
+//
+// Two keyed events, so an unread queue costs two slots however long nothing
+// drains it. `drain_events()` still empties the queue for everybody and
+// nothing here changes that.
+void BusBindings::publish_facts() {
+  AppBus& bus = AppBus::instance();
+  // The panel is the owner of record for mute, so that is where it is read —
+  // `set_muted()` is not called until later in this frame, and reading the
+  // session would report the value from before the verb landed.
+  const int muted = ctx_.ui ? (ctx_.ui->muted ? 1 : 0)
+                            : (ctx_.session && ctx_.session->muted() ? 1 : 0);
+  const int mic = (ctx_.session && ctx_.session->mic_open()) ? 1 : 0;
+  if (facts_now_ || muted != last_muted_) {
+    last_muted_ = muted;
+    bus.publish(BusLine("session.muted").flag("on", muted != 0).done(), "session.muted");
+  }
+  if (facts_now_ || mic != last_mic_) {
+    last_mic_ = mic;
+    bus.publish(BusLine("session.mic").flag("open", mic != 0).done(), "session.mic");
+  }
+  facts_now_ = false;
+}
+
 void BusBindings::publish(const VoiceSession::Snapshot& snap, float dt) {
   AppBus& bus = AppBus::instance();
+  publish_facts();
 
   // Everything here is published from the frame loop, off the Snapshot the
   // frame loop already took, rather than from inside VoiceSession. That keeps
