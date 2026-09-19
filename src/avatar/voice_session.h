@@ -257,6 +257,40 @@ class VoiceSession {
   // boxes to one restart rather than three. The caller is expected to let a
   // change settle and to wait for a reply in flight; see main.cpp.
   bool apply_llm_settings(const ToolPolicy& tools, const std::string& model_arg);
+  // M3.15. Hand over to a fresh session **now**, whatever the context reading
+  // says (user, 19 Sep 2026: *"when its context starts growing a little bit
+  // too big, say, for example, around 40%, the AI will auto hand off to the
+  // next AI and restart itself within the session… before it does this, it
+  // will prompt the user and say, I just need a moment to do some
+  // housekeeping"*). **Frame loop only**, and it returns straight away: this
+  // arms a sequence that takes several seconds and several frames.
+  //
+  // The name is `handoff_now` and not `restart` on purpose — it is not a
+  // fourth way to replace the child, it is the one thing that *ends* in a
+  // replacement, and it is the whole sequence rather than the last step of it:
+  //
+  //   1. the housekeeping line is spoken, **first**, because the point of it
+  //      is that the several seconds of silence are explained while they are
+  //      happening rather than apologised for once they are over;
+  //   2. the outgoing session is asked, in a turn that is never spoken and
+  //      never reaches the transcript, to write a note to its replacement;
+  //   3. the child is replaced through exactly the machinery reset() and
+  //      apply_llm_settings() use, down to the thread;
+  //   4. that note rides in with the new session's first turn.
+  //
+  // What it will not do: interrupt anything. It arms, and the sequence starts
+  // at the next settled moment — no turn running, nothing queued to say,
+  // nothing half-spoken, the microphone not in the middle of an utterance.
+  // A handoff that cuts a reply in half is worse than one that waits, and
+  // waiting costs a turn's worth of context at most.
+  //
+  // Returns false and arms nothing when the engines are not up, while a
+  // restart is already running, and while a handoff is already under way —
+  // the last of which is what a second press, or a second script, gets.
+  bool handoff_now();
+  // True from the moment a handoff is armed until the new child is up. Frame
+  // loop only; it exists for the callers that have to refuse a second one.
+  bool handing_off() const;
   // True from the moment reset() is called until the new child is up. Frame
   // loop and snapshot only.
   bool resetting() const { return resetting_.load(std::memory_order_acquire); }
@@ -416,7 +450,7 @@ class VoiceSession {
   // this decides one status line and one log line, and nothing else. It is not
   // a mode: a restart for a setting still clears the transcript, still keeps
   // the workers and the schedules, still gives the latch back.
-  enum class RestartReason { Reset, Settings };
+  enum class RestartReason { Reset, Settings, Handoff };
   // The shared body of reset() and apply_llm_settings(), on the frame loop:
   // everything stop() does, the latch noted, the fence released and the thread
   // started. See both callers for what each of them means by it.
@@ -426,6 +460,59 @@ class VoiceSession {
   // the new status. Nothing else may touch `turn_` or `eng_.llm` while it
   // runs; see the guard at the top of update() and `resetting_`.
   void run_reset();
+
+  // ------------------------------------------------------------- M3.15
+  //
+  // ## The handover, as four frame-loop states and one thread
+  //
+  // The sequence is spread over several seconds and cannot be a function, so
+  // it is a small machine that `update()` advances. Every transition but one
+  // happens on the frame loop; the exception is the summary turn finishing,
+  // which is the thread that was running it.
+  //
+  //   None        nothing happening. The only state in which the threshold is
+  //               looked at, and it is looked at from the Idle branch only —
+  //               which is what "never mid-turn, never mid-sentence, never
+  //               with the microphone open" reduces to, since Idle already
+  //               means all three.
+  //   Speaking    the housekeeping line has been handed to the speech queue
+  //               (or dropped, if muted). Waits for it to actually finish.
+  //   Summarising the silent turn is running on `turn_`.
+  //   Restarting  a summary is written, or was not, and the child can go.
+  //
+  // The re-arming question — `ctx` crossing the threshold is a **level**, not
+  // an edge, so it stays crossed — is answered by `None` being reachable only
+  // from `run_reset()`. Between arming and the new child being up there is no
+  // frame on which a second handoff can start, and once the new child is up
+  // its `ctx` is the cost of existing rather than the cost of the
+  // conversation. A `ctx` of -1.0 (a child that has not reported yet) is
+  // never read as a low number; see `core/handoff_policy.h`.
+  enum class HandoffStage { None, Speaking, Summarising, Restarting };
+  // Called from update() before the state branches, because the stage that
+  // matters most (`Restarting`) is reached while the session is Thinking, and
+  // Thinking has no branch of its own.
+  void tick_handoff(State s);
+  // The Idle branch's tail: read the context, decide, and — if it is time —
+  // say the housekeeping line and enter the machine. True when it took the
+  // frame, in which case the microphone is deliberately *not* reopened.
+  bool begin_handoff_if_due();
+  // The silent turn. Sets up `turn_` exactly as start_injected_turn() does and
+  // differs from it in what it does with the reply: nothing is spoken, nothing
+  // is shown, nothing is stripped into the transcript. The reply is the note,
+  // and it goes into `handoff_summary_`.
+  void start_handoff_summary();
+  void run_handoff_summary();
+  // The prose sent by that turn: `prompts/system/handoff.md`, which is seeded
+  // and editable, with a built-in copy for when it cannot be read. **Not** a
+  // system prompt and deliberately not a node in `graph.json` — it is one
+  // turn's words, not every turn's, and composing it would put a paragraph
+  // about a rare event in front of every question the user ever asks.
+  std::string handoff_request();
+  // The note, wrapped for the new session's first turn. The same idiom as
+  // pending_context(): a `<context>` block, in English, composed by the app,
+  // because everything the *model* reads is machine traffic (app_strings.h).
+  static std::string carry_over_block(const std::string& note);
+
   void start_turn(std::string text);
   // M2b.4. A turn nobody typed: the app telling Claude that something it
   // deferred has finished, so the report comes back in the AI's own words and
@@ -646,6 +733,17 @@ class VoiceSession {
   // never be told that a model is in force that nothing is running on.
   std::string model_in_force_;
   ToolPolicy tools_in_force_;
+  // What the last restart *was*, as the one clause that explains it — "the
+  // conversation was cleared", "the new settings are in force", "the note
+  // carried over". Written by the restart thread under `mutex_` and read by
+  // the frame loop afterwards, which is the same fence as the two above.
+  //
+  // It exists because there are two places that sentence is said and they had
+  // drifted: run_reset() writes it with "ready." on the end, and the relatch
+  // branch of update() writes it again with "listening..." on the end. That
+  // second copy was a literal about *reset* and was already being shown after
+  // a settings restart.
+  std::string restart_note_;
   // The microphone latch was on when reset() was called, and is owed back.
   //
   // Reset has to close the latch on the way in — update() is handed to the
@@ -661,6 +759,37 @@ class VoiceSession {
   // Frame loop only, both ends: written by reset(), read and cleared by
   // update() on the first frame after `resetting_` falls.
   bool relatch_after_reset_ = false;
+
+  // M3.15. Where the handover is up to. Atomic for one transition only —
+  // `Summarising` -> `Restarting`, made by the summary thread as the last
+  // thing it does — and read on the frame loop; every other write is the
+  // frame loop's own.
+  std::atomic<HandoffStage> handoff_stage_{HandoffStage::None};
+  // A handoff asked for by name rather than by the numbers (`handoff_now()`).
+  // A flag rather than a stage because a forced handoff still waits for the
+  // same settled moment as an automatic one: it is consumed by the Idle
+  // branch, not acted on where it is set.
+  std::atomic<bool> handoff_forced_{false};
+  // **What this session cost before anybody said anything** — its first
+  // reported `ctx`, or negative until it has one. It is the guard against the
+  // single most expensive failure this feature has: a threshold at or under
+  // the cost of merely existing would have every fresh session already over
+  // the line, handing over again, one summary turn per turn, forever. See
+  // `handoff_due()`, which refuses rather than firing. Frame loop only; reset
+  // by run_reset() because a new child is a new floor.
+  double handoff_floor_ = -1.0;
+  // That refusal, said once per session rather than once per frame.
+  bool handoff_warned_ = false;
+  // The note, written by the summary turn on `turn_` and read by the restart
+  // thread after it has joined it. No lock, for the same reason `injector_`
+  // needs none: the two threads never overlap, by construction.
+  std::string handoff_summary_;
+  // The same note after the restart, waiting for the first turn of the new
+  // session to carry it. Written by the restart thread, consumed by the turn
+  // thread, and those two are ordered by `resetting_` — no turn starts while
+  // it is set, and the write happens before it falls.
+  std::string carry_over_;
+
   std::atomic<bool> loaded_{false};
   std::atomic<bool> load_failed_{false};
   std::atomic<bool> turn_running_{false};

@@ -475,14 +475,16 @@ std::string PromptInjector::decorate(const std::string& user_text) {
 
 // ------------------------------------------------- the pre-prompt beside the exe
 
-namespace {
-
 // Remove every `<!-- … -->` span. The file next to the exe is the one prompt
 // surface a user finds without being told where to look, so it carries a header
 // explaining what it is and when an edit takes effect — and that header must not
 // reach Claude. An unterminated `<!--` swallows the rest of the file, which is
 // the safe direction: a half-written comment sends nothing rather than sending
 // the explanation as if it were an instruction.
+//
+// M3.15 is the second file with a header like that (`system/handoff.md`), and
+// a second copy of this loop is how the two would come to disagree about what
+// a comment is — so it is declared in the header now rather than being local.
 std::string strip_html_comments(const std::string& s) {
   std::string out;
   out.reserve(s.size());
@@ -500,6 +502,8 @@ std::string strip_html_comments(const std::string& s) {
   }
   return out;
 }
+
+namespace {
 
 // Leading blank lines and spaces, so that a body written under a stripped
 // comment composes to the same bytes as the same body written on line one.

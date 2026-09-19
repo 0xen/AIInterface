@@ -96,6 +96,14 @@ const AppLine kLines[] = {
     // --- Shutting down with schedules still pending ------------------------
     {"Closing with {} thing still to do: ", "やり残し {} 件のまま閉じるよ: "},
     {"Closing with {} things still to do: ", "やり残し {} 件のまま閉じるよ: "},
+
+    // --- The context window filling up -------------------------------------
+    // The English is the user's own sentence, kept word for word. The Japanese
+    // is not a translation of it but the same move in Japanese: a warning that
+    // she is about to go quiet for a moment, in her own register, with no
+    // apology in it -- nothing has gone wrong.
+    {"I just need a moment to do some housekeeping.",
+     "ちょっとだけ、整理する時間をもらうね。"},
 };
 
 static_assert(sizeof(kLines) / sizeof(kLines[0]) == static_cast<size_t>(Msg::Count),

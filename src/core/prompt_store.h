@@ -186,6 +186,13 @@ std::filesystem::path local_prompt_path();
 // whitespace trimmed. Empty when the file is empty or unreadable.
 std::string local_prompt();
 
+// The rule that makes the line above possible, for the other files that are
+// prose the user edits and the model reads: every `<!-- … -->` span goes, and
+// an unterminated `<!--` swallows the rest of the file rather than letting a
+// half-written explanation through as an instruction. M3.15's
+// `prompts/system/handoff.md` is the second caller.
+std::string strip_html_comments(const std::string& s);
+
 // ------------------------------------------------- M3.9: what the model is told it has
 //
 // The prompt has to describe the grant the user actually made. M3.9 put the

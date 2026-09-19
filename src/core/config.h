@@ -71,6 +71,22 @@ struct Config {
   // mechanism without sitting through a real minute; the floor a person is
   // allowed to type belongs in M1f.2's control, where a refusal can be shown.
   float listen_timeout = 60.0f;
+  // M3.15. AII_HANDOFF_AT: how full the context window may get before the
+  // session hands over to a fresh one, as a **fraction of that model's own
+  // window** — the number `UsageStats::ctx` reports and the footer draws.
+  // Default 0.40, which is the user's own ("say, for example, around 40%").
+  // **0 or less is off**, the spelling `listen_timeout` already uses; a value
+  // above 1 is read as a percentage, so a hand-edited `40` means the same
+  // thing. See `core/handoff_policy.h` for the whole of the rule, including
+  // why 40% of a `[1m]` model is deliberately five times the tokens 40% of a
+  // 200k one is.
+  //
+  // It sits in Config beside `listen_timeout` for the same reason and with the
+  // same ownership: main.cpp reads `settings.json` over it before the session
+  // is built, and unlike `tools` and `model_override` it is not fixed at the
+  // child's launch — nothing about it reaches the command line, so it could be
+  // pushed down as a level later if a control is ever drawn for it.
+  float handoff_threshold = 0.40f;
   // M3.8. Which tool groups the *conversational* instance gets. The default is
   // the table's (core/tool_policy.h); main.cpp reads settings.json over it
   // before the session is built, and `build_llm` turns it into `--tools`.

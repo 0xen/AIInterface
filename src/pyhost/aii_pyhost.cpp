@@ -384,6 +384,30 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       "takes a second or so; wait for `session.state` to come back.");
 
   m.def(
+      "handoff",
+      [](const std::string& echo) {
+        return post_line(aii::BusLine("session.handoff").str("echo", echo).done());
+      },
+      py::arg("echo") = "",
+      "M3.15. Hand the conversation over to a fresh session of itself: the "
+      "housekeeping line is spoken first, the outgoing session writes a short "
+      "note about where the conversation had got to, the `claude` child is "
+      "replaced, and that note rides in with the new session's first turn. "
+      "The wording is forgotten; the direction is not.\n"
+      "\n"
+      "The app does this by itself when the context window passes "
+      "`handoff.threshold` in settings.json (0.40 by default, the user's own "
+      "40%). This call is for a script that wants its own rule instead: "
+      "`session.usage` publishes `ctx` on every change, so the policy is "
+      "yours to write and this is the act.\n"
+      "\n"
+      "It does not interrupt anything. A reply in flight finishes, a sentence "
+      "being spoken is finished, an utterance being dictated is finished, and "
+      "only then does the handover start -- so `ok=True` means accepted, not "
+      "done, and it can be several seconds before `session.state` settles. "
+      "Refused while a restart or another handover is already running.");
+
+  m.def(
       "say",
       [](const std::string& text, const std::string& echo) {
         return post_line(aii::BusLine("session.say").str("text", text).str("echo", echo).done());
