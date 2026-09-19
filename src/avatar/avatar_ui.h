@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "avatar_def.h"
+#include "core/model_choice.h"
 #include "core/tool_policy.h"
 #include "voice_session.h"
 
@@ -223,6 +224,21 @@ struct AvatarOptions {
   // tools of any kind. The toggles are then inert and say so rather than
   // claiming to have removed something that was never there.
   bool tools_supported = true;
+
+  // M3.11. What the conversational instance was actually launched with, as a
+  // `--model` argument (empty = no flag, the CLI's own default). Exactly
+  // `tools_in_force`'s contract and for exactly the same reason: `--model` is
+  // fixed when the `claude` child starts, so the picker and this disagree from
+  // the moment it is moved until the app is next started, and the section's
+  // job in that state is to say which one Claude is holding.
+  //
+  // A string rather than an index, because it also has to be able to hold a
+  // value the picker cannot produce — `AII_MODEL` naming a dated id, or a
+  // stale key read out of `settings.json` — and say what it is.
+  //
+  // Seeded once, before the first frame, from the same value `build_llm` was
+  // given. Nothing writes it afterwards.
+  std::string model_in_force;
 };
 
 struct AvatarUiState {
@@ -329,6 +345,15 @@ struct AvatarUiState {
   // Seeded from `Config::tools` before the first frame, so the defaults in
   // ToolPolicy's constructor are never the second spelling of anything.
   ToolPolicy tools;
+  // M3.11. Which model the picker holds, as an index into the table in
+  // `core/model_choice.h`. Same contract as `tools` — the panel is the owner
+  // of record, main.cpp mirrors it into settings.json, and there is no level
+  // to push down, because `--model` is decided when the `claude` child starts.
+  // `AvatarOptions::model_in_force` is what this run got.
+  //
+  // Seeded by main.cpp before the first frame from `Config::model_override`,
+  // so the default is not spelled twice.
+  int model = kModelChoiceDefault;
   // M1f.3. The latched microphone shut itself on silence, and nothing has
   // happened since. What the microphone button draws while this is true is a
   // face of its own (MicFace::Dozed) rather than the bare Idle capsule, which
@@ -424,6 +449,9 @@ struct AvatarUiState {
   // scrolls, so without this there is no state in which it can be
   // screenshotted. Harness only (`--settings-tools`).
   bool settings_scroll_tools = false;
+  // M3.11's, for the same reason again: Model sits just above Tools, below the
+  // fold. Harness only (`--settings-model`).
+  bool settings_scroll_model = false;
 };
 
 // M1f.2. What the two fields above mean as one number, in the one spelling the

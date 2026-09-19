@@ -36,6 +36,7 @@ add_library(aii_core STATIC
   src/core/config.cpp
   src/core/engines.cpp
   src/core/language.cpp
+  src/core/model_choice.cpp
   src/core/prompt_store.cpp
   src/core/schedule.cpp
   src/core/sentence_splitter.cpp

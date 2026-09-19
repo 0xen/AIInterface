@@ -55,6 +55,8 @@
 //                 is below the fold of a surface that scrolls (M1f.2).
 //     --settings-tools  the same, held scrolled to the Tools section (M3.8),
 //                 which is likewise below the fold.
+//     --settings-model  the same, held scrolled to the Model section (M3.11),
+//                 which sits just above Tools.
 //     --listen-timeout-at S:V  at S seconds, write V seconds into the
 //                 auto-listen control's own fields, exactly as a hand on it
 //                 would; V of 0 is "never". How "a change reaches a
@@ -112,6 +114,7 @@
 #include "script_host.h"
 #include "core/button_registry.h"
 #include "core/config.h"
+#include "core/model_choice.h"
 #include "core/schedule.h"
 #include "core/worker_pool.h"
 #include "imgui_layer.h"
@@ -334,6 +337,10 @@ int main(int /*argc*/, char** /*argv*/) {
     // compared against, and never again — it is what "in force" means.
     bool settingsScrollTools = false;
     aii::ToolPolicy toolsInForce;
+    // M3.11's pair of the same, for the model picker: the pose flag and the
+    // `--model` argument the child was actually launched with ("" = no flag).
+    bool settingsScrollModel = false;
+    std::string modelInForce;
     // --inspector: open the prompt inspector on the first frame, as if the
     // sidebar button had been clicked. Nothing else about it differs.
     bool inspectorOpen = false;
@@ -462,6 +469,7 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (a == L"--settings") settingsOpen = true;
             else if (a == L"--settings-timing") { settingsOpen = true; settingsScrollTiming = true; }
             else if (a == L"--settings-tools") { settingsOpen = true; settingsScrollTools = true; }
+            else if (a == L"--settings-model") { settingsOpen = true; settingsScrollModel = true; }
             else if (a == L"--listen-timeout-at" && i + 1 < wargc) {
                 const std::wstring spec = wargv[++i];
                 const size_t colon = spec.find(L':');
@@ -562,6 +570,36 @@ int main(int /*argc*/, char** /*argv*/) {
         const aii::ToolGroup& g = aii::tool_group(i);
         voiceCfg.tools.on[i] = settings.get_bool("tools", g.key, voiceCfg.tools.on[i]);
     }
+    // M3.11. The base model, read here for the same reason and in the same
+    // breath: `--model` is on the same command line and is settled at the same
+    // moment. The stored value is a *key* from the table in
+    // `core/model_choice.h`, not a model string, and this is the one place
+    // that translation happens.
+    //
+    // Two things this must never do. It must never put a string the CLI does
+    // not accept on the command line — a stale or mistyped key would start a
+    // child that fails every turn, with nothing on screen to say why — so an
+    // unknown key falls back to the CLI's own default and is logged as having
+    // done so. And it must not throw away an `AII_MODEL` naming something the
+    // picker cannot produce (a dated id, pinned by hand for a test): the
+    // environment override wins for that run, and the settings surface says
+    // which model is actually in force rather than showing the picker's row
+    // as though it were.
+    if (voiceCfg.model_override.empty()) {
+        const std::string key = settings.get_string("model", "name",
+                                                    aii::model_choice(aii::kModelChoiceDefault).key);
+        const int idx = aii::model_choice_for_key(key);
+        if (idx < 0)
+            log::warn("[model] settings.json names `{}`, which this build does not know - "
+                      "falling back to the CLI's default", key);
+        voiceCfg.model_override = aii::model_choice(idx < 0 ? aii::kModelChoiceDefault : idx).arg;
+    } else {
+        log::info("[model] AII_MODEL is set, so settings.json is not applied this run");
+    }
+    log::info("[model] conversational instance: {} ({})",
+              aii::model_label(voiceCfg.model_override),
+              voiceCfg.model_override.empty() ? std::string("no --model flag")
+                                              : "--model " + voiceCfg.model_override);
     log::info("[tools] conversational instance: {} ({})",
               aii::tool_summary(voiceCfg.tools),
               aii::tool_list(voiceCfg.tools).empty() ? std::string("--tools \"\"")
@@ -917,6 +955,13 @@ int main(int /*argc*/, char** /*argv*/) {
     // thing it can do until a toggle can reach a running child (M3.6).
     uiState.tools = voiceCfg.tools;
     toolsInForce = voiceCfg.tools;
+    // M3.11. The same shape for the model. `model_choice_for_arg` is -1 when
+    // AII_MODEL named something off the list, and the picker then shows the
+    // default row while `modelInForce` holds the real value — which is exactly
+    // the disagreement the section's amber line exists to name.
+    uiState.settings_scroll_model = settingsScrollModel;
+    uiState.model = std::max(0, aii::model_choice_for_arg(voiceCfg.model_override));
+    modelInForce = voiceCfg.model_override;
     log::info("[listen-timeout] setting: {} ({:.1f} s configured, default {:.1f} s)",
               uiState.listen_timeout_on ? std::to_string(uiState.listen_timeout_sec) + " s"
                                         : std::string("never"),
@@ -2215,6 +2260,9 @@ int main(int /*argc*/, char** /*argv*/) {
             // surface's job is to show the gap and name the restart.
             avatarOptions.tools_in_force = toolsInForce;
             avatarOptions.tools_supported = voiceCfg.backend != "api";
+            // M3.11. Same pair, same reason: `--model` is fixed at process
+            // start too, so the picker and this are drawn against each other.
+            avatarOptions.model_in_force = modelInForce;
             const aii::AvatarUiResult r =
                 aii::draw_avatar_ui(uiState, snap, avatarOptions, session != nullptr,
                                     session && session->mic_open(),
@@ -2279,6 +2327,12 @@ int main(int /*argc*/, char** /*argv*/) {
             // take one.
             for (int i = 0; i < aii::kToolGroupCount; ++i)
                 settings.set_bool("tools", aii::tool_group(i).key, uiState.tools.on[i]);
+            // M3.11. The picked model's *key*, under "model". A key and not a
+            // model string, so that a value written today still resolves
+            // through the table tomorrow when the alias behind it has moved on
+            // — and so that an entry dropped from the table degrades to the
+            // CLI's default at the next read rather than onto a command line.
+            settings.set_string("model", "name", aii::model_choice(uiState.model).key);
             // The scrim and the caption belong to the loader, not the panel:
             // the loading screen has to look the same whether or not there is
             // anything underneath it. The foreground draw list puts them over
