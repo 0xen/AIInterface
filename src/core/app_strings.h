@@ -170,6 +170,24 @@ enum class Msg {
   // they made.
   SettingNoSuchKey,      // {key}
   SettingBadValue,       // {key}
+  // M10.5. The two `scripts.*` keys. They are in the table, so the model can
+  // read them and name them -- M3.14's rule, because a key it cannot see is a
+  // key it invents a story about -- but it may not write them. **A consent
+  // gate the party being consented to can flip is not a gate**, and the
+  // `setting` verb is the model's hand: with these settable, "may your own
+  // code run inside me" would be one line in an ```aii``` block.
+  SettingYoursAlone,     // scripts.*
+
+  // --- Calling an action (M10.2/M10.5) -----------------------------------
+  //
+  // All four name the action, and none of them is a flat refusal. The user's
+  // instruction was *"notify the user to go and arm it before it can use it"*
+  // -- so what comes back says which script, that it is waiting, and where to
+  // answer it. A refusal with no next step in it is a wrong reading of this.
+  ScriptNotArmed,        // {name}
+  ScriptAuthoringOff,    // {name}
+  ScriptNoSuchAction,    // {name}
+  ScriptPastCap,         // {name}
 
   // --- The context window filling up (M3.15) -----------------------------
   // **The user's own words**, and the one line in this table that is spoken

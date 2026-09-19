@@ -85,7 +85,11 @@ std::vector<std::string> ScriptHost::discover(const std::vector<std::string>& ex
 }
 
 bool ScriptHost::start(AppBus& bus, const std::vector<std::string>& scripts) {
-  if (scripts.empty()) return false;
+  // M10.2. An empty list is no longer a refusal: the host also carries the
+  // action dispatcher, so an install with no policy scripts and one action
+  // still wants an interpreter. "Should there be a host at all" is the
+  // caller's question now, and main.cpp answers it with "a policy, or an
+  // action, or --script".
   scripts_ = scripts;
   impl_ = std::make_unique<Impl>();
 
@@ -116,7 +120,9 @@ bool ScriptHost::start(AppBus& bus, const std::vector<std::string>& scripts) {
 
   std::vector<const char*> ptrs;
   for (const std::string& s : scripts_) ptrs.push_back(s.c_str());
-  if (!reg(&bus, ptrs.data(), static_cast<int>(ptrs.size()))) {
+  // `ptrs.data()` on an empty vector may be null, which the registrar now
+  // accepts for a count of zero.
+  if (!reg(&bus, ptrs.empty() ? nullptr : ptrs.data(), static_cast<int>(ptrs.size()))) {
     status_ = "the aii module refused to register; scripts skipped.";
     status_ok_ = false;
     return false;
@@ -165,8 +171,10 @@ bool ScriptHost::start(AppBus& bus, const std::vector<std::string>& scripts) {
     return false;
   }
   impl_->started = true;
-  status_ = std::to_string(scripts_.size()) + (scripts_.size() == 1 ? " script" : " scripts") +
-            " running.";
+  status_ = scripts_.empty()
+                ? std::string("Ready for actions.")
+                : std::to_string(scripts_.size()) +
+                      (scripts_.size() == 1 ? " script" : " scripts") + " running.";
   status_ok_ = true;
   return true;
 }

@@ -254,6 +254,25 @@ std::string expand_tool_sections(const std::string& text, const ToolPolicy& poli
 // something it has just made untrue.
 void set_settings_digest(std::string text);
 
+// M10.5. The block `system/scripts.md` substitutes for `{{scripts}}`: every
+// action this machine has found, its one-line description, and whether the user
+// has armed it. Built by `avatar/action_store.cpp` and handed down here for the
+// same reason as the settings digest -- `core` must not learn what a scripts
+// directory is.
+//
+// **The armed mark is on the row and not in a paragraph.** The user asked that
+// the model know it cannot use an unarmed script and tell them to go and arm
+// it; M3.13 found that what moves this model is the row and the syntax line,
+// where added prose bought hallucinated readings. So an unarmed action is
+// spelled unarmed where its name is, and the file's prose says once what to do
+// about it.
+//
+// Part of the cache key below, like the settings digest and for the same
+// reason: a child restarted after an action was armed must not be handed the
+// previous list, which would be this app telling Claude something it had just
+// made untrue.
+void set_actions_digest(std::string text);
+
 // The composed system prompt for this process, computed once on first use:
 // the `system` graph, its conditional sections resolved against `policy`, then
 // `pre-prompt.md`.

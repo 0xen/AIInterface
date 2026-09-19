@@ -131,6 +131,8 @@
 #include "core/schedule.h"
 #include "core/worker_pool.h"
 #include "imgui_layer.h"
+#include "action_store.h"
+#include "approval_window.h"
 #include "inspector_window.h"
 #include "loader_anim.h"
 #include "settings.h"
@@ -227,6 +229,22 @@ std::string utf8FromWide(const wchar_t* w) {
     std::string s(static_cast<std::size_t>(len - 1), '\0');
     WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), len, nullptr, nullptr);
     return s;
+}
+
+// M10.5. The other direction, for the two Explorer calls. **Not
+// `std::wstring(s.begin(), s.end())`**, which is the obvious one-liner and is
+// wrong: it widens each *byte*, so a path with any non-ASCII character in it —
+// `%APPDATA%` under a Japanese user name, which this app's second language
+// makes an ordinary case rather than an exotic one — becomes mojibake and
+// Explorer opens nothing, with no error anywhere. `button_registry.cpp` has the
+// same function for the same reason.
+std::wstring wideFromUtf8(const std::string& s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring w(static_cast<std::size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), w.data(), n);
+    return w;
 }
 
 // M1c.5. The picked body colour crosses three boundaries in three shapes: hex
@@ -750,6 +768,21 @@ int main(int /*argc*/, char** /*argv*/) {
     // nothing has yet been mirrored back out of the panel — so it is the file
     // as the user left it, which is what they will read if they open it.
     aii::set_settings_digest(aii::settings_digest(settings));
+    // M10.2/M10.5. The actions the AI can call, discovered and handed to the
+    // prompt store in the same breath and for the same reason: this is the
+    // point at which the file has been read and nothing has been mirrored back
+    // out of the panel yet.
+    //
+    // **Both switches are read here and nowhere else**, because the panel is
+    // their only writer and `kSettingKeys` marks them `NotSettable` — the
+    // ```aii``` block cannot reach them, so there is no second door for them
+    // to come through.
+    aii::ActionStore actions;
+    actions.set_authoring(settings.get_bool("scripts", "authoring", false));
+    actions.set_auto_allow(settings.get_bool("scripts", "auto_allow", false));
+    actions.load();
+    aii::set_actions_digest(actions.digest());
+    log::info("[action] {}", actions.summary());
     log::info("[tools] conversational instance: {} ({})",
               aii::tool_summary(voiceCfg.tools),
               aii::tool_list(voiceCfg.tools).empty() ? std::string("--tools \"\"")
@@ -1096,6 +1129,11 @@ int main(int /*argc*/, char** /*argv*/) {
     // with no settings.json takes exactly the same path as a file that has no
     // `startup` section — which is the case the user asked about.
     uiState.auto_listen = settings.get_bool("startup", "auto_listen", uiState.auto_listen);
+    // M10.5. Taken from the store rather than read from the file a second
+    // time: one reader, so the panel and the thing the panel controls cannot
+    // start the run disagreeing.
+    uiState.scripts_authoring = actions.authoring();
+    uiState.scripts_auto_allow = actions.auto_allow();
     uiState.listen_timeout_on = voiceCfg.listen_timeout > 0.0f;
     uiState.listen_timeout_sec =
         uiState.listen_timeout_on
@@ -1190,6 +1228,10 @@ int main(int /*argc*/, char** /*argv*/) {
         // only the session knows about those. Null on a --no-voice run, which
         // the handler answers from the book alone.
         bc.session = session.get();
+        // M10.2. The authoritative set. `script.run` resolves a name against
+        // it here, on the frame loop, whoever asked — the model, a policy
+        // script, or a schedule later.
+        bc.actions = &actions;
         bus.install(bc);
     }
     aii::BusFileHatch busFiles;
@@ -1212,7 +1254,17 @@ int main(int /*argc*/, char** /*argv*/) {
     bool scripting = false;
     if (scriptsEnabled) {
         const std::vector<std::string> found = aii::ScriptHost::discover(scriptArgs);
-        if (!found.empty()) {
+        // M10.2. **An action is now also a reason to have a host**, and it is
+        // the reason a fresh install has one at all: the shipped example seeds
+        // into `scripts\actions\`, so a user who has never copied a policy up
+        // a directory still gets the interpreter the dispatcher lives in.
+        //
+        // The opt-in the old trigger protected is not weakened by this. An
+        // action that is there and not armed cannot run, and `scripts.authoring`
+        // is off by default, so what starting the host buys an untouched
+        // install is a thread that polls a queue and refuses everything.
+        const bool wantHost = !found.empty() || !actions.all().empty();
+        if (wantHost) {
             for (const std::string& s : found) log::info("[py] script {}", s);
             scripting = scripts.start(aii::AppBus::instance(), found);
             if (!scripting) log::warn("[py] {}", scripts.status());
@@ -1451,6 +1503,10 @@ int main(int /*argc*/, char** /*argv*/) {
     // close the window rather than open a second one.
     bool inspectorToggle = inspectorOpen;  // --inspector: the same latch the click sets
     std::unique_ptr<aii::InspectorWindow> inspector;
+    // M10.5. Up only while something is waiting to be answered. It has no
+    // toggle and no button: it appears because a script appeared, and it goes
+    // when every row on it has been answered.
+    std::unique_ptr<aii::ApprovalWindow> approval;
     // The remembered geometry, read once here and written back whenever it
     // changes. `placed` is a stored flag rather than a sentinel coordinate
     // because 0,0 is a real position and a multi-monitor desktop has real
@@ -2034,6 +2090,35 @@ int main(int /*argc*/, char** /*argv*/) {
         // would otherwise grow it for the rest of the run — and passes on
         // whatever a script asked to have logged.
         scripts.tick();
+
+        // ---- M10.2/M10.5: actions ----------------------------------------
+        //
+        // Levels down, facts up, exactly like every other setting here. The
+        // scan inside `tick()` is rate-limited to once a second, which is what
+        // turns a file the model just wrote into a callable action without
+        // anybody asking for a reload — re-reading the file *is* the reload.
+        actions.set_authoring(uiState.scripts_authoring);
+        actions.set_auto_allow(uiState.scripts_auto_allow);
+        if (actions.tick(dt)) {
+            // Only the composed-at-launch copy, so a restart picks up the new
+            // list rather than handing the fresh child the old one. The
+            // running conversation is kept honest by pending_context() below,
+            // which is the only thing that can be — the system prompt is a
+            // launch argument.
+            aii::set_actions_digest(actions.digest());
+        }
+        if (session) {
+            std::vector<aii::VoiceSession::ActionFact> facts;
+            facts.reserve(actions.all().size());
+            for (const aii::Action& a : actions.all())
+                facts.push_back({a.name, a.armed, a.in_digest});
+            session->set_actions(std::move(facts), actions.authoring());
+            session->note_action_news(actions.take_news());
+        } else {
+            // Drained and dropped on a --no-voice run: there is nobody to tell,
+            // and a queue nothing reads is a queue that grows.
+            actions.take_news();
+        }
         for (const std::string& line : bus.take_script_log()) log::info("[py] {}", line);
         // Published from the snapshot the frame loop already took, rather than
         // from inside the session: the turn thread and the worker poll keep
@@ -2545,6 +2630,115 @@ int main(int /*argc*/, char** /*argv*/) {
                 else
                     workerWindows.erase(workerWindows.begin() + static_cast<std::ptrdiff_t>(i));
             }
+
+            // ---- M10.5: "we have created a new script. Would you like to
+            //      see it?" -----------------------------------------------
+            //
+            // Created and destroyed **here**, between frames, like every other
+            // window in this loop and for the same reason: never inside an
+            // ImGui frame.
+            //
+            // **One window, however many scripts arrived.** The model can
+            // write several files in a turn, and a stack of six windows on the
+            // user's desktop is a failure; the window's height follows the
+            // queue and it scrolls past four.
+            {
+                const std::vector<std::string>& waiting = actions.awaiting();
+                if (!waiting.empty() && !approval) {
+                    // Anchored to the widget's own left edge rather than to a
+                    // screen corner, so it arrives beside the thing that is
+                    // talking instead of somewhere unrelated. It never resizes
+                    // or moves the widget: it is a window of its own.
+                    RECT wr{};
+                    int ax = 0, ay = 0;
+                    if (GetWindowRect(hwnd, &wr)) {
+                        ax = static_cast<int>(wr.left) - 8;
+                        ay = static_cast<int>(wr.bottom);
+                    } else {
+                        RECT work{};
+                        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+                        ax = static_cast<int>(work.right) - 8;
+                        ay = static_cast<int>(work.bottom) - 8;
+                    }
+                    std::string approvalError;
+                    approval = aii::ApprovalWindow::create(*backend, *instance, *device, kFontPx,
+                                                           ax, ay, &approvalError);
+                    if (!approval) log::warn("no approval window: {}", approvalError);
+                }
+                if (approval) {
+                    if (waiting.empty()) {
+                        // Every row answered. The window goes, and nothing it
+                        // was asking about is lost either way.
+                        approval.reset();
+                    } else {
+                        std::vector<aii::ApprovalRow> rows;
+                        for (const std::string& n : waiting) {
+                            if (const aii::Action* a = actions.find(n))
+                                rows.push_back({a->name, a->description, a->path});
+                        }
+                        aii::ApprovalResult r;
+                        approval->draw(dt, rows, &r);
+                        // Applied out here, never inside the window: arming is
+                        // the security-relevant act and it has one caller.
+                        for (const std::string& n : r.arm) {
+                            actions.arm(n);
+                            log::info("[action] armed '{}' by the user", n);
+                        }
+                        for (const std::string& n : r.dismiss) {
+                            // **Not a delete, and the AI is not told.** Dismiss
+                            // means "not now": the file stays, unarmed, and the
+                            // Scripts row can arm or delete it later — so a
+                            // mis-click costs nothing.
+                            actions.dismiss(n);
+                            log::info("[action] dismissed '{}' (kept, unarmed)", n);
+                        }
+                        if (r.arm_all) {
+                            actions.arm_all();
+                            log::info("[action] armed everything waiting");
+                        }
+                        if (r.dismiss_all) {
+                            actions.dismiss_all();
+                            log::info("[action] dismissed everything waiting (kept, unarmed)");
+                        }
+                        if (!r.reveal.empty()) uiState.script_reveal = r.reveal;
+                    }
+                }
+            }
+
+            // ---- M10.5: the Scripts rows' own wishes ----------------------
+            if (!uiState.script_arm.empty()) {
+                actions.arm(uiState.script_arm);
+                log::info("[action] armed '{}' from the Scripts row", uiState.script_arm);
+                uiState.script_arm.clear();
+            }
+            if (!uiState.script_delete.empty()) {
+                // The undo, and the whole of it. The AI has no route to this:
+                // `remove()` has one caller and it is a button.
+                if (actions.remove(uiState.script_delete))
+                    log::info("[action] deleted '{}'", uiState.script_delete);
+                else
+                    log::warn("[action] could not delete '{}'", uiState.script_delete);
+                uiState.script_delete.clear();
+            }
+            if (!uiState.script_reveal.empty()) {
+                // **Explorer, with the file selected.** The user's own words
+                // were "navigates you to the directory of the script and you
+                // can open it" — so they are taken to it and they open it,
+                // rather than an editor of this app's choosing being launched
+                // at them.
+                const std::wstring wpath = wideFromUtf8(uiState.script_reveal);
+                const std::wstring args = L"/select,\"" + wpath + L"\"";
+                ShellExecuteW(nullptr, nullptr, L"explorer.exe", args.c_str(), nullptr,
+                              SW_SHOWNORMAL);
+                log::info("[action] showed '{}' in Explorer", uiState.script_reveal);
+                uiState.script_reveal.clear();
+            }
+            if (uiState.scripts_open_folder) {
+                uiState.scripts_open_folder = false;
+                const std::string dir = aii::ActionStore::actions_root().string();
+                const std::wstring wdir = wideFromUtf8(dir);
+                ShellExecuteW(nullptr, L"explore", wdir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
             // What the strip will be sized and docked with at the top of the
             // next frame. Built here, at the bottom of this one, because this
             // is the first point at which both halves of a row are known: the
@@ -2616,6 +2810,9 @@ int main(int /*argc*/, char** /*argv*/) {
             avatarOptions.themes = avatarSource.themes();
             avatarOptions.script_status = bus.script_status();
             avatarOptions.script_status_ok = bus.script_status_ok();
+            avatarOptions.scripts.clear();
+            for (const aii::Action& a : actions.all())
+                avatarOptions.scripts.push_back({a.name, a.description, a.armed, a.in_digest});
             avatarOptions.art_status = avatarSource.status();
             avatarOptions.art_status_ok = avatarSource.status_ok();
             avatarOptions.derived = avatarSource.derived();
@@ -2703,6 +2900,11 @@ int main(int /*argc*/, char** /*argv*/) {
             // come up in, whether to open the chat) belong beside it rather
             // than among the toggles.
             settings.set_bool("startup", "auto_listen", uiState.auto_listen);
+            // M10.5. Mirrored like everything else on this panel. Nothing else
+            // writes these two keys: the model cannot, and the store reads them
+            // once at launch and is a level from here on.
+            settings.set_bool("scripts", "authoring", uiState.scripts_authoring);
+            settings.set_bool("scripts", "auto_allow", uiState.scripts_auto_allow);
             settings.set_enum("panel", "avatar_mode", aii::kAvatarVisibilityNames,
                               aii::kAvatarVisibilityCount,
                               static_cast<int>(uiState.avatar_mode));
@@ -2840,6 +3042,11 @@ int main(int /*argc*/, char** /*argv*/) {
     // a fresh run starts with the desktop it started with.
     workerWindows.clear();
     workerStrip.reset();
+    // M10.5. With them, and for exactly the same reason: it is a real window on
+    // the user's desktop and an orphan left behind by any exit is the worst
+    // outcome it has. Nothing is written down — an unanswered script is still
+    // unarmed and still in the queue at the next launch.
+    approval.reset();
     // And the inspector with it, for the same reason and with one addition:
     // where it was is written down first. The frame loop already mirrors that
     // every frame, so this only catches a window moved on the very last one.

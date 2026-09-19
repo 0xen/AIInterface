@@ -211,6 +211,20 @@ if(AII_BUILD_TESTS)
     target_compile_options(prompt_tools_test PRIVATE /utf-8 /W4)
   endif()
   aii_copy_runtime_dlls(prompt_tools_test)
+
+  # ---- action_digest_test: an unarmed action is visible as unarmed --------
+  # Compiles `src/avatar/action_store.cpp` directly rather than linking the
+  # avatar target: the store is deliberately free of ImGui, the engine and the
+  # window, so it can be checked without a GPU. AII_ASSETS_DIR is needed
+  # because `load()` seeds the shipped example.
+  add_executable(action_digest_test tests/action_digest_test.cpp src/avatar/action_store.cpp)
+  target_include_directories(action_digest_test PRIVATE src src/avatar)
+  target_link_libraries(action_digest_test PRIVATE aii_core)
+  target_compile_definitions(action_digest_test PRIVATE AII_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets")
+  if(MSVC)
+    target_compile_options(action_digest_test PRIVATE /utf-8 /W4)
+  endif()
+  aii_copy_runtime_dlls(action_digest_test)
 endif()
 
 # ---- avatar: the corner window on the Renderer engine (sibling checkout) ----

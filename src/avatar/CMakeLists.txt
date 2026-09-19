@@ -11,6 +11,10 @@ add_executable(avatar
   avatar_controller.h
   avatar_def.cpp
   avatar_def.h
+  action_store.cpp
+  action_store.h
+  approval_window.cpp
+  approval_window.h
   avatar_renderer.cpp
   avatar_renderer.h
   bus_bindings.cpp

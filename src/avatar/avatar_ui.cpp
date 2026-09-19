@@ -1302,6 +1302,56 @@ void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
                       "%%APPDATA%%\\AIInterface\\scripts\\*.py runs at startup;\n"
                       "nothing below that directory is scanned.");
 
+  // ---- M10.5: the two consent switches, and the actions themselves -------
+  //
+  // **This is the only place either switch can be changed.** Both are
+  // `NotSettable` in `kSettingKeys`, so the AI can read them and name them but
+  // cannot write them: a gate the gated party can open is not a gate.
+  settings_row("Allow scripts");
+  ImGui::Checkbox("##scripts_authoring", &state.scripts_authoring);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Whether scripts the AI wrote may run at all.\n"
+                      "Off by default. This does not stop it writing a file --\n"
+                      "with file changes on it can already do that -- it stops\n"
+                      "this app from loading and offering what it finds.");
+
+  settings_row("Auto allow new");
+  ImGui::Checkbox("##scripts_auto_allow", &state.scripts_auto_allow);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("On: a newly written script is allowed straight away.\n"
+                      "Off (the default): a small window asks you first, once\n"
+                      "per new script. Either way it is one decision per script,\n"
+                      "never one per call.");
+
+  if (!options.scripts.empty()) {
+    ImGui::Spacing();
+    for (const AvatarOptions::ScriptRow& r : options.scripts) {
+      ImGui::PushID(r.name.c_str());
+      ImGui::PushStyleColor(ImGuiCol_Text, r.armed ? ImGui::GetStyleColorVec4(ImGuiCol_Text)
+                                                   : warn());
+      ImGui::TextUnformatted(r.name.c_str());
+      ImGui::PopStyleColor();
+      if (ImGui::IsItemHovered() && !r.description.empty())
+        ImGui::SetTooltip("%s", r.description.c_str());
+      // An action the app found but will not run is **listed and refused with
+      // its own word**, never hidden: the whole hazard of a thing that is
+      // quietly not there is that nobody can say how it went missing.
+      if (!r.in_digest) {
+        ImGui::SameLine();
+        ImGui::TextColored(warn(), "(over the limit)");
+      } else if (!r.armed) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Allow")) state.script_arm = r.name;
+      }
+      ImGui::SameLine();
+      // Undo is deleting the file, and this is the whole of it: no versioning,
+      // no quarantine, no trash. The AI cannot press this.
+      if (ImGui::SmallButton("Delete")) state.script_delete = r.name;
+      ImGui::PopID();
+    }
+  }
+  if (ImGui::SmallButton("Open scripts folder")) state.scripts_open_folder = true;
+
   // M3.8. Above Timing rather than below it: this is the section that decides
   // what Claude can do to the user's machine, and it does not belong under a
   // heading about endpointing.

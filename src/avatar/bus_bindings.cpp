@@ -273,6 +273,52 @@ void BusBindings::on_script(const BusMessage& m, std::string* error) {
     if (script_log_.size() < kBusStatusMax) script_log_.push_back(m.str("text"));
     return;
   }
+  // M10.2. **The one door an action is called through, wherever the call came
+  // from** — the ```aii``` block, a policy script, or a schedule later. It
+  // takes a `name` and nothing else: there is no field here that could carry a
+  // path or a body, which is `PromptInjector::request()`'s rule applied to
+  // code instead of prose, and it is what makes this safe to reason about.
+  //
+  // The check is made here even though `VoiceSession::apply_run` already made
+  // one. That is not redundancy for its own sake: this runs on the frame loop
+  // where the store is actually owned, and the other end is a *level* that can
+  // be up to a frame stale — and one of the two callers (a script) never went
+  // through the session at all.
+  if (m.verb == "run") {
+    const std::string name = m.str("name");
+    if (!ctx_.actions) {
+      if (error) *error = "no action store";
+      return;
+    }
+    const ActionRefusal why = ctx_.actions->check(name);
+    if (why != ActionRefusal::None) {
+      const char* reason = "refused";
+      switch (why) {
+        case ActionRefusal::NoSuchAction: reason = "no such action"; break;
+        case ActionRefusal::NotArmed: reason = "not armed by the user yet"; break;
+        case ActionRefusal::AuthoringOff: reason = "scripts.authoring is off"; break;
+        case ActionRefusal::PastCap: reason = "past the action limit"; break;
+        default: break;
+      }
+      // Into the Scripts log, not spoken: the session speaks for the model's
+      // own call, and a script's refused call is a script's business. It is
+      // never silent, though — a refusal nobody can see is the failure this
+      // whole file is written against.
+      if (script_log_.size() < kBusStatusMax)
+        script_log_.push_back("refused run '" + name + "': " + reason);
+      if (error) *error = reason;
+      return;
+    }
+    const Action* a = ctx_.actions->find(name);
+    if (!a) return;
+    // Outbound, which only the app can publish — a script posts *inbound* and
+    // can therefore never forge one of these. The Python dispatcher is the
+    // only reader, and the path it gets is one this app resolved itself.
+    AppBus::instance().publish(
+        BusLine("script.dispatch").str("name", a->name).str("path", a->path).done());
+    if (script_log_.size() < kBusStatusMax) script_log_.push_back("running '" + name + "'");
+    return;
+  }
   if (error) *error = "unknown verb";
 }
 

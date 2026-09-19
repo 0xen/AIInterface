@@ -133,6 +133,30 @@ const AppLine kLines[] = {
      "{} っていう設定はないから、ファイルはそのままにしたよ。"},
     {"{} does not take that value, so I have left it as it was.",
      "{} はその値を取らないから、そのままにしておいたよ。"},
+    // M10.5. Not "I cannot", which invites being asked again, but "that one is
+    // yours" -- the honest shape of it. The user is told where the switch is,
+    // because a refusal that does not say where to go is a dead end.
+    {"That one is yours to set, not mine -- it decides whether my own scripts may run. It is "
+     "in the settings panel, under Scripts.",
+     "それは僕じゃなくて、あなたが決める設定なんだ。僕の書いたスクリプトを動かしていいかどうかのスイッ"
+     "チだからね。設定パネルのScriptsのところにあるよ。"},
+    // {name}. The one the user's instruction is about. It names the script,
+    // says plainly that it is waiting, and ends with the thing to do -- so the
+    // reply is a handover rather than an apology.
+    {"I have a script called {}, but it is not armed yet, so I cannot run it. Open the settings "
+     "panel, find it under Scripts and press Confirm, and then I can.",
+     "{} っていうスクリプトはあるんだけど、まだ許可されてないから動かせないんだ。設定パネルのScripts"
+     "のところで確認を押してもらえたら、使えるようになるよ。"},
+    {"I have a script called {}, but running my own scripts is switched off. You can turn it on "
+     "in the settings panel, under Scripts.",
+     "{} っていうスクリプトはあるんだけど、僕のスクリプトを動かす設定がオフになってるんだ。設定パネル"
+     "のScriptsのところでオンにできるよ。"},
+    {"There is no script called {}, so I have not run anything.",
+     "{} っていうスクリプトはないから、何も動かしてないよ。"},
+    {"{} is past the number of scripts I can keep track of, so I cannot run it. Deleting one you "
+     "no longer want, under Scripts, would make room.",
+     "{} は僕が覚えていられるスクリプトの数を超えちゃってるから動かせないんだ。Scriptsのところでいら"
+     "ないものを消してもらえれば空くよ。"},
     // --- The context window filling up -------------------------------------
     // The English is the user's own sentence, kept word for word. The Japanese
     // is not a translation of it but the same move in Japanese: a warning that
