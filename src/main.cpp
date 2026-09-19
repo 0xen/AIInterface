@@ -47,6 +47,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <thread>
@@ -56,6 +57,7 @@
 #include "audio/mic_in.h"
 #include "core/app_strings.h"
 #include "core/config.h"
+#include "core/cwd_policy.h"
 #include "core/engines.h"
 #include "core/prompt_store.h"
 #include "core/schedule.h"
@@ -96,6 +98,14 @@ std::string read_console_line_utf8() {
 int main(int argc, char** argv) {
   SetConsoleOutputCP(CP_UTF8);
   SetConsoleCP(CP_UTF8);
+  // The same capture the app makes; see src/avatar/main.cpp and
+  // core/cwd_policy.h. A worker spawned from the console loop lands in the
+  // folder the loop was started in, for the same reason.
+  {
+    std::error_code ec;
+    const std::filesystem::path here = std::filesystem::current_path(ec);
+    if (!ec) aii::set_app_dir(here.string());
+  }
 
   // Arguments come from the wide command line so Japanese survives (argv is ANSI-mangled).
   (void)argc; (void)argv;

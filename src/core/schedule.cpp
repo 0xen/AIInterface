@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <utility>
 
+#include "core/cwd_policy.h"
 #include "core/text_util.h"
 
 namespace aii {
@@ -127,16 +128,21 @@ ScheduleRefusal build_schedule(const ScheduleRequest& r, ScheduleAction* action,
     a.name = r.name.empty() ? std::string("task") : r.name;
     // Captured now and never re-resolved: the deferred worker runs with
     // permissions bypassed in the folder it was promised, possibly while the
-    // user is away from the desk. Refused rather than defaulted -- the process
-    // working directory is almost never the one that was meant, and a worker
-    // that ran there would be a surprise ten minutes after the conversation
-    // that could have caught it. A script gets exactly the same rule: it is
-    // the *deferral* that makes a defaulted folder dangerous, not who asked.
-    if (r.cwd.empty()) {
-      say("no cwd= on a scheduled worker");
-      return ScheduleRefusal::NoFolder;
-    }
-    if (!std::filesystem::path(r.cwd).is_absolute()) {
+    // user is away from the desk.
+    //
+    // An empty `cwd` used to be **refused** here, on the grounds that the
+    // process working directory is almost never the one that was meant. The
+    // user has since decided otherwise -- "use same folder as primary agent" --
+    // and the refusal turned out to be part of the problem rather than the
+    // safeguard it looked like: it gave the model a reason to put *something*
+    // on the line, and what it put there was an invented folder (M3.8, three
+    // spawns in ten). A worker in the folder the app was launched from is a
+    // folder the user chose, is on screen, and is the same one the instance
+    // they are talking to is in. So: no folder given, the app's own folder --
+    // and `resolve_worker_cwd()` in core/cwd_policy.h is what decides that a
+    // folder *was* given, at the door the model writes through. A script
+    // driving the bus reaches this with a path it meant, and keeps it.
+    if (!r.cwd.empty() && !std::filesystem::path(r.cwd).is_absolute()) {
       say("cwd=\"" + r.cwd + "\" is not an absolute path");
       return ScheduleRefusal::RelativeFolder;
     }
@@ -150,7 +156,7 @@ ScheduleRefusal build_schedule(const ScheduleRequest& r, ScheduleAction* action,
     say("neither say= nor task= given");
     return ScheduleRefusal::NothingToDo;
   }
-  a.cwd = r.cwd.empty() ? std::filesystem::current_path().string() : r.cwd;
+  a.cwd = r.cwd.empty() ? app_dir() : r.cwd;
 
   ReportGrade grade = a.kind == "worker" ? ReportGrade::Phrased : ReportGrade::Fixed;
   if (!r.grade.empty()) grade = grade_from_string(r.grade);

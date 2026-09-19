@@ -178,7 +178,9 @@ struct ScheduleRequest {
   std::string in;     // the delay, as parse_delay() reads it
   std::string say;    // the exact words to speak when it fires
   std::string task;   // work for a deferred worker; makes the kind "worker"
-  std::string cwd;    // where that worker runs. Required, and absolute.
+  std::string cwd;    // where that worker runs. Optional; empty means the folder
+                      // the app was launched from (core/cwd_policy.h). Absolute
+                      // when given.
   std::string name;   // the worker's name
   std::string label;  // short human words for the pending list
   std::string grade;  // "fixed"/"phrased"; empty means "take it from the shape"
@@ -192,7 +194,10 @@ struct ScheduleRequest {
 enum class ScheduleRefusal {
   None,
   Delay,           // no in=, or one parse_delay() would not take
-  NoFolder,        // work to do and no cwd= to do it in
+  NoFolder,        // no longer produced: an absent cwd= is the app's own folder
+                   // now, not a refusal (core/cwd_policy.h). Kept because the
+                   // bus and the string table both name it, and because a
+                   // refusal code that has been retired is worth saying so.
   RelativeFolder,  // a cwd= that is not absolute
   NothingToDo,     // neither say= nor task=
 };

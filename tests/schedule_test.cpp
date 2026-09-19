@@ -25,6 +25,8 @@
 //                    nothing and says so, rather than delivering there.
 //   7. cap           the 65th pending schedule is refused with a reason.
 //   8. shutdown      take_pending() hands back exactly what is being dropped.
+//  10. no folder     a deferred worker with no cwd= runs where the app was
+//                    launched from rather than being refused (M3.12).
 #include <windows.h>
 // WIN32_LEAN_AND_MEAN drops mmsystem.h, and timeBeginPeriod lives there.
 #include <timeapi.h>
@@ -39,6 +41,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/cwd_policy.h"
 #include "core/schedule.h"
 
 using namespace aii;
@@ -400,6 +403,43 @@ int main(int argc, char** argv) {
     // prints every `schedule` line it parsed), which is better evidence than
     // a literal a human typed.
     std::printf("case 9  M2b.3: every delay string the prompt teaches parses\n\n");
+  }
+
+  // ---- 10. a deferred worker with no folder ----------------------------
+  // The deferred path is the one that worried us: a `schedule` line creates a
+  // worker that starts minutes later at bypassPermissions, possibly with
+  // nobody at the desk. It used to *refuse* a request with no `cwd=`, which
+  // read as caution and worked as pressure -- it gave the model a reason to
+  // put something on the line, and what it put there was invented. The user's
+  // decision ("use same folder as primary agent") replaces the refusal with
+  // the app's own folder, and this is where that is nailed down. The
+  // corroboration rule that decides a folder *was* named lives one door out,
+  // in core/cwd_policy.h, and has its own test.
+  {
+    aii::set_app_dir("C:\\github\\AIInterface");
+    aii::ScheduleRequest r;
+    r.in = "10m";
+    r.task = "check the build and say how it went";
+    r.name = "build";
+    ScheduleAction a;
+    ReportGrade grade = ReportGrade::Fixed;
+    double secs = 0.0;
+    std::string detail;
+    check(aii::build_schedule(r, &a, &grade, &secs, &detail) == aii::ScheduleRefusal::None,
+          "a deferred worker with no cwd= is no longer refused");
+    check(a.cwd == "C:\\github\\AIInterface", "it runs in the folder the app was launched from");
+    check(grade == ReportGrade::Phrased, "and it is still a phrased report");
+
+    r.cwd = "C:\\github\\Renderer";
+    check(aii::build_schedule(r, &a, &grade, &secs, &detail) == aii::ScheduleRefusal::None &&
+              a.cwd == "C:\\github\\Renderer",
+          "a folder that was given is still the folder it runs in");
+
+    r.cwd = "src\\core";
+    check(aii::build_schedule(r, &a, &grade, &secs, &detail) ==
+              aii::ScheduleRefusal::RelativeFolder,
+          "a relative cwd= is still refused, because it is not a folder at all");
+    std::printf("case 10 deferred worker: no folder -> the app's own\n\n");
   }
 
   timeEndPeriod(1);
