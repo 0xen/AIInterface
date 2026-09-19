@@ -82,12 +82,18 @@ endfunction()
 option(AII_BUILD_TESTS "Build the unit tests (default OFF; -DAII_BUILD_TESTS=ON to run them)" OFF)
 option(AII_BUILD_VOICELOOP "Build the milestone-1 console voice loop (no window)" OFF)
 
-# Building the app also assembles it into `latest/` -- one folder holding the
-# executable and everything it loads, so "run the build I just made" does not
-# mean remembering which configuration's bin directory it went to. Only the
-# app is staged: the tests and voiceloop above are development tools and do
-# not belong beside the thing the user runs. See src/avatar/CMakeLists.txt.
-option(AII_STAGE_LATEST "Assemble the runnable app into <source>/latest after each build" ON)
+# `latest/` is for release packages, and this project is not at that stage, so
+# staging is off by default (user's instruction, 19 Sep 2026). A default build
+# produces `build/bin/Release/avatar.exe` and that is the thing to run: it
+# already sits beside every DLL it loads, `data/` and `pre-prompt.md`.
+#
+# The machinery is intact, not removed -- turn it on explicitly with
+# `-DAII_STAGE_LATEST=ON` when assembling a release package, and it will
+# assemble the app into one folder holding the executable and everything it
+# loads. Only the app is staged: the tests and voiceloop above are development
+# tools and do not belong beside the thing the user runs. See
+# src/avatar/CMakeLists.txt and cmake/StageLatest.cmake.
+option(AII_STAGE_LATEST "Assemble the runnable app into <source>/latest after each build (default OFF; for release packaging, -DAII_STAGE_LATEST=ON)" OFF)
 set(AII_LATEST_DIR "${CMAKE_SOURCE_DIR}/latest" CACHE PATH "Where the build stages the runnable app")
 
 if(AII_BUILD_VOICELOOP)
