@@ -116,7 +116,12 @@ void AvatarController::start_reaction(const char* clip, const char* follow, Yiel
   if (follow) start_oneshot(follow, yield);
 }
 
-void AvatarController::appear() { appear_pending_ = true; }
+void AvatarController::appear(bool mic_open) {
+  appear_pending_ = true;
+  // Sticky rather than assigned: a caller that cannot answer the question must
+  // not be able to un-answer a caller that could.
+  appear_mic_ = appear_mic_ || mic_open;
+}
 
 float AvatarController::depart() {
   // The trigger name rather than a clip name, exactly as the entrance uses
@@ -219,12 +224,35 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
     }
     blink_wait_ = roll_blink_wait();
   }
+  // Cleared as a level, not an edge: once the session has left Listening the
+  // entrance no longer has the microphone as an excuse, whatever happens next.
+  //
+  // **Above the entrance rather than below it** (19 Sep 2026). It used to run
+  // afterwards, so the flag an entrance had just set for itself could be wiped
+  // by the same frame's state. That was harmless while the only thing that set
+  // it was `snap.state == Listening` -- which the clear then agreed with -- and
+  // is not harmless now that appear() can say the microphone is the cause while
+  // the snapshot has not caught up. Clearing first and setting second makes the
+  // two orders say the same thing.
+  if (snap.state != VoiceSession::State::Listening) oneshot_from_mic_ = false;
   // M7.2. The entrance, started here and asked for from outside — see
   // appear(). The trigger name rather than a clip name, so M7.1 picks the
   // variant and an avatar that declares none still gets its single `wake`.
   if (appear_pending_) {
     appear_pending_ = false;
-    oneshot_from_mic_ = snap.state == VoiceSession::State::Listening;
+    // The snapshot is taken at the top of the frame and M1f.5's auto-listen
+    // latch opens the microphone *below* it, so on the one frame that matters
+    // most -- the app booting straight into listening -- `snap.state` still
+    // says Idle while the microphone that summoned the avatar is already open.
+    // Asking the snapshot alone therefore called the entrance's own cause an
+    // interruption, and the next frame's Listening pre-empted it: measured in a
+    // boot log as `avatar clip: wake (reaction)` followed by
+    // `avatar clip: listen (listening) after 0.06s` -- an entrance authored at
+    // 1.87 s cut to four frames, on every auto-listen boot. `mic_open` is the
+    // caller's answer to the same question, read after the latch; either one is
+    // enough, because either one means the microphone is why the avatar came.
+    oneshot_from_mic_ = appear_mic_ || snap.state == VoiceSession::State::Listening;
+    appear_mic_ = false;
     start_oneshot("wake", Yield::Entrance);
     // The dwell floor protects what is *on screen* from being replaced too
     // soon, and nothing was: the clip the policy had been playing was behind a
@@ -235,9 +263,6 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
     // entrance arrived late to its own appearance.
     entered_first_frame_ = true;
   }
-  // Cleared as a level, not an edge: once the session has left Listening the
-  // entrance no longer has the microphone as an excuse, whatever happens next.
-  if (snap.state != VoiceSession::State::Listening) oneshot_from_mic_ = false;
   if (snap.turn_failed_seq != last_failed_seq_) {
     last_failed_seq_ = snap.turn_failed_seq;
     start_oneshot("confused", Yield::ToMic);

@@ -119,7 +119,16 @@ class AvatarController {
   //
   // Idempotence is not promised and is not wanted: called twice, the entrance
   // restarts, because two arrivals are two arrivals.
-  void appear();
+  //
+  // `mic_open` is the one fact the snapshot cannot be trusted on at the moment
+  // an entrance starts: M1f.5's auto-listen latch opens the microphone *below*
+  // the frame's snapshot, so on the boot path the summon and the snapshot
+  // disagree about whether the user is listening. The caller knows, because it
+  // is the same frame that latched. See the note in update() -- getting this
+  // wrong made the entrance pre-empt itself one frame in, on every auto-listen
+  // boot. Callers that have no session to ask leave it false and get exactly
+  // the behaviour they had.
+  void appear(bool mic_open = false);
 
   // M2.3c. The avatar is leaving: play an exit, and say how long the band has
   // to stay up for it. Zero means this definition declares no exit art, and
@@ -321,6 +330,10 @@ class AvatarController {
   // moment the session leaves Listening, after which the next Listening is
   // somebody reaching for the mic and does take the avatar.
   bool oneshot_from_mic_ = false;
+  // What appear()'s caller said about the microphone, held until the update()
+  // that consumes the entrance reads it. Separate from `appear_pending_`
+  // because the answer is about the arrival, not about the arming.
+  bool appear_mic_ = false;
   // appear() latches; update() starts the clip. The frame loop settles the
   // band's alpha after it has run the policy for the frame, so the edge
   // arrives just past this object's turn -- and an entrance has to be started
