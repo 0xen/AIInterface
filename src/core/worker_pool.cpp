@@ -317,6 +317,14 @@ std::vector<Command> parse_commands(const std::string& text) {
         else if (key == "in") c.in = value;
         else if (key == "say") c.say = value;
         else if (key == "grade") c.grade = value;
+        // M3.14. `value=` stays a single token rather than joining `task=`
+        // and `path=` in running to the end of the line: every value this
+        // format takes is one word ("haiku", "off", "45", "en,ja"), and the
+        // end-of-line rule exists for fields that are prose. A value with a
+        // space in it — a themed avatar name — still works quoted.
+        else if (key == "key") c.key = value;
+        else if (key == "value") c.value = value;
+        else if (key == "confirm") c.confirm = value;
       }
       if (c.verb.empty()) continue;
       // App-owned verbs are applied here and dropped: see the header. A
@@ -336,7 +344,12 @@ std::vector<Command> parse_commands(const std::string& text) {
       // either. Both are validated by their own handler, which is what can tell
       // the user why it was refused; `spawn`, `pause` and `stop` are still
       // dropped without one, because a nameless worker verb is unrunnable.
-      if (c.verb == "schedule" || c.verb == "cancel" || !c.name.empty())
+      // M3.14 adds `setting`, which addresses a key rather than a worker and
+      // so has no name either. Like the other two it is validated by its own
+      // handler, because only that handler can say *why* — "there is no
+      // setting called that" and "that key does not take that value" are
+      // different sentences and the user hears both.
+      if (c.verb == "schedule" || c.verb == "cancel" || c.verb == "setting" || !c.name.empty())
         out.push_back(std::move(c));
     }
   }

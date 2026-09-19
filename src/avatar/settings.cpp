@@ -1,10 +1,15 @@
 #include "settings.h"
 
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <utility>
 
+#include "avatar_ui.h"
+#include "core/app_bus.h"
 #include "core/config.h"
+#include "core/model_choice.h"
 #include "core/user_paths.h"
 
 namespace aii {
@@ -242,6 +247,219 @@ void Settings::save() {
     fs::remove(tmp, cleanup);
     note("settings not saved - " + path_.string() + ": " + why, false);
   }
+}
+
+// ----------------------------------------------------------------- M3.14
+//
+// The key table. Read the header for why this is a translation table and not
+// a file writer; read `kSettingKeys` itself for the answer to "does this key
+// cost anything", which is the one question the spoken warning turns on.
+//
+// **Every key `settings.json` defines is here, including the ones nothing can
+// change.** The user was offered a curated subset and chose the whole file,
+// and a row with `NotSettable` on it honours that better than an omission
+// does: the AI can name the key, read its value and say exactly why it will
+// not write it, which is more than a shorter table could do. What is *not*
+// here is a key this format does not define -- see `setting_key()`.
+
+namespace {
+
+const SettingKey kSettingKeys[] = {
+    // -- levels the frame loop pushes down. Nothing to warn about, so nothing
+    //    is said: `Msg::Count` is the table's spelling of silence.
+    {"panel.chat_open", SettingValue::Bool, SettingCost::Live, Msg::Count, "settings.chat",
+     "on or off", "off"},
+    {"panel.muted", SettingValue::Bool, SettingCost::Live, Msg::Count, "session.mute", "on or off",
+     "off"},
+    {"panel.avatar_mode", SettingValue::AvatarMode, SettingCost::Live, Msg::Count,
+     "settings.avatar_mode", "always, speaking or hidden", "always"},
+    {"language.enabled", SettingValue::Languages, SettingCost::Live, Msg::Count,
+     "settings.language", "en, ja or en,ja", "en,ja"},
+    {"timing.listen_timeout", SettingValue::Seconds, SettingCost::Live, Msg::Count,
+     "settings.listen_timeout", "15 to 600 seconds, or 0 for never", "60"},
+    {"avatar.name", SettingValue::Free, SettingCost::Live, Msg::Count, "avatar.load",
+     "the name of an avatar folder", "(whatever is installed)"},
+    {"avatar.theme", SettingValue::Free, SettingCost::Live, Msg::Count, "theme.set",
+     "a theme the current avatar declares", "(the avatar's own)"},
+    {"avatar.colour", SettingValue::Colour, SettingCost::Live, Msg::Count, "theme.colour",
+     "#rrggbb", "(none)"},
+
+    // -- stored now, read at startup. Real, saved, and not in force this run.
+    {"startup.auto_listen", SettingValue::Bool, SettingCost::NextLaunch, Msg::SettingNextLaunch,
+     "settings.auto_listen", "on or off", "on"},
+
+    // -- read when the `claude` child is created. Since M3.12 these replace
+    //    that child at once, so they are the only rows that ask first.
+    {"model.name", SettingValue::ModelKey, SettingCost::Restart, Msg::SettingRestartModel,
+     "settings.model", "default, opus, sonnet or haiku", "default"},
+    {"tools.web", SettingValue::Bool, SettingCost::Restart, Msg::SettingRestartTools,
+     "settings.tools", "on or off", "on"},
+    {"tools.file_read", SettingValue::Bool, SettingCost::Restart, Msg::SettingRestartTools,
+     "settings.tools", "on or off", "on"},
+    {"tools.file_write", SettingValue::Bool, SettingCost::Restart, Msg::SettingRestartTools,
+     "settings.tools", "on or off", "off"},
+
+    // -- in the file, and not this app's to write. Each says its own why.
+    {"inspector.placed", SettingValue::Opaque, SettingCost::NotSettable, Msg::SettingWindowOwns, "",
+     "written by the inspector window", "false"},
+    {"inspector.x", SettingValue::Opaque, SettingCost::NotSettable, Msg::SettingWindowOwns, "",
+     "written by the inspector window", "(unplaced)"},
+    {"inspector.y", SettingValue::Opaque, SettingCost::NotSettable, Msg::SettingWindowOwns, "",
+     "written by the inspector window", "(unplaced)"},
+    {"inspector.w", SettingValue::Opaque, SettingCost::NotSettable, Msg::SettingWindowOwns, "",
+     "written by the inspector window", "(unplaced)"},
+    {"inspector.h", SettingValue::Opaque, SettingCost::NotSettable, Msg::SettingWindowOwns, "",
+     "written by the inspector window", "(unplaced)"},
+    // Read once, before there is a window to ask, and never written back. The
+    // file is genuinely the master for this one key -- which is why the
+    // sentence for it points the user at the file rather than apologising.
+    {"window.dodge_watermark", SettingValue::Opaque, SettingCost::NotSettable,
+     Msg::SettingStartupOnly, "", "off, activated or always", "activated"},
+    {"version", SettingValue::Opaque, SettingCost::NotSettable, Msg::SettingFormatField, "",
+     "the file format's own number", "1"},
+};
+
+constexpr int kSettingKeyCount = static_cast<int>(sizeof(kSettingKeys) / sizeof(kSettingKeys[0]));
+
+// "model.name" -> ("model", "name"). An empty section when there is no dot,
+// which is `version` and is why the split is tolerant rather than a parse.
+std::pair<std::string, std::string> split_key(const std::string& dotted) {
+  const size_t dot = dotted.find('.');
+  if (dot == std::string::npos) return {std::string(), dotted};
+  return {dotted.substr(0, dot), dotted.substr(dot + 1)};
+}
+
+bool read_bool(const std::string& v, bool* out) {
+  if (v == "on" || v == "true" || v == "yes" || v == "1") return (*out = true), true;
+  if (v == "off" || v == "false" || v == "no" || v == "0") return (*out = false), true;
+  return false;
+}
+
+}  // namespace
+
+int setting_key_count() { return kSettingKeyCount; }
+
+const SettingKey& setting_key_at(int i) {
+  if (i < 0 || i >= kSettingKeyCount) return kSettingKeys[0];
+  return kSettingKeys[i];
+}
+
+const SettingKey* setting_key(const std::string& dotted) {
+  // **Exact, and a miss is a miss.** The user's "every key" was a decision
+  // about scope -- the whole file rather than a chosen few -- and this table
+  // *is* the whole file. It is not a safety whitelist narrowing that scope; it
+  // is the format, and a key outside it is one the model made up. Refusing it
+  // is cheaper than writing it: an inert key in the file is dead weight the
+  // user meets a week later, and the only alternative on offer was to write it
+  // *and* say so, which costs the same sentence and leaves the weight behind.
+  for (const SettingKey& k : kSettingKeys)
+    if (dotted == k.key) return &k;
+  return nullptr;
+}
+
+std::string setting_bus_line(const SettingKey& k, const std::string& value, std::string* error) {
+  const auto fail = [&](const char* why) {
+    if (error) *error = why;
+    return std::string();
+  };
+  if (k.cost == SettingCost::NotSettable || !k.bus || !*k.bus)
+    return fail("nothing running owns that key");
+
+  switch (k.value) {
+    case SettingValue::Bool: {
+      bool on = false;
+      if (!read_bool(value, &on)) return fail("expected on or off");
+      BusLine line(k.bus);
+      // `tools` is the one row whose door takes two fields, and the second is
+      // derived from the key rather than stored: `tools.file_read` is group
+      // `file_read`. Derived, so a fourth tool group is a row here and
+      // nothing else, exactly as `tool_policy.h` promises for the panel.
+      if (std::string(k.bus) == "settings.tools") line.str("group", split_key(k.key).second);
+      return line.flag("on", on).done();
+    }
+    case SettingValue::Seconds: {
+      // Parsed here rather than trusted, and range-checked against the same
+      // numbers the DragInt clamps to, so a refusal is a sentence the user
+      // hears instead of a log line they do not.
+      char* end = nullptr;
+      const double s = std::strtod(value.c_str(), &end);
+      if (value.empty() || (end && *end != '\0')) return fail("expected a number of seconds");
+      if (s < 0.0) return fail("seconds cannot be negative");
+      if (s > 0.0 && (s < 15.0 || s > 600.0)) return fail("15 to 600 seconds, or 0 for never");
+      return BusLine(k.bus).num("seconds", s, 0).done();
+    }
+    case SettingValue::ModelKey: {
+      // By the settings.json key, and an unknown one is refused before it is
+      // written. This is what makes the picker's whole argument hold for the
+      // voice path too: a `--model` the CLI rejects is a child that starts
+      // and then fails every turn, so the user would hear the conversation
+      // thrown away and then hear nothing work.
+      if (model_choice_for_key(value) < 0) return fail("no such model");
+      return BusLine(k.bus).str("name", value).done();
+    }
+    case SettingValue::AvatarMode: {
+      for (int i = 0; i < kAvatarVisibilityCount; ++i)
+        if (value == kAvatarVisibilityNames[i]) return BusLine(k.bus).str("value", value).done();
+      return fail("no such avatar mode");
+    }
+    case SettingValue::Languages: {
+      // The file's own spelling, one string rather than two flags, for the
+      // reason the header gives: a pair of booleans has a spelling for
+      // "neither" and this does not.
+      const bool en = value == "en" || value == "en,ja" || value == "ja,en";
+      const bool ja = value == "ja" || value == "en,ja" || value == "ja,en";
+      if (!en && !ja) return fail("expected en, ja or en,ja");
+      return BusLine(k.bus).flag("english", en).flag("japanese", ja).done();
+    }
+    case SettingValue::Colour: {
+      if (value.size() != 7 || value[0] != '#') return fail("expected #rrggbb");
+      return BusLine(k.bus).str("value", value).done();
+    }
+    case SettingValue::Free:
+      // An avatar folder or a theme name. **Only the art knows**, so this is
+      // the one shape passed through unvalidated and refused at the bus door
+      // instead. Written down because it is the one case where a refusal
+      // reaches the log and not the user.
+      if (value.empty()) return fail("expected a name");
+      return BusLine(k.bus).str("name", value).done();
+    case SettingValue::Opaque:
+      return fail("nothing running owns that key");
+  }
+  return fail("unknown value shape");
+}
+
+std::string Settings::value_text(const char* section, const char* key) const {
+  const json& j = section && *section ? member(member(root_, section), key) : member(root_, key);
+  if (j.is_null()) return std::string();
+  if (j.is_string()) return j.get<std::string>();
+  // dump() gives JSON's own spelling of a number or a bool, which is the
+  // spelling the file has and therefore the one the user would read back.
+  return j.dump();
+}
+
+std::string settings_digest(const Settings& s) {
+  std::string out;
+  for (const SettingKey& k : kSettingKeys) {
+    const std::pair<std::string, std::string> parts = split_key(k.key);
+    const std::string have = s.value_text(parts.first.c_str(), parts.second.c_str());
+    out += k.key;
+    out += " = ";
+    // A value the file does not name is shown as the default *and said to
+    // be*, because "60" and "60 by default, nobody has ever set it" are
+    // different facts, and the second is the one that explains why a hand
+    // edit did not stick.
+    out += have.empty() ? std::string(k.def) + " (default)" : have;
+    out += "  -- ";
+    out += k.shape;
+    switch (k.cost) {
+      case SettingCost::Live: out += "; takes effect at once"; break;
+      case SettingCost::NextLaunch: out += "; takes effect at the next launch"; break;
+      case SettingCost::Restart: out += "; RESTARTS the conversation"; break;
+      case SettingCost::NotSettable: out += "; cannot be changed while running"; break;
+    }
+    out += "\n";
+  }
+  return out;
 }
 
 }  // namespace aii

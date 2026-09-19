@@ -126,6 +126,7 @@
 #include "core/config.h"
 #include "core/cwd_policy.h"
 #include "core/model_choice.h"
+#include "core/prompt_store.h"
 #include "core/schedule.h"
 #include "core/worker_pool.h"
 #include "imgui_layer.h"
@@ -718,6 +719,12 @@ int main(int /*argc*/, char** /*argv*/) {
               aii::model_label(voiceCfg.model_override),
               voiceCfg.model_override.empty() ? std::string("no --model flag")
                                               : "--model " + voiceCfg.model_override);
+    // M3.14. The settings the AI is told about, handed to the prompt store
+    // before anything composes a system prompt. Here rather than beside the
+    // store because this is the point at which `settings` has been read and
+    // nothing has yet been mirrored back out of the panel — so it is the file
+    // as the user left it, which is what they will read if they open it.
+    aii::set_settings_digest(aii::settings_digest(settings));
     log::info("[tools] conversational instance: {} ({})",
               aii::tool_summary(voiceCfg.tools),
               aii::tool_list(voiceCfg.tools).empty() ? std::string("--tools \"\"")
