@@ -82,9 +82,9 @@ int main() {
   check(workers != nullptr, "the workers prompt is in the shipped graph");
   if (!workers) return 1;
 
-  // Every policy, including the ones the surface cannot currently reach: a
-  // hand-edited settings.json can ask for any of them, and `file_write` stops
-  // being unreachable the day `kFileWritingOffered` flips.
+  // Every policy. All eight are reachable from the surface now that
+  // `kFileWritingOffered` is true, and a hand-edited settings.json could ask
+  // for any of them even if one were greyed again.
   const int combos = 1 << kToolGroupCount;
   for (int mask = 0; mask < combos; ++mask) {
     ToolPolicy p;
@@ -116,6 +116,22 @@ int main() {
     // The one sentence that has to change shape rather than just disappear.
     check(has(text, "You have no tools of your own.") == (tool_list(p).empty()),
           label + " says it has nothing only when it has nothing");
+
+    // The user's own bug, as a check. The report was "it says it can create a
+    // file and then cannot", so the denial and the grant are asserted against
+    // each other for every policy: the prompt must deny writing exactly when
+    // writing is not granted, and never both at once.
+    const bool writes = tool_group_active(p, kToolGroupFileWrite);
+    check(has(text, "or change anything on this PC") == !writes,
+          label + (writes ? " stops denying that it can change files"
+                          : " says plainly that it cannot change anything here"));
+    check(has(text, "Where a new file goes matters") == writes,
+          label + (writes ? " tells it not to guess where a new file goes"
+                          : " has no writing advice to give"));
+    // With writing on, changing a file is no longer something it has to hand
+    // to a worker, and the read paragraph must not still say it is.
+    check(has(text, "a project gone through, a file changed") == (!writes && tool_group_active(p, kToolGroupFileRead)),
+          label + " calls a file change a worker's job only when it cannot make one");
   }
 
   std::printf("\n-- the syntax itself --\n");

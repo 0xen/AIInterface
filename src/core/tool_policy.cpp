@@ -32,7 +32,8 @@ const ToolGroup kGroups[kToolGroupCount] = {
      "without asking first. It starts in the directory the app was\n"
      "launched from, but a path it is given can be anywhere.",
      true},
-    // Present, off, and greyed. See kFileWritingOffered.
+    // Offered since the user asked for it, and off until they tick it.
+    // See kFileWritingOffered.
     {"file_write", "File writing", "Write,Edit", false, true,
      "Off: nothing Claude does while you are talking to it can\n"
      "change a file. Writing is a worker's job.",

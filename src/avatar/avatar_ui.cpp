@@ -866,14 +866,15 @@ void listen_timeout_section(AvatarUiState& state) {
 // changing my files — and the rest are withheld and *said* to be withheld,
 // because "what else can it do" is the question that started this.
 //
-// **Writing is not offered yet.** An enabled tool here is *granted*, not
+// **Writing is offered, and off.** An enabled tool here is *granted*, not
 // offered: `--permission-prompts none` means there is no confirmation step,
 // because nothing in this app can answer one. Reading without asking is a
 // thing a person can weigh. Creating and overwriting files without asking, in
-// whatever directory the app was launched from, is a thing they should be
-// asked about first — and they have not been. So the row exists, is off, is
-// greyed, and says exactly what it would do. `kFileWritingOffered` turns it on
-// when they answer.
+// whatever directory the app was launched from, is a thing they had to be
+// asked about first — and they have now answered, by trying to use it. So the
+// row is live, still off by default, and the amber line under it is what it
+// always said it would be: a description of what ticking the box hands over,
+// in the tense it happens in. Being offered is not being recommended.
 //
 // **A toggle cannot reach the running Claude.** `--allowedTools` is fixed when
 // the child process starts. The honest options were: restart it and replay the
@@ -916,9 +917,10 @@ void tools_section(AvatarUiState& state, const AvatarOptions& options) {
     // greyed control with no visible reason reads as a bug.
     if (g.risky) {
       ImGui::PushStyleColor(ImGuiCol_Text, warn());
-      ImGui::TextWrapped("Writing is a worker's job for now: a tool switched on here is granted, "
-                         "not offered, so Claude would create and overwrite files with no "
-                         "confirmation and no undo.");
+      ImGui::TextWrapped("A tool switched on here is granted, not offered: with this ticked, "
+                         "Claude creates and overwrites files with no confirmation and no undo, "
+                         "in whatever folder the app was launched from unless it is given a "
+                         "path. Leave it off and writing stays a worker's job.");
       ImGui::PopStyleColor();
     }
   }

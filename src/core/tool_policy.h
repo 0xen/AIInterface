@@ -70,12 +70,18 @@ struct ToolGroup {
 
 const ToolGroup& tool_group(int id);
 
-// **The one-line change.** The user has been told file access starts
-// read-only. If they say yes to writing, this becomes `true` and the
-// `File writing` row stops being greyed out — the tool names, the persistence,
-// the plumbing and the warning text are already here and already correct.
-// Nothing else in the app needs editing.
-inline constexpr bool kFileWritingOffered = false;
+// **The user has now answered.** They tried to have the conversational
+// instance write a file, found it could not, and asked for it — so the
+// `File writing` row is a live toggle, still **off by default**. Offering it
+// and defaulting it on are different decisions and only the first was made:
+// a tool enabled here is *granted*, so the box has to be ticked deliberately,
+// by someone who has read the amber line under it.
+//
+// The flag stays rather than being deleted. It is the table's `offered`
+// column, a fourth group may arrive greyed the way this one did, and
+// `tool_group_active()` gates the stored value on it so that a hand-edited
+// `settings.json` cannot grant what the surface refuses to offer.
+inline constexpr bool kFileWritingOffered = true;
 
 // The built-in tools this app does not offer the conversational instance at
 // all, and the reason, for the read-only row under the toggles. Shells and
