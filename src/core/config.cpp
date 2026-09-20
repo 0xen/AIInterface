@@ -42,6 +42,13 @@ Config Config::from_env() {
   // the timeout, which is the safe direction to fail — the microphone then
   // behaves exactly as it did before M1f.
   c.listen_timeout = (float)std::atof(env_or("AII_LISTEN_TIMEOUT", "60").c_str());
+  // M12.2. Seeds the wake phrase. The avatar reads `settings.json`'s
+  // `wake.phrase` over this before the session is built and then pushes it down
+  // as a level every frame, exactly as it does the listen timeout. **Empty
+  // means off and empty is the default**, which is the same spelling
+  // `listen_timeout`'s 0 uses. See `core/wake_word.h` for the matching rule and
+  // for the minimum length a phrase has to clear to be armed at all.
+  c.wake_phrase = env_or("AII_WAKE_PHRASE", "");
   // M3.15. Parsed and not clamped, exactly as the timeout above is and for the
   // same reason: 0 is "never hand over" and is a legal answer, and an
   // unparseable string reads as 0 through atof, which switches the feature off

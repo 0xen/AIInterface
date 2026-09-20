@@ -695,6 +695,23 @@ void BusBindings::on_settings(const BusMessage& m, std::string* error) {
     return changed(std::to_string(static_cast<int>(s)));
   }
 
+  if (m.verb == "wake_phrase") {
+    // M12.2. Written into the panel's buffer, which is the owner of record and
+    // is what main.cpp mirrors into the file and pushes down to the session --
+    // so this door and the text box are genuinely the same control, which is
+    // the promise `kSettingKeys` makes about every row in it.
+    //
+    // **An empty value is legal and means off.** It is the only way to switch
+    // the feature back off, so a refusal here would leave the model able to
+    // open the user's microphone and unable to close it again.
+    const std::string v = m.str("value");
+    if (const std::string why = wake_phrase_problem(v); !why.empty())
+      return refuse("that is too short to listen for; it needs at least three letters");
+    if (v.size() + 1 > sizeof(ui.wake_phrase)) return refuse("that is too long for a wake word");
+    std::snprintf(ui.wake_phrase, sizeof(ui.wake_phrase), "%s", v.c_str());
+    return changed(v.empty() ? std::string("(off)") : v);
+  }
+
   if (m.verb == "auto_listen") {
     ui.auto_listen = m.flag("on", true);
     return changed(on_off(ui.auto_listen));
@@ -732,6 +749,7 @@ void BusBindings::on_settings(const BusMessage& m, std::string* error) {
             .str("language", language_spec({ui.lang_english, ui.lang_japanese}))
             .flag("auto_listen", ui.auto_listen)
             .num("listen_timeout", listen_timeout_seconds(ui), 0)
+            .str("wake_phrase", ui.wake_phrase)
             .str("avatar", ui.avatar_name)
             .str("theme", ui.theme)
             .str("avatar_mode", kAvatarVisibilityNames[static_cast<int>(ui.avatar_mode)])

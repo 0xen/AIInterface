@@ -71,6 +71,24 @@ struct Config {
   // mechanism without sitting through a real minute; the floor a person is
   // allowed to type belongs in M1f.2's control, where a refusal can be shown.
   float listen_timeout = 60.0f;
+  // M12.2. AII_WAKE_PHRASE: the word that opens full listening when the
+  // microphone is not latched. **Empty is off, and empty is the default** —
+  // the same spelling `listen_timeout`'s 0 uses, so the feature has one way of
+  // saying "off" rather than a value and a flag that can contradict.
+  //
+  // It sits here beside `listen_timeout` with the same ownership: main.cpp
+  // reads `settings.json` over it before the session is built, and, like the
+  // timeout and unlike `tools` or `model_override`, it is then pushed down as
+  // a level every frame through `VoiceSession::set_wake_phrase()`. Nothing
+  // about it reaches a command line, which is why `wake.phrase` is a `Live`
+  // row in `kSettingKeys`: changing it costs no restart and no conversation.
+  //
+  // What it switches on is a microphone that is genuinely open whenever the
+  // session is idle and unlatched, decoding on this machine and sending
+  // nothing anywhere until the phrase matches (the user's own choice, 20 Sep
+  // 2026). `core/wake_word.h` has the matching rule; `VoiceSession::tick_wake`
+  // has the loop; the window says so on the microphone button.
+  std::string wake_phrase;
   // M3.15. AII_HANDOFF_AT: how full the context window may get before the
   // session hands over to a fresh one, as a **fraction of that model's own
   // window** — the number `UsageStats::ctx` reports and the footer draws.

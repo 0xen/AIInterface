@@ -1,6 +1,7 @@
 #include "avatar_ui.h"
 
 #include "core/button_registry.h"
+#include "core/wake_word.h"
 #include "imgui.h"
 #include "imgui_layer.h"
 #include "pixel_icons.h"
@@ -161,6 +162,38 @@ constexpr IconRows kIconMicDozed = {
     "....#####....",
     "......#......",
     "......#......",
+    "...#######...",
+    ".............",
+};
+
+// M12.2. Open, and listening for one word only.
+//
+// This is the face that has to be impossible to mistake for a shut microphone,
+// because it is drawn while the capture device is genuinely running: the user
+// chose always-on local matching, and the deal they made is that the app is
+// honest about it. So the capsule is drawn **whole and unmarked** — nothing
+// crossed out, nothing dimmed, no `z` — and what is added is two arcs at the
+// right, the ear/ripple that means "hearing". The same ripples the `Listening`
+// face does not have, because that one does not need them: it is the loudest
+// plate on the row.
+//
+// Read against its neighbours: `Listening` is a red plate with a bare capsule
+// (open, and everything goes to Claude); this is a cool plate with a capsule
+// and ripples (open, and nothing goes anywhere); `Latched` and `Dozed` are the
+// same capsule struck through or asleep. Four different glyphs, four different
+// plates — the house rule, kept.
+constexpr IconRows kIconMicWake = {
+    ".....###.....",
+    ".....###..o..",
+    ".....###.o.o.",
+    ".....###.o.o.",
+    ".....###.o.o.",
+    "...#.###.o.o.",
+    "...#.###.o.o.",
+    "...#.....o.o.",
+    "....#####o.o.",
+    "......#..o.o.",
+    "......#...o..",
     "...#######...",
     ".............",
 };
@@ -965,6 +998,63 @@ void listen_timeout_section(AvatarUiState& state) {
   }
 }
 
+// ---- M12.2: the wake phrase ---------------------------------------------------
+//
+// One text box, and everything interesting about it is what it says underneath.
+//
+// **The box is the whole of the switch.** There is no tick box beside it, for
+// the reason the timeout section spends a paragraph arriving at from the other
+// direction: an empty phrase is not a broken setting, it is the feature being
+// off, and it is the shipped default. A separate on/off would be a second
+// piece of state that can disagree with the first — "on, with no phrase" has
+// no meaning, and "off, with a phrase" is a value the app is not honouring.
+// Clearing the box is switching it off, and the line underneath says so in
+// those words.
+//
+// **The prose is not decoration, and it is not reassurance.** This control
+// opens the user's microphone and leaves it open. What is written under it is
+// the only place the deal is stated in full before they make it: the mic is
+// on, the matching happens here, nothing is sent until the phrase lands. The
+// user chose always-on over match-only-while-open, so what they are owed is
+// not a warning but an accurate description — and the microphone button's
+// seventh face is the same sentence said continuously afterwards.
+void wake_phrase_section(AvatarUiState& state) {
+  settings_row("Wake word");
+  ImGui::SetNextItemWidth(-1.0f);
+  ImGui::InputTextWithHint("##wake_phrase", "off - type a name to switch it on",
+                           state.wake_phrase, sizeof(state.wake_phrase));
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("A word or short phrase - a name for the AI, or anything\nyou would not say "
+                      "by accident.\n\nCase, spaces and punctuation are ignored, and it is\nfound "
+                      "inside a longer sentence, so \"Hey, Aria!\" and\n\"hey aria what time is "
+                      "it\" both match \"Aria\".\n\nClear the box to switch it off.");
+
+  const std::string phrase(state.wake_phrase);
+  const std::string problem = wake_phrase_problem(phrase);
+  if (!problem.empty()) {
+    // A refusal, in the one place the user is looking. The phrase is *not*
+    // armed while this is showing, and the sentence says why rather than
+    // leaving a box that was typed into and does nothing.
+    ImGui::PushStyleColor(ImGuiCol_Text, warn());
+    ImGui::TextWrapped("%s", problem.c_str());
+    ImGui::PopStyleColor();
+    return;
+  }
+  ImGui::PushStyleColor(ImGuiCol_Text, dim());
+  if (wake_phrase_armed(phrase)) {
+    ImGui::TextWrapped("The microphone stays on whenever you are not already talking, and "
+                       "everything it hears is matched here, on this machine. Nothing is sent "
+                       "anywhere until you say \"%s\" - and what you said to wake it is not sent "
+                       "either. The mic button shows a teal ripple the whole time it is on.",
+                       phrase.c_str());
+  } else {
+    ImGui::TextWrapped("Off. The microphone only opens when you click Talk or hold SPACE. Type a "
+                       "name here and it will stay on, listening on this machine for that one "
+                       "word.");
+  }
+  ImGui::PopStyleColor();
+}
+
 // ---- M3.11: which model the one you talk to runs on --------------------------
 //
 // The user asked for it in one line: "make a setting to choose what base model
@@ -1439,6 +1529,14 @@ void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   // nothing else is going to scroll this surface anyway.
   if (state.settings_scroll_timing) ImGui::SetScrollHereY(0.0f);
   listen_timeout_section(state);
+  // M12.2. Directly under "Stop listening", and that placement is the same
+  // argument startup_section makes about sitting above it: the three controls
+  // the user now has over the microphone are "start it at launch", "stop it
+  // when the room goes quiet" and "start it when I say this", and they are one
+  // idea read top to bottom. The wake phrase in particular only makes sense
+  // next to the timeout — the timeout is what keeps putting the app into the
+  // state the wake phrase gets it out of.
+  wake_phrase_section(state);
   // Left as it was (eae9061): the rest of Timing is still a stub, and it reads
   // correctly under a control rather than instead of one.
   ImGui::TextColored(dim(), "Endpointing and early speech: M2.8.");
@@ -2137,18 +2235,29 @@ bool transport_slot(const char* id, ImVec2 pos, const char* const* rows,
   return clicked;
 }
 
-// The six faces of the microphone button. Every one of them is something the
+// The seven faces of the microphone button. Every one of them is something the
 // session can actually report — there is no "about to listen" or "hearing
 // noise" here, because nothing in VoiceSession knows either.
 enum class MicFace {
-  Unavailable,  // engines still loading, or --no-voice: nothing to press
-  Idle,         // shut, and the next press decides what it means
-  Dictating,    // a Talk press is down; the words are going into the box
-  Listening,    // latched on and hearing the room
-  Latched,      // latched on but deliberately shut while Claude replies
-  Dozed,        // M1f.3: shut because the latch timed out on a silent room
+  Unavailable,   // engines still loading, or --no-voice: nothing to press
+  Idle,          // shut, and the next press decides what it means
+  Dictating,     // a Talk press is down; the words are going into the box
+  Listening,     // latched on and hearing the room
+  Latched,       // latched on but deliberately shut while Claude replies
+  Dozed,         // M1f.3: shut because the latch timed out on a silent room
+  // M12.2. **Open, matching the wake phrase, and sending nothing anywhere.**
+  //
+  // A seventh face and not a reuse of `Idle`, and the reason is the same shape
+  // as M1f.3's but with a great deal more riding on it: with a wake phrase set,
+  // `Idle` and this are the same session state to everything except the
+  // capture device, and the capture device is the entire question. Drawing the
+  // ordinary shut capsule here would mean the app holding a microphone open
+  // while the one control that reports on the microphone said it was closed.
+  // The user picked always-on local matching over the safer option; they did
+  // not pick being unable to tell.
+  WakeListening,
 };
-constexpr int kMicFaceCount = 6;
+constexpr int kMicFaceCount = 7;
 
 // `dozed` is the panel's latched reading of `Snapshot::listen_timeout_seq` —
 // see AvatarUiState::mic_dozed for why it is a level here and an edge there.
@@ -2156,13 +2265,13 @@ constexpr int kMicFaceCount = 6;
 // whole of its precedence: it only ever competes with `Idle`, because it only
 // exists while the microphone is shut and nothing has happened since.
 MicFace mic_face(const VoiceSession::Snapshot& snap, bool voice_enabled, bool loading,
-                 bool mic_on, bool mic_hold, bool dozed) {
+                 bool mic_on, bool mic_hold, bool dozed, bool wake_listening) {
   // The same escape hatch `--clip` and `--sprite` give the avatar's art, and
   // for the same reason: three of these six faces are only reachable by
   // talking into a microphone or by walking away from one, so without this
   // there is no way to *look* at them — and "verified by looking at a capture"
-  // is the standard this panel is held to. `AII_MIC_FACE=0..5` pins one;
-  // `cycle` walks all six, two seconds each.
+  // is the standard this panel is held to. `AII_MIC_FACE=0..6` pins one;
+  // `cycle` walks all seven, two seconds each.
   if (const char* pin = std::getenv("AII_MIC_FACE")) {
     const int n = std::strcmp(pin, "cycle") == 0
                       ? static_cast<int>(ImGui::GetTime() * 0.5) % kMicFaceCount
@@ -2173,7 +2282,18 @@ MicFace mic_face(const VoiceSession::Snapshot& snap, bool voice_enabled, bool lo
   // A hold is not the latch and never sets it (VoiceSession::talk_pressed),
   // so this order is not a preference between two true things.
   if (mic_hold) return MicFace::Dictating;
-  if (!mic_on) return dozed ? MicFace::Dozed : MicFace::Idle;
+  if (!mic_on) {
+    // M12.2, and it outranks `Dozed` — which is the whole of its precedence.
+    // The two can be true at once and routinely are: the latch times out on a
+    // silent room, and the passive matching that was waiting underneath it
+    // comes straight back up. `Dozed` would then draw a dimmed, shut capsule
+    // over a microphone that is open, which is the one thing this face exists
+    // to make unreachable. The news `Dozed` carries is real but it is second:
+    // the status line still says the latch closed by itself, and the tooltip
+    // here says what is listening now.
+    if (wake_listening) return MicFace::WakeListening;
+    return dozed ? MicFace::Dozed : MicFace::Idle;
+  }
   return snap.state == VoiceSession::State::Listening ? MicFace::Listening : MicFace::Latched;
 }
 
@@ -2183,6 +2303,7 @@ const char* const* mic_icon(MicFace face) {
     case MicFace::Listening: return kIconMicLive;
     case MicFace::Latched: return kIconMicShut;
     case MicFace::Dozed: return kIconMicDozed;
+    case MicFace::WakeListening: return kIconMicWake;
     default: return kIconMic;
   }
 }
@@ -2213,6 +2334,20 @@ TransportSkin mic_skin(MicFace face) {
       skin.mark = warn();
       return skin;
     }
+    case MicFace::WakeListening: {
+      // **Lit, and deliberately not red.** Lit because the microphone is open
+      // and a neutral plate here would read as off; not red because red on
+      // this row has meant one thing since M1b — what you say is going to
+      // Claude — and borrowing it for a state that sends nothing would make
+      // the loudest signal on the button the least reliable one. A cool,
+      // clearly-on teal is the honest middle: something is happening, and it
+      // is not that.
+      //
+      // The ripples take the same amber `warn()` mark ink the slash and the
+      // `z` use, so there is still exactly one mark colour on this button.
+      return {ui_color(0.10f, 0.40f, 0.44f), ui_color(0.14f, 0.52f, 0.57f),
+              ui_color(0.07f, 0.31f, 0.34f), ui_color(0.92f, 0.99f, 1.00f), warn()};
+    }
     case MicFace::Unavailable:
       return neutral_skin(dim());
     default:
@@ -2220,7 +2355,21 @@ TransportSkin mic_skin(MicFace face) {
   }
 }
 
-const char* mic_tooltip(MicFace face) {
+// `wake_phrase` is only read for the one face that names it. It is a
+// std::string return rather than a literal for that same reason: the wake
+// tooltip has the user's own word in it, and quoting it back is most of what
+// makes the tooltip answer "what is it listening *for*".
+std::string mic_tooltip(MicFace face, const std::string& wake_phrase) {
+  if (face == MicFace::WakeListening) {
+    // Three sentences, in the order the questions arrive: is the microphone
+    // on, what is it doing with what it hears, and how do I stop it. The
+    // middle one is the promise the whole design rests on and it is stated as
+    // a fact about this machine rather than as reassurance.
+    return "The microphone is ON, listening for \"" + wake_phrase +
+           "\".\nWhat it hears is matched on this machine and sent nowhere.\n"
+           "Say it, or click, to start talking to Claude.\n"
+           "(Settings > Listening clears the phrase to switch this off.)";
+  }
   switch (face) {
     case MicFace::Unavailable: return "Microphone - not ready yet";
     // The two gestures, still spelled out: they are the whole of what this
@@ -2573,7 +2722,8 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
   // single click, because the session opens the microphone on the press —
   // before the gesture's meaning is known — so that neither reading of it loses
   // the words spoken while it was still undecided.
-  const MicFace face = mic_face(snap, voice_enabled, busy, mic_on, mic_hold, state.mic_dozed);
+  const MicFace face = mic_face(snap, voice_enabled, busy, mic_on, mic_hold, state.mic_dozed,
+                                snap.wake_listening);
   transport_slot("##mic", slot_pos(0), mic_icon(face), mic_skin(face));
   // One line per edge of the gesture, with everything needed to decide *why* a
   // release was judged off the button: the item's rect, where ImGui thinks the
@@ -2640,7 +2790,7 @@ void transport(AvatarUiState& state, const VoiceSession::Snapshot& snap, bool vo
     out.talk_over_button = ImGui::IsItemHovered();
     gesture_line("release");
   }
-  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", mic_tooltip(face));
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", mic_tooltip(face, snap.wake_phrase).c_str());
 
   // --- slot 1: mute (was "Silence") ---
   //

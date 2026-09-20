@@ -45,6 +45,7 @@ add_library(aii_core STATIC
   src/core/text_util.cpp
   src/core/tool_policy.cpp
   src/core/user_paths.cpp
+  src/core/wake_word.cpp
   src/core/worker_pool.cpp)
 target_include_directories(aii_core PUBLIC
   src
@@ -157,6 +158,19 @@ if(AII_BUILD_TESTS)
   target_compile_definitions(clip_utf8_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   if(MSVC)
     target_compile_options(clip_utf8_test PRIVATE /utf-8 /W4)
+  endif()
+
+  # ---- wake_word_test: M12's two decisions, both of them provable offline ----
+  # Same rule as clip_utf8_test: wake_word.cpp is standard-library-only and
+  # listen_restore.h is header-only, so this builds and runs with no engine DLL,
+  # no window and -- the point -- no microphone. It is where M12's negative
+  # cases live: the near-misses that must not open the mic, and the worker that
+  # must not reopen a mic the user shut on purpose.
+  add_executable(wake_word_test tests/wake_word_test.cpp src/core/wake_word.cpp)
+  target_include_directories(wake_word_test PRIVATE src)
+  target_compile_definitions(wake_word_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(wake_word_test PRIVATE /utf-8 /W4)
   endif()
 
   # ---- app_strings_test: the canned lines, and that their bytes survive MSVC ----

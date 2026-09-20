@@ -198,6 +198,15 @@ enum class Msg {
   // scarce, and it could refuse, wander or say it afterwards.
   HandoffHousekeeping,
 
+  // --- The wake phrase (M12.2) -------------------------------------------
+  // Said when the phrase the user set has just been heard and the microphone
+  // has gone from passive matching to full listening. One word, because it is
+  // an acknowledgement and not an announcement: the user has called a name and
+  // is about to say the actual thing, and anything longer is something to talk
+  // over. It is said rather than left to the button because the point of a
+  // wake phrase is not having to look at the window.
+  WakeHeard,
+
   Count,                 // not a message: the number of them, for the test
 };
 

@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "audio/audio_out.h"
@@ -18,9 +19,11 @@
 #include "core/config.h"
 #include "core/engines.h"
 #include "core/language.h"
+#include "core/listen_restore.h"
 #include "core/prompt_store.h"
 #include "core/schedule.h"
 #include "core/speech_queue.h"
+#include "core/wake_word.h"
 #include "core/worker_pool.h"
 #include "llm/llm_client.h"
 
@@ -74,6 +77,23 @@ class VoiceSession {
     // line, the microphone icon's face, and the slime dozing off. M1f.1
     // deliberately does none of that; it only makes the moment visible.
     unsigned listen_timeout_seq = 0;
+    // M12.2. **The microphone is genuinely open and the window has to say so.**
+    //
+    // True while the session is in the passive wake state: the capture device
+    // is running, the recogniser is decoding every word of it on this machine,
+    // and *nothing whatever leaves the process* until the wake phrase matches.
+    // The user chose always-on local matching over a mic that only works while
+    // it is already open (20 Sep 2026), and the whole of what makes that choice
+    // honest rather than a trapdoor is that the app never draws a shut
+    // microphone while this is true. The panel gives it its own face —
+    // `MicFace::WakeListening` — because the house rule is colour *and* glyph
+    // and because "open, but only listening for one word" is a different fact
+    // from any of the other six.
+    //
+    // `wake_phrase` is what it is listening for, for the tooltip. Empty when
+    // the feature is off, which is the default.
+    bool wake_listening = false;
+    std::string wake_phrase;
     // The two continuous signals the avatar's motion is driven by (M2.4).
     // Both are already computed inside the loop; neither had a way out of it.
     //
@@ -321,6 +341,26 @@ class VoiceSession {
   // changed. **This is the call M1f.2 makes.** Any thread.
   void set_listen_timeout(float seconds);
   float listen_timeout() const;
+  // M12.2. The wake phrase, pushed down as a level every frame exactly as the
+  // mute, the language selection and the listen timeout are, and for the same
+  // reason: `settings.json` stays the one owner of record and this is a no-op
+  // unless it changed. **An empty phrase means the feature is off** — the same
+  // spelling `timing.listen_timeout`'s `0` uses, so there is one way to say
+  // "off" rather than a value and a flag that can contradict each other — and
+  // it is the default.
+  //
+  // A phrase shorter than `kWakeMinChars` characters is also off; see
+  // `core/wake_word.h` for why, and for the matching rule. Any thread.
+  //
+  // Changing it costs nothing and takes effect on the next frame: it decides
+  // an on-device string comparison and reaches no command line, which is why
+  // `wake.phrase` is a `Live` row in `kSettingKeys`. A phrase changed in the
+  // middle of a conversation does not discard it.
+  void set_wake_phrase(std::string phrase);
+  std::string wake_phrase() const;
+  // True while the passive capture is running. Frame loop only, like
+  // mic_open(); the panel reads the Snapshot copy.
+  bool wake_listening() const { return wake_open_; }
   void say(const std::string& text);   // send typed/scripted text as the user turn
 
   // M10.2/M10.5. What actions exist and whether the app will load them, pushed
@@ -462,6 +502,35 @@ class VoiceSession {
   // was captured — see the definition.
   void close_latch_after_silence(float quiet_for);
   void begin_listening();
+
+  // ------------------------------------------------------------- M12
+  //
+  // M12.1. The frame-loop half of the restore; `core/listen_restore.h` holds
+  // the rule and every case it has to get right. This watches the number of
+  // running workers for its two edges and drains the report flag.
+  void tick_listen_restore(State s);
+  // M12.2. One frame of the passive wake state, run from the Idle branch when
+  // the latch is off and a phrase is armed. Opens the capture device, feeds
+  // the recogniser, compares, and on a match hands over to full listening.
+  void tick_wake();
+  // Start / stop the passive capture. `end_wake()` is idempotent and is called
+  // from every path that takes the microphone for something else, including
+  // begin_listening() — two owners of one capture device is the one way this
+  // feature could break the app it is bolted onto.
+  void begin_wake(const std::string& phrase);
+  void end_wake();
+  // One hypothesis, compared against the phrase. On a match it drops the
+  // segment, sets the latch level and announces -- see the definition for why
+  // the utterance that woke the app is never sent.
+  void wake_heard(const std::string& heard);
+  // The phrase as the frame loop should see it this frame (it is written under
+  // `mutex_` by set_wake_phrase, from whichever thread the panel is on).
+  std::string wake_phrase_locked_copy() const;
+  // The harnesses. Both are env-var only and both are described where they are
+  // read: `AII_WORKER_SIM` drives M12.1's edges without a real `claude` child,
+  // and `AII_WAKE_SAY` pushes a hypothesis through M12.2's gate without a
+  // person at the microphone.
+  void tick_harnesses();
   // Closes the mic and decodes what is left, returning the final text. Both
   // ends of an utterance go through here so the decode is written once.
   std::string finish_utterance();
@@ -757,6 +826,76 @@ class VoiceSession {
   // lock here and none is needed; see the note above the check in update().
   std::atomic<float> listen_timeout_{0.0f};
   std::chrono::steady_clock::time_point timeout_blocked_at_{};
+
+  // ---------------------------------------------------------------- M12.1
+  //
+  // "Only if it was listening in the first place." `listen_restore_` is the
+  // whole rule and `core/listen_restore.h` is where it is argued; these three
+  // are the frame loop's side of it.
+  //
+  // `worker_reported_` is set by the report callback, which runs on the pool's
+  // own thread, and drained by the frame loop — the microphone belongs to the
+  // frame loop and nothing else may open it. `workers_out_prev_` is last
+  // frame's running count, for the none->some edge that starts a wait.
+  // `all_back_since_` is when the count last reached zero, and it exists
+  // because the count dropping to zero and the report arriving are not the
+  // same instant: the pool reports from another thread, so ending the wait the
+  // moment `running()` hits zero would sometimes throw the memory away a
+  // millisecond before the report that needed it. The wait therefore ends only
+  // after the count has held at zero for `kWaitEndGraceSec`.
+  ListenRestore listen_restore_;
+  std::atomic<bool> worker_reported_{false};
+  size_t workers_out_prev_ = 0;
+  std::chrono::steady_clock::time_point all_back_since_{};
+  // M12.1's harness: workers the frame loop is pretending are out. See
+  // `AII_WORKER_SIM` in the .cpp. Zero in every ordinary run.
+  size_t sim_workers_out_ = 0;
+
+  // ---------------------------------------------------------------- M12.2
+  //
+  // The wake phrase. Written under `mutex_` because set_wake_phrase() is a
+  // level pushed from wherever the settings surface lives; every read on the
+  // frame loop takes a copy once per frame rather than holding the lock across
+  // a decode.
+  std::string wake_phrase_;
+  // The passive capture is running. Frame loop only. It is *not* the same
+  // thing as `mic_open_`, and the two are mutually exclusive by construction:
+  // `mic_open_` means the latch, which sends what it hears to Claude, and this
+  // means a microphone that is open and going nowhere.
+  bool wake_open_ = false;
+  // When the current wake segment began, and the last hypothesis seen. The
+  // segment is restarted on an endpoint or after `kWakeSegmentSec`, which is
+  // what keeps the recogniser's own audio buffer and hypothesis from growing
+  // without bound in a session that may now run for hours with the microphone
+  // open. **Nothing here is ever kept**: a segment that did not match is
+  // dropped where it stands.
+  std::chrono::steady_clock::time_point wake_segment_began_{};
+  std::string wake_said_;
+  // The gate in front of the decoder, and the only reason always-on matching
+  // is affordable. Same shape and same constants as the Listening branch's:
+  // `wake_open_at_` is what the calibration window is measured from,
+  // `wake_floor_` is the room, `wake_last_voice_` is the last frame over the
+  // gate, `wake_decoding_` is whether audio is currently reaching the decoder
+  // at all, and `wake_preroll_` is the fraction of a second kept back so that
+  // the gate opening does not cost the first syllable of the phrase. See
+  // kWakeTailSec in the .cpp for the measurement that put them all here.
+  std::chrono::steady_clock::time_point wake_open_at_{};
+  std::chrono::steady_clock::time_point wake_last_voice_{};
+  // When the gate's current continuous run began, zero while it is shut. The
+  // run is what separates a voice from a chair; see kWakeOnsetSec.
+  std::chrono::steady_clock::time_point wake_run_began_{};
+  float wake_floor_ = 0.0f;
+  bool wake_decoding_ = false;
+  std::vector<float> wake_preroll_;
+  // What always-on matching actually costs, accumulated so `AII_WAKE_DEBUG`
+  // can print a real-time factor rather than an impression. Frame loop only.
+  float wake_decode_ms_ = 0.0f;
+  float wake_audio_sec_ = 0.0f;
+  // M12.2's harness: `AII_WAKE_SAY`'s remaining scripted utterances and when
+  // the script started. Empty in every ordinary run.
+  std::vector<std::pair<float, std::string>> wake_script_;
+  std::chrono::steady_clock::time_point harness_began_{};
+  std::vector<std::pair<float, std::string>> worker_script_;
   // The same noise gate as last_voice_, read over a longer window: when the
   // gate was last open *continuously* for kVoiceRunSec, and when the run
   // currently open began (zero when the gate is shut). This is what the
