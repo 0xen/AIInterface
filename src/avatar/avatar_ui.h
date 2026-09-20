@@ -459,6 +459,19 @@ struct AvatarUiState {
   // piece of state that can disagree with the one in force.
   bool listen_timeout_on = false;
   int listen_timeout_sec = 0;
+  // M12.2. The wake phrase, as the control holds it. Same contract as
+  // `listen_timeout_sec`: the panel is the owner of record, main.cpp mirrors it
+  // into `settings.json` and pushes it down to the session as a level every
+  // frame, and **an empty buffer means the feature is off**, which is the
+  // default and the only way to switch it back off.
+  //
+  // A fixed char buffer because that is what `ImGui::InputText` takes, and 96
+  // bytes because this is a name, not a sentence — 96 is thirty-two Japanese
+  // characters, and a wake phrase longer than that is one nobody will say the
+  // same way twice. Japanese typing reaches it the same way it reaches the
+  // message box: `win_text_input.cpp` forwards WM_CHAR through
+  // `AddInputCharacterUTF16`, so an IME composition arrives already composed.
+  char wake_phrase[96] = {0};
   // M3.8. The Tools toggles, as the control holds them. Same contract as
   // `muted` in one half — the panel is the owner of record and main.cpp
   // mirrors it into settings.json — and the opposite in the other: there is

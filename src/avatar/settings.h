@@ -16,6 +16,7 @@
 //     "language": { "enabled": "en,ja" },
 //     "startup": { "auto_listen": true },
 //     "timing": { "listen_timeout": 60.0 },
+//     "wake": { "phrase": "" },
 //     "tools": { "web": true, "file_read": true, "file_write": false },
 //     "model": { "name": "default" },
 //     "inspector": { "placed": true, "x": 1180, "y": 420, "w": 1100, "h": 700 }
@@ -35,6 +36,23 @@
 // `VoiceSession::set_listen_timeout`), so there is one way to say "never" in
 // the whole feature rather than a number and a flag that can contradict
 // each other.
+//
+// `wake.phrase` (M12.2) is the word or short phrase that opens full listening
+// when it is heard. **An empty string means off, and off is the default** —
+// deliberately the same spelling `timing.listen_timeout` uses for "never", so
+// the file has one way of saying a feature is switched off rather than a value
+// and a separate flag that can disagree with each other. A phrase shorter than
+// `kWakeMinChars` characters is also off, and the panel says why rather than
+// arming something that would fire inside ordinary words.
+//
+// It is its own section rather than a key under `timing` or `startup` because
+// what it switches on is not a timing and not a startup choice: it is a
+// microphone that stays open, decoding locally, for as long as the app is idle
+// and unlatched. The user chose that over matching only while the mic was
+// already open (20 Sep 2026), on the understanding that nothing reaches Claude
+// until the phrase matches — and the window has a seventh microphone face that
+// says the microphone is open whenever it is. See `core/wake_word.h` for the
+// matching rule and which way it errs.
 //
 // `startup.auto_listen` (M1f.5) is whether the app latches its own microphone
 // on once the engines are up. **A missing key means true**, which is the whole
@@ -144,6 +162,13 @@ enum class SettingValue {
   AvatarMode,  // a name from kAvatarVisibilityNames
   Languages,   // "en", "ja" or "en,ja"
   Colour,      // #rrggbb
+  // M12.2. A short phrase the user chose, in either language, and the one
+  // value in this file whose *content* is arbitrary text rather than a name
+  // from a set. Separate from `Free` because `Free` means "only the art can
+  // say whether this is legal, so pass it through"; this one can be checked
+  // here and is -- `wake_phrase_problem()` refuses anything too short to be
+  // safe to listen for, and an empty string is legal and means off.
+  Phrase,
   Free,        // a name only the art can validate (an avatar, a theme)
   Opaque,      // NotSettable rows, which never parse a value at all
 };
@@ -239,6 +264,23 @@ class Settings {
   // belongs where the art is read rather than here. This stores the name and
   // nothing else; the loader is what decides whether it still means anything.
   std::string get_string(const char* section, const char* key, const std::string& def) const;
+  // M12.2. The same thing for a string **whose empty value is meaningful**,
+  // which `get_string`/`set_string` above deliberately cannot store.
+  //
+  // That pair is for *names* — an avatar directory, a theme — and both ends of
+  // it treat "" as "not set": the getter answers with the default and the
+  // setter refuses to write, because there is no avatar called nothing and
+  // persisting one would mean a file that claims a setting the app is not
+  // honouring. Every word of that reasoning is right for a name and wrong for
+  // `wake.phrase`, where "" is the shipped default, is what the feature being
+  // off looks like, and is a value the user must be able to get back to by
+  // clearing the box. Routed through `get_string` the box could be typed into
+  // and never emptied again.
+  //
+  // So this is a second pair rather than a relaxation of the first: an empty
+  // name still cannot be written, and an empty phrase still can.
+  std::string get_text(const char* section, const char* key, const std::string& def) const;
+  void set_text(const char* section, const char* key, const std::string& value);
 
   // Both are no-ops when the value already matches what is stored, so the
   // frame loop can call them unconditionally every frame and "on change" is

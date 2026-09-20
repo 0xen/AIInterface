@@ -792,6 +792,16 @@ int main(int /*argc*/, char** /*argv*/) {
     const float defaultListenTimeout = voiceCfg.listen_timeout;
     voiceCfg.listen_timeout =
         settings.get_float("timing", "listen_timeout", voiceCfg.listen_timeout);
+    // M12.2. Read here for exactly the reason the timeout above is: it is part
+    // of `Config` and the session is constructed from it, so reading it later
+    // would leave the first seconds of a run listening for something the file
+    // disagrees with — or, worse, with the microphone open when the file says
+    // the feature is off.
+    //
+    // `get_text`, not `get_string`: an empty phrase is the default and is what
+    // "off" looks like, and `get_string` answers an empty stored value with
+    // the default instead of with the empty string. See settings.h.
+    voiceCfg.wake_phrase = settings.get_text("wake", "phrase", voiceCfg.wake_phrase);
     // M3.15. How full the context window may get before the session hands
     // over to a fresh one, read here for the same reason as the timeout above:
     // it is part of `Config` and the session is constructed from it.
@@ -1241,6 +1251,13 @@ int main(int /*argc*/, char** /*argv*/) {
             // about.
             ? std::max(1, (int)std::lround(voiceCfg.listen_timeout))
             : std::max(aii::kListenTimeoutUserFloorSec, (int)std::lround(defaultListenTimeout));
+    // M12.2. The control is seeded from the same `Config` field the session
+    // was built from, so the box and the microphone start the run agreeing.
+    // Truncated rather than rejected if a hand edit put something enormous in
+    // the file: the box holds what it holds, and the session is pushed what
+    // the box holds on the first frame, so the two still agree afterwards.
+    std::snprintf(uiState.wake_phrase, sizeof(uiState.wake_phrase), "%s",
+                  voiceCfg.wake_phrase.c_str());
     // M1f.2's pose flags. `settings_open` is deliberately not persisted (see
     // AvatarUiState), so this is the only way a scripted run can be looking at
     // the surface at all.
@@ -3119,6 +3136,13 @@ int main(int /*argc*/, char** /*argv*/) {
                 // "takes effect next time you click Talk", and no restart.
                 // set_listen_timeout() is a no-op unless the value changed.
                 session->set_listen_timeout(aii::listen_timeout_seconds(uiState));
+                // M12.2. The same level, for the same reason and with the same
+                // no-op-unless-changed contract: a wake phrase typed while the
+                // app is running is in force on the next frame, not the next
+                // launch and not the next restart. It decides an on-device
+                // string comparison and touches no command line, which is why
+                // `wake.phrase` is a `Live` row.
+                session->set_wake_phrase(uiState.wake_phrase);
                 // Only reaches here once the panel has satisfied itself the
                 // session can take it; say() refuses the rest anyway.
                 if (!r.send_text.empty()) {
@@ -3163,6 +3187,12 @@ int main(int /*argc*/, char** /*argv*/) {
             // The same expression that was pushed into the session above, so
             // what is remembered and what is running cannot diverge.
             settings.set_float("timing", "listen_timeout", aii::listen_timeout_seconds(uiState));
+            // M12.2. `set_text`, not `set_string`: clearing the box is how the
+            // feature is switched off, and `set_string` refuses to write an
+            // empty value — the box could be typed into once and never emptied
+            // again. Its own section, so a later "wake" key cannot collide
+            // with `timing`.
+            settings.set_text("wake", "phrase", uiState.wake_phrase);
             // M3.8. One boolean per group, under "tools". Written every frame
             // like the rest and debounced like the rest; the file is the only
             // place a change to these can go, since the running child cannot

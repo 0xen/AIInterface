@@ -11,6 +11,7 @@
 #include "core/config.h"
 #include "core/model_choice.h"
 #include "core/user_paths.h"
+#include "core/wake_word.h"
 
 namespace aii {
 
@@ -132,6 +133,21 @@ void Settings::set_string(const char* section, const char* key, const std::strin
   // has since been deleted, and the next run would show the fallback while the
   // file went on claiming otherwise.
   if (value.empty()) return;
+  const json& cur = member(member(root_, section), key);
+  if (cur.is_string() && cur.get<std::string>() == value) return;
+  if (!root_[section].is_object()) root_[section] = json::object();
+  root_[section][key] = value;
+  dirty_ = true;
+  since_change_ = 0.0f;
+}
+
+std::string Settings::get_text(const char* section, const char* key,
+                               const std::string& def) const {
+  const json& v = member(member(root_, section), key);
+  return v.is_string() ? v.get<std::string>() : def;
+}
+
+void Settings::set_text(const char* section, const char* key, const std::string& value) {
   const json& cur = member(member(root_, section), key);
   if (cur.is_string() && cur.get<std::string>() == value) return;
   if (!root_[section].is_object()) root_[section] = json::object();
@@ -277,6 +293,15 @@ const SettingKey kSettingKeys[] = {
      "settings.language", "en, ja or en,ja", "en,ja"},
     {"timing.listen_timeout", SettingValue::Seconds, SettingCost::Live, Msg::Count,
      "settings.listen_timeout", "15 to 600 seconds, or 0 for never", "60"},
+    // M12.2. `Live`, and the cost class is the interesting part of this row.
+    // It decides one on-device string comparison: it reaches no command line,
+    // so the `claude` child is untouched and the conversation is not discarded,
+    // and nothing about it is read once at startup. A user can name the AI
+    // mid-conversation and be answered by that name on the next breath, which
+    // is what `Live` is for. `Msg::Count` is the table's spelling of silence,
+    // and silence is right here for the same reason it is right for mute.
+    {"wake.phrase", SettingValue::Phrase, SettingCost::Live, Msg::Count, "settings.wake_phrase",
+     "a word or short phrase to say to start listening; empty means off", "(empty: off)"},
     {"avatar.name", SettingValue::Free, SettingCost::Live, Msg::Count, "avatar.load",
      "the name of an avatar folder", "(whatever is installed)"},
     {"avatar.theme", SettingValue::Free, SettingCost::Live, Msg::Count, "theme.set",
@@ -430,6 +455,20 @@ std::string setting_bus_line(const SettingKey& k, const std::string& value, std:
     }
     case SettingValue::Colour: {
       if (value.size() != 7 || value[0] != '#') return fail("expected #rrggbb");
+      return BusLine(k.bus).str("value", value).done();
+    }
+    case SettingValue::Phrase: {
+      // M12.2. **An empty value is legal here and means off**, which is why
+      // this cannot share the `Free` case directly below — that one refuses an
+      // empty name, correctly, because there is no such thing as an avatar
+      // called "". "Switch the wake word off" has to be sayable, and this is
+      // the sentence that says it.
+      //
+      // Anything non-empty is checked against the same rule the panel and the
+      // session use, so a phrase too short to be safe to listen for is refused
+      // in words the user hears rather than stored and quietly ignored.
+      if (const std::string why = wake_phrase_problem(value); !why.empty())
+        return fail("too short: it needs at least three letters");
       return BusLine(k.bus).str("value", value).done();
     }
     case SettingValue::Free:

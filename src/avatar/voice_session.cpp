@@ -121,6 +121,77 @@ constexpr float kListenTimeoutFloorSec = 1.0f;
 // utterance the user actually gets a reply to can be missed by this.
 constexpr float kVoiceRunSec = 0.25f;
 
+// M12.1. How long the running-worker count has to hold at zero before the wait
+// is declared over and the remembered latch state is thrown away.
+//
+// Not zero, and the reason is a race rather than a preference. `running()` is
+// read on the frame loop, but a worker's report arrives on the pool's own
+// thread; the two are not ordered, so a frame that sees the count reach zero
+// may be a millisecond ahead of the report that needed the memory. Two seconds
+// is far longer than that gap and far shorter than the pause between one piece
+// of work and the next, so the only behaviour it changes is that a worker
+// started within two seconds of the last one finishing joins the same wait
+// instead of re-reading the latch. Over two seconds the latch has not moved.
+constexpr float kWaitEndGraceSec = 2.0f;
+
+// M12.2. How long one passive wake segment may run before the recogniser is
+// restarted on a fresh stream.
+//
+// The wake state can now be open for hours, where every other use of this
+// recogniser lasts one utterance. `Recognizer` keeps the segment's own PCM for
+// M8.4's re-decode and its hypothesis grows with the stream, so a stream that
+// is never restarted is a slow leak and a decoder whose hypothesis is mostly
+// old news. Eight seconds is several times the longest wake phrase anyone
+// would type and short enough that the buffer stays small. The segment is also
+// restarted on every endpoint, which is what happens in practice — this is the
+// ceiling for a room with continuous noise that never endpoints at all.
+constexpr float kWakeSegmentSec = 8.0f;
+
+// M12.2, and the two numbers that make always-on matching affordable at all.
+//
+// **This was measured before it was chosen, and the first version failed.**
+// Feeding the recogniser continuously — which is what "always-on" naively
+// means — cost **175% of one core, sustained**, against 2.1% for the same app
+// with the phrase cleared (30 s runs, 20 Sep 2026, measured as process CPU
+// time over a 15 s window). The wall-clock real-time factor looked harmless at
+// 0.095, and that is exactly the trap: `build_stt` gives the recogniser eight
+// threads, so it keeps up with the microphone easily while burning nearly two
+// cores to do it. On this desktop that is a fan that never stops; on a laptop
+// it is the battery. Shipping it would have been a feature that worked and
+// quietly ruined the machine it worked on.
+//
+// The fix is not a second recogniser and not fewer threads — it is to decode
+// only when there is something to decode. The RMS gate this session already
+// runs for endpointing and for the listen timeout says whether anybody is
+// making a noise; below it, nothing is fed to the decoder at all, and a quiet
+// room costs what an idle app costs. **No second detector**, which is the same
+// rule kVoiceRunSec is written under: one gate, one threshold, one opinion
+// about whether the room is quiet.
+//
+// `kWakeTailSec` keeps decoding for a moment after the gate shuts, so the end
+// of a word is not cut off by the silence that follows it. `kWakePrerollSec`
+// is the other end of the same problem: the gate opens on the first loud
+// frame, by which time the first consonant is already past, so the last
+// fraction of a second of audio is kept and handed over when the gate opens.
+// Without it "Aria" reliably decodes as "ria".
+// The measurement did not stop at the gate, and the second half of it is the
+// same lesson kVoiceRunSec learned for the listen timeout. With a bare gate in
+// front of the decoder the cost fell from 175% of a core to 31%, which is
+// better and still wrong: the log said 8.6 s of the 22 s the microphone had
+// been open was reaching the decoder, in a room with nobody in it. That is not
+// speech. It is the transients the kVoiceRunSec comment already names -- a
+// keyboard press, a chair, the GPU fan changing note -- each one opening the
+// gate for an instant and buying itself the whole `kWakeTailSec` tail.
+//
+// So the gate has to be open *continuously* for kWakeOnsetSec before anything
+// is decoded. A click is tens of milliseconds and a syllable is hundreds, so
+// 0.12 s sits well clear of both; what it costs is that the phrase's first
+// 0.12 s arrives late, which is exactly what the pre-roll is for, and the
+// pre-roll is sized to cover it several times over.
+constexpr float kWakeOnsetSec = 0.12f;
+constexpr float kWakeTailSec = 0.8f;
+constexpr float kWakePrerollSec = 0.5f;
+
 float rms(const std::vector<float>& s) {
   if (s.empty()) return 0.0f;
   double sum = 0.0;
@@ -332,6 +403,17 @@ void VoiceSession::load() {
   workers_ = std::make_unique<WorkerPool>(cfg_.claude_exe, cfg_.worker_bypass);
   workers_->set_on_report([this](const std::string& name, WorkerPool::State state,
                                  const std::string& shown, const std::string& spoken) {
+    // M12.1, and the first line of the callback on purpose: **a worker has
+    // come back**, which is the whole of what the restore is waiting for. It
+    // is set before any of the early returns below because none of them is a
+    // reason to leave the user without the microphone they had -- a worker
+    // that failed, or one they stopped themselves, has still stopped being the
+    // thing the app went quiet for.
+    //
+    // This runs on the pool's report thread, so it does exactly one thing: set
+    // a flag. Every decision, and the microphone itself, belongs to the frame
+    // loop -- see tick_listen_restore().
+    worker_reported_.store(true, std::memory_order_release);
     // M2b.4 sent a *scheduled* worker's report to the conversational instance
     // and let a live worker's own sentence be spoken as 517c241 settled it.
     // **M2c.1 makes the live path do the same thing**, because the argument
@@ -495,6 +577,13 @@ void VoiceSession::update() {
   // the floor, and nothing needs to: the microphone is shut and the state is
   // Idle for the whole of it.
   if (resetting()) {
+    // M12.2. The passive capture goes down with everything else: update()
+    // stops draining the microphone for the second the rebuild takes, and a
+    // capture device nothing is draining is one that overruns. It comes back
+    // on the first Idle frame afterwards, which is the same frame the latch
+    // comes back on -- and if the latch is the one that comes back, tick_wake()
+    // is not reached at all, which is correct.
+    if (wake_open_) end_wake();
     if (workers_) workers_->update();
     return;
   }
@@ -532,6 +621,21 @@ void VoiceSession::update() {
   // Reap a finished turn thread.
   if (turn_.joinable() && !turn_running_) turn_.join();
   if (workers_) workers_->update();
+
+  // M12. The harnesses first, so an event they post this frame is seen by the
+  // restore on the same frame rather than the next one; then the restore,
+  // which may set the latch level that the Idle branch at the bottom of this
+  // function turns into an open microphone.
+  tick_harnesses();
+  tick_listen_restore(s);
+
+  // M12.2. The passive capture belongs to the Idle branch and to nothing else.
+  // Unconditional here rather than at each of the paths that take the
+  // microphone away, because there are five of them and a capture device with
+  // two owners is the one way this feature could break the app it is bolted
+  // on to. begin_listening() closes it too, for the paths that never come back
+  // through here first.
+  if (wake_open_ && (s != State::Idle || mic_open_ || hold_)) end_wake();
 
   // M3.15. Before the state branches, because the stage that ends in a
   // restart is reached while the session is Thinking and Thinking has no
@@ -739,17 +843,31 @@ void VoiceSession::update() {
     // microphone is shut — it is reopened on the line below, and taking the
     // frame here is what stops that happening. A user who is mid-sentence is
     // in Listening, which never reaches this branch at all.
-    if (!flush_announcements() && !flush_injected_turns() && !begin_handoff_if_due() &&
-        mic_open_) {
-      // Still unmuted after a reply finished: reopen the mic for the next
-      // turn. It stays shut while Claude speaks, so the speakers are never
-      // transcribed back in as the user.
-      begin_listening();
+    if (!flush_announcements() && !flush_injected_turns() && !begin_handoff_if_due()) {
+      if (mic_open_) {
+        // Still unmuted after a reply finished: reopen the mic for the next
+        // turn. It stays shut while Claude speaks, so the speakers are never
+        // transcribed back in as the user.
+        begin_listening();
+      } else if (!hold_) {
+        // M12.2. The latch is off and there is nothing waiting to be said, so
+        // the microphone is free: listen passively for the wake phrase. It is
+        // the *last* link in the same chain for the same reason begin_listening()
+        // is -- an announcement or a report has to go out before any microphone
+        // opens, or the app speaks into its own open mic. A no-op when no
+        // phrase is set, which is the default.
+        tick_wake();
+      }
     }
   }
 }
 
 void VoiceSession::begin_listening() {
+  // M12.2. The passive capture and this one are the same device and the same
+  // recogniser, and they must never both be up. Here rather than only in
+  // update() because talk_pressed() reaches this function directly -- a SPACE
+  // hold never passes through the Idle branch at all.
+  end_wake();
   speech_->clear();
   eng_.stt->begin();
   mic_->discard();
@@ -905,6 +1023,16 @@ void VoiceSession::set_mic_open(bool open) {
     return;
   }
 
+  // M12.1. **This is the user's own hand on the microphone**, and it is the
+  // one thing that outranks the remembered state: the button, the SPACE
+  // gesture, the bus and the panel all arrive here. Shutting it forgets the
+  // memory for the rest of the wait, so no worker still out can reopen what
+  // they closed; opening it re-arms, because "listening" is now the state they
+  // chose. Neither of those is what close_latch_after_silence() does, and that
+  // asymmetry is the whole of M12.1 -- see core/listen_restore.h.
+  if (open) listen_restore_.user_opened_the_mic();
+  else listen_restore_.user_shut_the_mic();
+
   if (open) {
     // The latch outranks a gesture in flight: with it on the utterance sends
     // itself on a pause, so there is nothing left for a release to finalise.
@@ -990,6 +1118,378 @@ void VoiceSession::set_listen_timeout(float seconds) {
 
 float VoiceSession::listen_timeout() const {
   return listen_timeout_.load(std::memory_order_relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// M12.1. Listening resumes after a worker reports -- if it was listening first
+// ---------------------------------------------------------------------------
+//
+// The rule, and every case it has to get right, is in `core/listen_restore.h`;
+// it is a separate header precisely so that the negative case -- mic shut on
+// purpose, worker returns, mic stays shut -- is checked by `wake_word_test`
+// rather than by somebody reproducing it with three background agents. This is
+// only the frame loop's side: two edges to spot and one flag to drain.
+//
+// **The microphone is the frame loop's.** The report callback runs on the
+// pool's thread and does nothing but set `worker_reported_`; every decision and
+// every write to `mic_open_` happens here.
+//
+// `mic_open_` is set as a *level*, never by calling set_mic_open(). The Idle
+// branch at the bottom of update() is what turns the level into an open
+// capture device, and it is the same path that reopens the microphone after
+// every reply -- which matters because a report usually arrives while the
+// session is speaking the report itself. Setting the level mid-reply means the
+// microphone opens when the reply ends, which is the behaviour, and it is the
+// same lesson `relatch_after_reset_` learned the hard way.
+void VoiceSession::tick_listen_restore(State s) {
+  const auto now = std::chrono::steady_clock::now();
+  const size_t out = (workers_ ? workers_->running() : 0) + sim_workers_out_;
+
+  // The wait begins: workers went from none to some. `wait_began()` ignores
+  // this while a wait is already open, so a second worker joins the first
+  // one's wait rather than re-reading a latch that has since timed out.
+  if (out > 0 && workers_out_prev_ == 0) {
+    listen_restore_.wait_began(mic_open_);
+    rend::log::info(
+        "[listen-restore] a worker went out; the microphone was {} - a report {} reopen it",
+        mic_open_ ? "LISTENING" : "SHUT", listen_restore_.armed() ? "WILL" : "will NOT");
+  }
+  workers_out_prev_ = out;
+  if (out > 0) all_back_since_ = {};
+  else if (all_back_since_.time_since_epoch().count() == 0) all_back_since_ = now;
+
+  if (worker_reported_.exchange(false)) {
+    const bool restore = listen_restore_.worker_reported();
+    // The one line that proves this feature either way, and it says which of
+    // the two it did rather than only the interesting one: "the mic stayed
+    // shut" is the claim that is worth evidence, because it is the one a naive
+    // "reopen on report" implementation would get wrong while looking fine.
+    rend::log::info("[listen-restore] a worker reported; {} -> the microphone {}",
+                    !listen_restore_.waiting()  ? "no wait was open"
+                    : restore                   ? "it was listening when the wait began"
+                                                : "it was shut when the wait began, or the user "
+                                                  "has taken it since",
+                    restore ? "is being reopened" : "STAYS SHUT");
+    if (restore && !mic_open_ && !hold_ && s != State::Loading && s != State::Failed &&
+        !resetting()) {
+      mic_open_ = true;
+      // Hold the wait open past this frame: the count may already be zero and
+      // the grace below must not end the wait on the same frame a report used
+      // it, or a second worker's report would find nothing to restore.
+      all_back_since_ = {};
+    }
+  }
+
+  // The wait ends once the count has held at zero for the grace. See
+  // kWaitEndGraceSec for why it is not simply "the count reached zero".
+  if (listen_restore_.waiting() && out == 0 && all_back_since_.time_since_epoch().count() != 0 &&
+      std::chrono::duration<float>(now - all_back_since_).count() >= kWaitEndGraceSec) {
+    listen_restore_.wait_ended();
+    rend::log::info("[listen-restore] every worker is back; the remembered state is cleared");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M12.2. The wake phrase
+// ---------------------------------------------------------------------------
+
+std::string VoiceSession::wake_phrase_locked_copy() const {
+  std::lock_guard<std::mutex> l(mutex_);
+  return wake_phrase_;
+}
+
+std::string VoiceSession::wake_phrase() const { return wake_phrase_locked_copy(); }
+
+void VoiceSession::set_wake_phrase(std::string phrase) {
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    if (wake_phrase_ == phrase) return;  // a level: called every frame
+    wake_phrase_ = phrase;
+  }
+  // Said in the log rather than out loud. Changing this setting is a thing the
+  // user did on purpose in a panel that is showing them the result; a spoken
+  // confirmation would be the app narrating a button press.
+  if (wake_phrase_armed(phrase)) {
+    log("[wake] listening for \"" + phrase + "\" whenever the microphone is not latched");
+  } else if (const std::string why = wake_phrase_problem(phrase); !why.empty()) {
+    log("[wake] \"" + phrase + "\" is off: " + why);
+  } else {
+    log("[wake] off");
+  }
+}
+
+// The passive capture goes up. Deliberately its own pair of functions rather
+// than a flag inside begin_listening(): the two states want the microphone for
+// opposite reasons and only one of them may hold the capture device at a time,
+// and a single function with a mode is how that invariant gets lost.
+void VoiceSession::begin_wake(const std::string& phrase) {
+  if (wake_open_) return;
+  eng_.stt->begin();
+  mic_->discard();
+  if (!mic_->start()) {
+    set_status("mic failed to start");
+    return;
+  }
+  wake_open_ = true;
+  wake_segment_began_ = std::chrono::steady_clock::now();
+  wake_open_at_ = wake_segment_began_;
+  // A fresh calibration of the room every time the passive capture comes up,
+  // exactly as begin_listening() takes one: the noise floor that was right an
+  // hour ago is not evidence about the room now.
+  wake_floor_ = 0.0f;
+  wake_last_voice_ = {};
+  wake_run_began_ = {};
+  wake_decoding_ = false;
+  wake_preroll_.clear();
+  wake_said_.clear();
+  // At info, and worded for somebody auditing the microphone rather than for
+  // somebody debugging the feature: this line is the log's record that the
+  // capture device was opened without anyone pressing anything, and why.
+  rend::log::info(
+      "[wake] passive listening is on for \"{}\" - the microphone is OPEN, every word is decoded "
+      "on this machine, and nothing leaves the process until the phrase matches",
+      phrase);
+  set_status("listening for \"" + phrase + "\" only - nothing is sent until you say it");
+}
+
+void VoiceSession::end_wake() {
+  if (!wake_open_) return;
+  wake_open_ = false;
+  mic_->stop();
+  // Flushed and thrown away, not read. Everything decoded while passive is
+  // dropped where it stands -- including the segment the wake phrase was
+  // *in*. See wake_heard() for why that is a decision and not an oversight.
+  (void)eng_.stt->finish();
+  wake_said_.clear();
+  rend::log::info("[wake] passive listening is off; the microphone is shut");
+}
+
+// A hypothesis, from the passive stream or from the harness. The whole of the
+// privacy promise is in the three lines after the match.
+void VoiceSession::wake_heard(const std::string& heard) {
+  const std::string phrase = wake_phrase_locked_copy();
+  if (!wake_match(heard, phrase)) return;
+  rend::log::info("[wake] MATCHED \"{}\" in \"{}\" - opening full listening", phrase, heard);
+  // **What woke the app is never sent.** end_wake() flushes the recogniser and
+  // discards the result, and begin_listening() then starts a fresh stream on a
+  // freshly discarded capture buffer, so the sentence the phrase was embedded
+  // in does not survive into the turn. That is deliberate and it is the cap on
+  // what a false positive can cost: the worst case is a microphone the user
+  // can see is open, never a sentence they did not mean to send.
+  //
+  // It also means "Aria, what's the weather" does not carry the question over.
+  // The user says the name, the app answers, they ask. That is the trade the
+  // privacy decision buys, and it is the honest reading of "nothing reaches
+  // Claude until the word matches".
+  end_wake();
+  listen_restore_.user_opened_the_mic();
+  mic_open_ = true;
+  // Said, not silent. Nobody pressed anything, so without a word from the app
+  // the only evidence the phrase was heard is a button changing colour -- and
+  // the user may well not be looking at the window, since not having to is the
+  // point of a wake phrase. It goes through announce() rather than being
+  // spoken here so that it takes the same gap-and-flush path a worker report
+  // takes: the Idle branch speaks it first and opens the microphone after, so
+  // the app never says a word into its own open microphone.
+  announce(app_text(Msg::WakeHeard));
+}
+
+// One frame of passive matching, from the Idle branch.
+void VoiceSession::tick_wake() {
+  const std::string phrase = wake_phrase_locked_copy();
+  if (!wake_phrase_armed(phrase)) {
+    end_wake();
+    return;
+  }
+  if (!wake_open_) begin_wake(phrase);
+  if (!wake_open_) return;  // the capture device refused; begin_wake said so
+
+  chunk_.clear();
+  mic_->drain(chunk_);
+  const auto now = std::chrono::steady_clock::now();
+  if (!chunk_.empty()) {
+    // The same gate, the same constants and the same calibration the Listening
+    // branch runs -- deliberately, because two gates would eventually disagree
+    // about whether the room is quiet and the wake word would stop working in
+    // whichever room they disagreed in.
+    const float level = rms(chunk_);
+    const float open_for = std::chrono::duration<float>(now - wake_open_at_).count();
+    float gate = std::max(wake_floor_ * kGateOverFloor, kGateAbsMin);
+    if (open_for < kCalibrateSec) {
+      wake_floor_ = std::min(std::max(wake_floor_, level), kFloorMax);
+      gate = std::max(wake_floor_ * kGateOverFloor, kGateAbsMin);
+    } else if (level < gate) {
+      wake_floor_ += (level - wake_floor_) * kFloorRate;
+    }
+    // The gate, and then the *run* — see kWakeOnsetSec. A single loud frame is
+    // not somebody talking, and treating it as if it were is what cost this
+    // feature a third of a core in an empty room.
+    if (level > gate) {
+      if (wake_run_began_.time_since_epoch().count() == 0) wake_run_began_ = now;
+      if (std::chrono::duration<float>(now - wake_run_began_).count() >= kWakeOnsetSec)
+        wake_last_voice_ = now;
+    } else {
+      wake_run_began_ = {};
+    }
+    const bool decoding =
+        std::chrono::duration<float>(now - wake_last_voice_).count() < kWakeTailSec;
+
+    if (!decoding) {
+      // **The whole of the CPU fix.** A quiet room is not decoded, so an idle
+      // machine with a wake phrase set costs what an idle machine costs. The
+      // audio is kept for a fraction of a second so that the gate opening does
+      // not cost the first syllable; see kWakePrerollSec.
+      wake_preroll_.insert(wake_preroll_.end(), chunk_.begin(), chunk_.end());
+      const size_t cap = size_t(kWakePrerollSec * kMicRate);
+      if (wake_preroll_.size() > cap)
+        wake_preroll_.erase(wake_preroll_.begin(), wake_preroll_.end() - cap);
+      // The gate has just shut on something that was not the phrase. Drop the
+      // segment and start a clean one, so the next thing said is decoded on
+      // its own rather than appended to a minute of half-heard room noise.
+      if (wake_decoding_) {
+        const auto t0 = std::chrono::steady_clock::now();
+        (void)eng_.stt->finish();
+        eng_.stt->begin();
+        wake_decode_ms_ +=
+            std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        wake_segment_began_ = now;
+        wake_said_.clear();
+        wake_decoding_ = false;
+      }
+    } else {
+      // The measurement `AII_WAKE_DEBUG` prints, and the reason it counts
+      // *audio actually decoded* rather than wall-clock seconds: with the gate
+      // in front of it the interesting number is no longer "can it keep up"
+      // but "how much of the day does it run at all".
+      const auto t0 = std::chrono::steady_clock::now();
+      if (!wake_preroll_.empty()) {
+        eng_.stt->feed(wake_preroll_.data(), (int)wake_preroll_.size(), kMicRate);
+        wake_audio_sec_ += float(wake_preroll_.size()) / float(kMicRate);
+        wake_preroll_.clear();
+      }
+      eng_.stt->feed(chunk_.data(), (int)chunk_.size(), kMicRate);
+      const std::string p = eng_.stt->partial();
+      wake_decode_ms_ +=
+          std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      wake_audio_sec_ += float(chunk_.size()) / float(kMicRate);
+      wake_decoding_ = true;
+
+      if (p != wake_said_) {
+        wake_said_ = p;
+        wake_heard(p);
+        if (!wake_open_) return;  // matched; the latch has it now
+      }
+      // A finished utterance that was not the phrase: drop it and start again.
+      // The `finish()` result is discarded, which is the point.
+      if (eng_.stt->is_endpoint()) {
+        (void)eng_.stt->finish();
+        eng_.stt->begin();
+        wake_segment_began_ = now;
+        wake_said_.clear();
+      }
+    }
+  }
+  // A room that never endpoints -- continuous noise, a fan, a television --
+  // would otherwise hold one stream open forever. See kWakeSegmentSec.
+  if (std::chrono::duration<float>(now - wake_segment_began_).count() >= kWakeSegmentSec) {
+    (void)eng_.stt->finish();
+    eng_.stt->begin();
+    wake_segment_began_ = now;
+    wake_said_.clear();
+  }
+  if (std::getenv("AII_WAKE_DEBUG")) {
+    static auto last = std::chrono::steady_clock::time_point{};
+    if (std::chrono::duration<float>(now - last).count() >= 1.0f) {
+      last = now;
+      rend::log::info("[wake-cpu] {:.0f} ms of decoding for {:.1f} s of audio past the gate "
+                      "(rtf {:.3f}, open {:.0f} s, floor {:.4f}) heard=\"{}\"",
+                      wake_decode_ms_, wake_audio_sec_,
+                      wake_audio_sec_ > 0.0f ? wake_decode_ms_ / (wake_audio_sec_ * 1000.0f) : 0.0f,
+                      std::chrono::duration<float>(now - wake_open_at_).count(), wake_floor_,
+                      wake_said_);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The two M12 harnesses
+// ---------------------------------------------------------------------------
+//
+// Both are environment variables and both exist for the same reason the
+// `--clip`, `AII_MIC_FACE` and `AII_TALK_DEBUG` hatches do: the behaviour being
+// built is only reachable by a person at a desk doing something slow, and
+// "verified by looking" is the standard this project holds itself to.
+//
+//   AII_WORKER_SIM="2:out;9:back"      M12.1's two edges, without a real
+//                                      `claude` child and the minutes and the
+//                                      usage one costs. It drives the *same*
+//                                      ListenRestore, the same flag and the
+//                                      same restore code as a real worker;
+//                                      what it does not exercise is the pool
+//                                      itself, which is another agent's file
+//                                      and is not what M12.1 changed.
+//                                      Events: `out`, `back`, and `shut` /
+//                                      `open`, which are the user working the
+//                                      microphone button mid-wait.
+//
+//   AII_WAKE_SAY="4:hey aria"          A hypothesis pushed through the wake
+//                                      gate, so the match and the handover to
+//                                      full listening can be shown without a
+//                                      person speaking into the user's real
+//                                      microphone. It does **not** exercise
+//                                      the acoustic decode; that is the
+//                                      recogniser's job and it is unchanged.
+//
+// Times are seconds from the first frame after the engines are up.
+void VoiceSession::tick_harnesses() {
+  if (harness_began_.time_since_epoch().count() == 0) {
+    harness_began_ = std::chrono::steady_clock::now();
+    const auto parse = [](const char* spec) {
+      std::vector<std::pair<float, std::string>> out;
+      if (!spec) return out;
+      std::string s(spec);
+      size_t i = 0;
+      while (i < s.size()) {
+        const size_t end = std::min(s.find(';', i), s.size());
+        const std::string item = s.substr(i, end - i);
+        const size_t colon = item.find(':');
+        if (colon != std::string::npos)
+          out.push_back({(float)std::atof(item.substr(0, colon).c_str()),
+                         trim(item.substr(colon + 1))});
+        i = end + 1;
+      }
+      return out;
+    };
+    worker_script_ = parse(std::getenv("AII_WORKER_SIM"));
+    wake_script_ = parse(std::getenv("AII_WAKE_SAY"));
+    if (!worker_script_.empty() || !wake_script_.empty())
+      rend::log::info("[m12-harness] {} worker event(s), {} scripted utterance(s)",
+                      worker_script_.size(), wake_script_.size());
+  }
+  if (worker_script_.empty() && wake_script_.empty()) return;
+  const float t =
+      std::chrono::duration<float>(std::chrono::steady_clock::now() - harness_began_).count();
+  while (!worker_script_.empty() && worker_script_.front().first <= t) {
+    const std::string ev = worker_script_.front().second;
+    worker_script_.erase(worker_script_.begin());
+    rend::log::info("[m12-harness] t={:.1f}s {}", t, ev);
+    if (ev == "out") {
+      ++sim_workers_out_;
+    } else if (ev == "back") {
+      if (sim_workers_out_) --sim_workers_out_;
+      worker_reported_.store(true, std::memory_order_release);
+    } else if (ev == "shut") {
+      set_mic_open(false);
+    } else if (ev == "open") {
+      set_mic_open(true);
+    }
+  }
+  while (!wake_script_.empty() && wake_script_.front().first <= t) {
+    const std::string said = wake_script_.front().second;
+    wake_script_.erase(wake_script_.begin());
+    rend::log::info("[m12-harness] t={:.1f}s heard \"{}\"", t, said);
+    wake_heard(said);
+  }
 }
 
 void VoiceSession::say(const std::string& text) {
@@ -1108,6 +1608,11 @@ void VoiceSession::stop() {
   // its release must not then finalise an utterance this just cancelled.
   mic_open_ = false;
   hold_ = false;
+  // M12.1. Stop is the user saying stop. A worker that reports afterwards must
+  // not undo it -- and Stop pauses every running worker anyway, so the reports
+  // this is guarding against are the ones already in flight.
+  listen_restore_.user_shut_the_mic();
+  end_wake();
   const size_t paused_workers = workers_ ? workers_->running() : 0;
   if (workers_) workers_->pause_all();
   if (s == State::Thinking || s == State::Speaking) {
@@ -3166,6 +3671,11 @@ VoiceSession::Snapshot VoiceSession::snapshot() const {
   s.dictated_seq = dictated_seq_;
   s.turn_failed_seq = turn_failed_seq_;
   s.listen_timeout_seq = listen_timeout_seq_;
+  // M12.2. Read straight off the frame loop's own flag: snapshot() is built on
+  // the frame loop, which is the only thing that writes it. The phrase comes
+  // out of the member this lock already covers.
+  s.wake_listening = wake_open_;
+  s.wake_phrase = wake_phrase_;
   // Gated on the state here rather than zeroed wherever the microphone
   // closes: there are five paths out of Listening and only one of them would
   // have remembered, and a stale level would leave the avatar leaning at

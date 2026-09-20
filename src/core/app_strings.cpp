@@ -164,6 +164,14 @@ const AppLine kLines[] = {
     // apology in it -- nothing has gone wrong.
     {"I just need a moment to do some housekeeping.",
      "ちょっとだけ、整理する時間をもらうね。"},
+    // --- The wake phrase ----------------------------------------------------
+    // Both are the shortest natural "I heard you, go on" in their language,
+    // and the Japanese is not a translation of the English: "Yes?" as a
+    // literal はい？ reads as a question about what was just said, where the
+    // whole job of this line is to hand the floor back. なに？ is what someone
+    // called by name actually says, in the same register the rest of this
+    // table uses.
+    {"Yes?", "なに？"},
 };
 
 static_assert(sizeof(kLines) / sizeof(kLines[0]) == static_cast<size_t>(Msg::Count),
