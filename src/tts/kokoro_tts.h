@@ -17,6 +17,13 @@ class KokoroTts final : public TtsEngine {
   int sample_rate() const override { return rate_; }
   const char* name() const override { return "kokoro"; }
   bool synthesize(const std::string& text, AudioChunk& out) override;
+  bool synthesize_as(const std::string& text, int native_voice, AudioChunk& out) override;
+  // How many speakers the loaded model actually has, for validating a
+  // configured voice list before anything is spoken. Kokoro does not refuse an
+  // id it does not have -- it silently substitutes speaker 0 -- so a bad entry
+  // caught here is the difference between a log line and a line read aloud in a
+  // third voice nobody chose.
+  int speaker_count() const;
 
  private:
   const SherpaOnnxOfflineTts* tts_ = nullptr;

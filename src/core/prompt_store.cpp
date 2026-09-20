@@ -653,10 +653,14 @@ std::string g_settings_digest;
 // actions this machine has, generated because it is different on every machine
 // and after every turn the model writes a file in.
 std::string g_actions_digest;
+// M13.3. The same shape again: the voice syntax line and the per-language
+// counts, empty unless secondary voices are configured.
+std::string g_voices_digest;
 }  // namespace
 
 void set_settings_digest(std::string text) { g_settings_digest = std::move(text); }
 void set_actions_digest(std::string text) { g_actions_digest = std::move(text); }
+void set_voices_digest(std::string text) { g_voices_digest = std::move(text); }
 
 const std::string& system_prompt(const ToolPolicy& policy) {
   // Keyed on the policy rather than computed once and for all — see the
@@ -672,10 +676,11 @@ const std::string& system_prompt(const ToolPolicy& policy) {
   static ToolPolicy cached_for;
   static std::string cached_digest;
   static std::string cached_actions;
+  static std::string cached_voices;
   static std::string cached;
   static bool have = false;
   if (have && cached_for == policy && cached_digest == g_settings_digest &&
-      cached_actions == g_actions_digest)
+      cached_actions == g_actions_digest && cached_voices == g_voices_digest)
     return cached;
 
   PromptStore store;
@@ -707,6 +712,13 @@ const std::string& system_prompt(const ToolPolicy& policy) {
   if (const size_t at = text.find("{{scripts}}"); at != std::string::npos) {
     text.replace(at, std::strlen("{{scripts}}"), trim_end(g_actions_digest));
   }
+  // M13.3. Same rule once more, with one difference that is the whole point:
+  // this digest is usually empty, and an empty one leaves `voices.md` as a file
+  // containing nothing. The blank-run collapse below removes the gap, so a user
+  // with no secondary voices pays nothing for a feature they have not set up.
+  if (const size_t at = text.find("{{voices}}"); at != std::string::npos) {
+    text.replace(at, std::strlen("{{voices}}"), trim_end(g_voices_digest));
+  }
   std::string composed = expand_tool_sections(text, policy, &section_problems);
   for (const std::string& p : section_problems) std::fprintf(stderr, "[prompts] %s\n", p.c_str());
   // Appended, never substituted, and last so that it has the final word. Not
@@ -720,6 +732,7 @@ const std::string& system_prompt(const ToolPolicy& policy) {
   cached_for = policy;
   cached_digest = g_settings_digest;
   cached_actions = g_actions_digest;
+  cached_voices = g_voices_digest;
   have = true;
   return cached;
 }

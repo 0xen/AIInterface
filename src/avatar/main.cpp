@@ -889,6 +889,39 @@ int main(int /*argc*/, char** /*argv*/) {
     actions.set_auto_allow(settings.get_bool("scripts", "auto_allow", false));
     actions.load();
     aii::set_actions_digest(actions.digest());
+    // M13.3. Tell the model it has voices, and only if it has any.
+    //
+    // The counts are the *configured* ones, because the system prompt is
+    // composed at stage 0 of startup and the engines that could validate an id
+    // do not exist until stage 2. That seam fails softly: a voice the engine
+    // turns out not to have is dropped when the engines load, logged there, and
+    // that slot falls back to the primary.
+    //
+    // Three elements and no more. M3.13's measurements are unambiguous that
+    // what moves this model is the syntax line, and that surrounding prose buys
+    // hallucinated readings -- so the restriction is two short negative
+    // sentences with no examples and no rationale.
+    {
+      const size_t en = voiceCfg.voices_en.size();
+      const size_t ja = voiceCfg.langs.japanese ? voiceCfg.voices_ja.size() : 0;
+      if (en + ja > 0) {
+        // Both markers are shown, because a model given only `[v2]` has no way
+        // back to its own voice.
+        std::string d =
+            "You have more than one voice. Put [v2] before a line to speak it in your second "
+            "voice and [v1] to return to your own; every reply starts on [v1]. The marker is "
+            "not shown and not read aloud.\n\n";
+        d += "Voices available: English " + std::to_string(en + 1);
+        if (voiceCfg.langs.japanese) d += ", Japanese " + std::to_string(ja + 1);
+        d += ".\n\n";
+        d += "Use this only when you have been asked to perform a dialogue or read parts. "
+             "Never in an ordinary reply.";
+        aii::set_voices_digest(d);
+        log::info("[voices] prompt block sent: English {}, Japanese {}", en + 1, ja + 1);
+      } else {
+        log::info("[voices] no secondary voices configured; the prompt block is not sent");
+      }
+    }
     log::info("[action] {}", actions.summary());
     log::info("[tools] conversational instance: {} ({})",
               aii::tool_summary(voiceCfg.tools),

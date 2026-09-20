@@ -38,8 +38,20 @@ KokoroTts::~KokoroTts() {
 }
 
 bool KokoroTts::synthesize(const std::string& text, AudioChunk& out) {
+  return synthesize_as(text, -1, out);
+}
+
+int KokoroTts::speaker_count() const {
+  return tts_ ? SherpaOnnxOfflineTtsNumSpeakers(tts_) : 0;
+}
+
+bool KokoroTts::synthesize_as(const std::string& text, int native_voice, AudioChunk& out) {
   if (!tts_) return false;
-  const SherpaOnnxGeneratedAudio* audio = SherpaOnnxOfflineTtsGenerate(tts_, text.c_str(), sid_, speed_);
+  // One substituted argument and no state touched, which is the whole of M13.2
+  // on this engine: the speaker id is a per-call parameter and 54 voices are
+  // already installed beside the one in use.
+  const int sid = native_voice < 0 ? sid_ : native_voice;
+  const SherpaOnnxGeneratedAudio* audio = SherpaOnnxOfflineTtsGenerate(tts_, text.c_str(), sid, speed_);
   if (!audio) return false;
   out.sample_rate = audio->sample_rate;
   out.samples.assign(audio->samples, audio->samples + audio->n);

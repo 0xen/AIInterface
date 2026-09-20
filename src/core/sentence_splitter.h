@@ -18,6 +18,11 @@ class SentenceSplitter {
 
   void feed(const std::string& delta);
   void flush();   // emit whatever is left (end of reply)
+  // M13.1. Emit what is pending as one utterance and keep the stream state --
+  // the fence flag and the early-chunk latch both survive. This is the mid-reply
+  // boundary an inline directive makes; `flush()` is not, and the reason is
+  // measured rather than argued (sentence_splitter.cpp, and design-directives §3.3).
+  void break_now();
   void reset();
 
  private:

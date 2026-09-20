@@ -5,6 +5,7 @@
 // The system prompt used to be a `kSystemPrompt` literal here. It is now a
 // seeded, composed prompt tree — see `core/prompt_store.h` and `aii::system_prompt()`.
 #include <string>
+#include <vector>
 
 #include "core/language.h"
 #include "core/tool_policy.h"
@@ -48,6 +49,24 @@ struct Config {
   std::string api_key;         // ANTHROPIC_API_KEY (api backend only)
   int kokoro_sid = 3;          // AII_KOKORO_SID
   unsigned vv_style = 2;       // AII_VOICEVOX_STYLE
+  // M13.2. The secondary voices `[v2]`, `[v3]`... select, per language, in
+  // engine-native ids: Kokoro speaker ids for English, VOICEVOX styles for
+  // Japanese. `[v1]` is `kokoro_sid` / `vv_style` above and is deliberately not
+  // in either list -- one owner of record for the primary.
+  //
+  // The defaults are shipped rather than empty, and that is a decision rather
+  // than an oversight. An empty default means the feature exists but does
+  // nothing until somebody finds the key and guesses four integers, which is
+  // the problem this milestone was asked to solve. These four were chosen by
+  // measurement: 26 `bm_george` (142 Hz against the primary's 203) and 17
+  // `am_onyx` (90 Hz) are the largest pitch and timbre separations available in
+  // the installed English set, and 10 雨晴はう / 3 ずんだもん are the two
+  // Japanese styles furthest from 四国めたん in the one loaded `.vvm`.
+  //
+  // AII_VOICES_EN / AII_VOICES_JA override them, comma-separated; an empty
+  // value switches that language's secondaries off entirely.
+  std::vector<int> voices_en{26, 17};
+  std::vector<int> voices_ja{10, 3};
   int early_words = 12;        // AII_EARLY_WORDS (0 = full sentences only)
   // AII_ENDPOINT_SILENCE: how long a pause has to last, in seconds, before
   // the utterance is treated as finished and sent. Raise it if you are being

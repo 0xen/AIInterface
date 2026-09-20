@@ -123,6 +123,34 @@ seconds, `--no-voice` shows the window without loading any engine, `--opaque` gi
 window. Engines load on a background thread, so the window appears at once and the status
 line reports progress.
 
+### More than one voice
+
+Ask for a dialogue and the assistant can perform it in different voices. It marks them inline:
+`[v2]` switches to the second voice of whatever language the line is in, `[v1]` returns to its
+own, and every reply starts on `[v1]`. The markers are machine traffic — stripped from the
+transcript and never spoken — and a marker inside a ``` fence is code, not a directive.
+
+The voices are per language and independent, so two English and two Japanese is as expressible as
+three of one. `[v1]` is always the primary you configured (`AII_KOKORO_SID`, `AII_VOICEVOX_STYLE`)
+and is deliberately not in either list. The defaults ship non-empty, because a feature that does
+nothing until you guess four integers is a feature nobody finds:
+
+| Slot | English | Japanese |
+|---|---|---|
+| `[v1]` | `af_heart` (sid 3) | 四国めたん ノーマル (style 2) |
+| `[v2]` | `bm_george` (26) — British man, 142 Hz | 雨晴はう (10) |
+| `[v3]` | `am_onyx` (17) — deep American man, 90 Hz | ずんだもん (3) |
+
+These were chosen by measurement, not by ear: the English trio is separated by 50–114 Hz of pitch
+and three different accent/sex pairings. **The Japanese pair is the less certain one** — every
+Japanese voice installed sits within 30 Hz of every other, so its separation rests on timbre.
+
+A voice id the engine does not have is dropped when the engines load, with a line in the log, and
+that slot falls back to the primary. This matters because neither engine fails safely on its own:
+Kokoro silently substitutes a third voice nobody chose, and VOICEVOX returns an error that would
+reach you as silence. Only the model knows about voices that exist — the prompt is told a count,
+and is told nothing at all when no secondary voices are configured.
+
 ### Background workers
 
 Ask for work to be done ("start a worker called build in C:\myrepo that runs the tests") and the
@@ -275,6 +303,8 @@ build\Release\voiceloop.exe --speak "Text to speak. 日本語も。"    # synthe
 | `AII_STT_LANG` | `auto` | `auto`, `en` or `ja` for the recogniser |
 | `AII_KOKORO_SID` | `3` | English voice (3 = af_heart, 2 = af_bella) |
 | `AII_VOICEVOX_STYLE` | `2` | Japanese voice style (2 = 四国めたん ノーマル; 3 = ずんだもん, 8 = 春日部つむぎ, 10 = 雨晴はう) |
+| `AII_VOICES_EN` | `26,17` | the English voices `[v2]`, `[v3]`… select, as Kokoro speaker ids; empty switches them off |
+| `AII_VOICES_JA` | `10,3` | the Japanese ones, as VOICEVOX styles from the loaded `0.vvm`; empty switches them off |
 | `AII_EARLY_WORDS` | `12` | the first chunk of a reply is spoken at a comma or after this many words; `0` waits for full sentences |
 | `AII_WORKER_BYPASS` | `1` | background workers skip permission prompts; `0` makes them ask, which stalls them |
 

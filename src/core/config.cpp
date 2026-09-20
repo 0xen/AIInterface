@@ -32,6 +32,34 @@ Config Config::from_env() {
   c.api_key = env_or("ANTHROPIC_API_KEY", "");
   c.kokoro_sid = std::atoi(env_or("AII_KOKORO_SID", "3").c_str());
   c.vv_style = (unsigned)std::atoi(env_or("AII_VOICEVOX_STYLE", "2").c_str());
+  // M13.2. A set-but-empty value is meaningful here and means "no secondary
+  // voices in this language", which is why this cannot go through env_or's
+  // empty-is-unset rule: the caller has to be able to switch the feature off
+  // without also having to know what the defaults were.
+  {
+    const auto parse_list = [](const char* name, std::vector<int>& out) {
+      char* v = nullptr;
+      size_t len = 0;
+      if (_dupenv_s(&v, &len, name) != 0 || !v) return;  // unset: keep the default
+      const std::string raw(v);
+      std::free(v);
+      std::vector<int> parsed;
+      std::string item;
+      const auto take = [&] {
+        if (item.empty()) return;
+        parsed.push_back(std::atoi(item.c_str()));
+        item.clear();
+      };
+      for (const char ch : raw) {
+        if (ch == ',' || ch == ' ') take();
+        else item += ch;
+      }
+      take();
+      out = std::move(parsed);
+    };
+    parse_list("AII_VOICES_EN", c.voices_en);
+    parse_list("AII_VOICES_JA", c.voices_ja);
+  }
   c.early_words = std::atoi(env_or("AII_EARLY_WORDS", "12").c_str());
   c.endpoint_silence = (float)std::atof(env_or("AII_ENDPOINT_SILENCE", "1.0").c_str());
   if (c.endpoint_silence < 0.2f) c.endpoint_silence = 0.2f;

@@ -52,12 +52,57 @@ VoicevoxTts::~VoicevoxTts() {
   if (synth_) voicevox_synthesizer_delete(synth_);
 }
 
-bool VoicevoxTts::synthesize(const std::string& text, AudioChunk& out) {
+// M13.2. The styles the loaded model actually carries, read from VOICEVOX's own
+// metas rather than from a table here: the model file is the authority, and it
+// is versioned with the voices it holds.
+//
+// Parsed by hand rather than with the JSON library, because the shape needed is
+// exactly `"id":<number>` inside the `styles` arrays and nothing else -- pulling
+// nlohmann into the synthesis engine to read one integer per style would be a
+// dependency bought for a substring search.
+bool VoicevoxTts::has_style(uint32_t style) const {
   if (!synth_) return false;
+  char* metas = voicevox_synthesizer_create_metas_json(synth_);
+  if (!metas) return false;
+  const std::string json(metas);
+  voicevox_json_free(metas);
+
+  // `styles` is the per-character array; every entry in it has an `id`. A
+  // character's own `speaker_uuid` has no numeric id, so scanning for `"id":`
+  // inside the styles arrays alone is what keeps this from matching something
+  // that is not a style.
+  const std::string want = std::to_string(style);
+  size_t at = 0;
+  while ((at = json.find("\"styles\"", at)) != std::string::npos) {
+    const size_t arr_end = json.find(']', at);
+    if (arr_end == std::string::npos) break;
+    size_t id_at = at;
+    while ((id_at = json.find("\"id\"", id_at)) != std::string::npos && id_at < arr_end) {
+      size_t p = json.find(':', id_at);
+      if (p == std::string::npos) break;
+      ++p;
+      while (p < json.size() && (json[p] == ' ' || json[p] == '\t')) ++p;
+      size_t q = p;
+      while (q < json.size() && json[q] >= '0' && json[q] <= '9') ++q;
+      if (q > p && json.compare(p, q - p, want) == 0) return true;
+      id_at = q;
+    }
+    at = arr_end;
+  }
+  return false;
+}
+
+bool VoicevoxTts::synthesize(const std::string& text, AudioChunk& out) {
+  return synthesize_as(text, -1, out);
+}
+
+bool VoicevoxTts::synthesize_as(const std::string& text, int native_voice, AudioChunk& out) {
+  if (!synth_) return false;
+  const uint32_t style = native_voice < 0 ? style_ : static_cast<uint32_t>(native_voice);
   uintptr_t wav_len = 0;
   uint8_t* wav = nullptr;
   VoicevoxResultCode r =
-      voicevox_synthesizer_tts(synth_, text.c_str(), style_, voicevox_make_default_tts_options(), &wav_len, &wav);
+      voicevox_synthesizer_tts(synth_, text.c_str(), style, voicevox_make_default_tts_options(), &wav_len, &wav);
   if (r != VOICEVOX_RESULT_OK) {
     error_ = std::string("tts: ") + voicevox_error_result_to_message(r);
     return false;

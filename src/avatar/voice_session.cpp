@@ -16,6 +16,7 @@
 #include "core/app_bus.h"
 #include "core/app_strings.h"
 #include "core/cwd_policy.h"
+#include "core/directive_filter.h"
 #include "core/handoff_policy.h"
 #include "core/language.h"
 #include "core/model_choice.h"
@@ -197,6 +198,56 @@ float rms(const std::vector<float>& s) {
   double sum = 0.0;
   for (float v : s) sum += double(v) * double(v);
   return static_cast<float>(std::sqrt(sum / double(s.size())));
+}
+
+// M13.2. Hand the queue its secondary voices, having first thrown out any the
+// engines do not actually have.
+//
+// Validation is here, at load, rather than at synthesis, because the two
+// engines fail an unknown id in opposite directions and **neither failure is
+// recoverable once the utterance has been dequeued**. Kokoro does not refuse a
+// speaker it lacks: it prints to stderr and speaks the line in `af_alloy`, so a
+// typo becomes a third voice nobody chose. VOICEVOX returns an error and the
+// line is simply silent. A bad entry dropped here costs one log line and falls
+// back to the primary, which is the behaviour M13 specifies.
+//
+// Japanese is validated only when VOICEVOX exists. It arrives late or not at
+// all, so this runs again when it is handed over.
+void apply_voice_lists(const Config& cfg, Engines& eng, SpeechQueue& speech,
+                       const std::function<void(const std::string&)>& log) {
+  std::vector<int> en, ja;
+  if (eng.kokoro) {
+    const int speakers = eng.kokoro->speaker_count();
+    for (const int sid : cfg.voices_en) {
+      if (sid < 0 || (speakers > 0 && sid >= speakers)) {
+        log("[voices] English v" + std::to_string(int(en.size()) + 2) + ": speaker " +
+            std::to_string(sid) + " is not in this model (" + std::to_string(speakers) +
+            " speakers); falling back to the primary");
+        continue;
+      }
+      // Ids 28 and up are Kokoro's other languages. Allowed, because somebody
+      // may want one deliberately, but said out loud: it will be phonemised
+      // with the English lexicon and will not sound like that language.
+      if (sid > 27)
+        log("[voices] English v" + std::to_string(int(en.size()) + 2) + ": speaker " +
+            std::to_string(sid) + " is outside the English range (0-27)");
+      en.push_back(sid);
+    }
+  }
+  if (eng.voicevox && eng.voicevox->ok()) {
+    for (const int style : cfg.voices_ja) {
+      if (style < 0 || !eng.voicevox->has_style(static_cast<uint32_t>(style))) {
+        log("[voices] Japanese v" + std::to_string(int(ja.size()) + 2) + ": style " +
+            std::to_string(style) +
+            " is not in the loaded voice model; falling back to the primary");
+        continue;
+      }
+      ja.push_back(style);
+    }
+  }
+  log("[voices] English " + std::to_string(en.size() + 1) + ", Japanese " +
+      std::to_string(ja.size() + 1) + " (v1 is the configured primary)");
+  speech.set_voices(std::move(en), std::move(ja));
 }
 }  // namespace
 
@@ -396,6 +447,7 @@ void VoiceSession::load() {
   // set_japanese() is how the on-demand load hands it one later.
   speech_ = std::make_unique<SpeechQueue>(eng_.kokoro.get(), eng_.voicevox.get(), speaker_.get());
   speech_->set_on_status([this](const std::string& s) { log("[tts] " + s); });
+  apply_voice_lists(cfg_, eng_, *speech_, [this](const std::string& s) { log(s); });
   // The canned lines need the setting from the first second, not from the
   // first turn: a schedule restored before anyone has spoken can fire, and a
   // worker can fail, with the table still on its default.
@@ -1558,6 +1610,9 @@ void VoiceSession::ensure_japanese_voice() {
       // the language every frame, and that call is a no-op unless it changed,
       // so the pin follows the new voice within one frame.
       speech_->set_japanese(eng_.voicevox.get());
+      // M13.2. The Japanese secondaries could not be validated until now:
+      // there was no model to check a style against.
+      apply_voice_lists(cfg_, eng_, *speech_, [this](const std::string& s) { log(s); });
       rend::log::info("japanese voice loaded on demand in {:.2f} s",
                       std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count());
     } else {
@@ -2249,7 +2304,15 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
   // reply carries on speaking a beat later. The text side of this same loop —
   // `lines_.back().text += delta` above — is untouched, which is what makes
   // mute voice-only.
-  SentenceSplitter splitter([this](const std::string& s) {
+  // M13.1. The voice a chunk is spoken in, as a slot rather than an engine id.
+  //
+  // Turn-local, which is what makes "every reply starts on the primary" free:
+  // a new reply gets a new level by construction, so there is no session-
+  // lifetime state to reset and therefore no reset to forget. It is only ever
+  // touched from this thread -- the filter, the splitter and this callback all
+  // run inside `feed()` on the turn thread.
+  int voice_level = 1;
+  SentenceSplitter splitter([this, &voice_level](const std::string& s) {
     if (muted_) {
       // Traced rather than silent: "the app said nothing" and "the app was
       // muted" look identical from outside, and this is the line that tells
@@ -2261,8 +2324,45 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
     // hands them over, which for an injected turn is the only place the AI's
     // own words for a scheduled report can be read back.
     rend::log::info("[speak] {}", s);
-    speech_->enqueue(s);
+    speech_->enqueue(s, voice_level);
   }, cfg_.early_words);
+
+  // M13.1. One parser, fed once, in front of both consumers -- the transcript
+  // (plain concatenation) and the splitter (synthesis). That is what makes
+  // "a marker reaches neither the eyes nor the ears" a property of where this
+  // sits, rather than two strippers that have to agree and eventually will not.
+  DirectiveFilter filter(
+      [this, &splitter](const std::string& t) {
+        {
+          std::lock_guard<std::mutex> l(mutex_);
+          if (!lines_.empty() && !lines_.back().user) lines_.back().text += t;
+        }
+        splitter.feed(t);
+      },
+      [this, &splitter, &voice_level](const std::string& token, const std::string& value) {
+        // The words before a marker belong to the voice that was speaking when
+        // they were written, so they go to the queue before the level moves.
+        // `break_now()` and not `flush()`: flush() re-arms the early-chunk rule
+        // for the rest of the reply, which made the same text speak differently
+        // depending on delta size (docs/design-directives.md, §3.3).
+        splitter.break_now();
+        // `[v2]` and nothing else, today. A directive that parses but carries a
+        // shape this build does not know -- `[v2:extra]`, `[pause]` -- is
+        // consumed and logged rather than spoken, which is the whole purpose of
+        // having a grammar: the namespace can grow without an older build
+        // reading tomorrow's markers aloud.
+        if (value.empty() && token.size() >= 2 && token[0] == 'v' &&
+            token.find_first_not_of("0123456789", 1) == std::string::npos) {
+          const int slot = std::atoi(token.c_str() + 1);
+          if (slot >= 1) {
+            voice_level = slot;
+            rend::log::info("[voice] {} from here", token);
+            return;
+          }
+        }
+        rend::log::info("[directive] {} ignored (this build does not know it)",
+                        value.empty() ? token : token + ":" + value);
+      });
   bool first = true;
   // M3.3. `sent` is what Claude receives; `text` stays what the user said.
   // The transcript, the avatar and the mute path all work off the latter, so a
@@ -2349,14 +2449,19 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
   ChatResult r = eng_.llm->turn(sent, [&](const std::string& delta) {
     {
       std::lock_guard<std::mutex> l(mutex_);
-      if (!lines_.empty() && !lines_.back().user) lines_.back().text += delta;
+      // M13.1. This stays on the *raw* delta, ahead of the filter. A reply that
+      // opens with `[v2]` would otherwise hold the UI in "thinking..." for an
+      // extra delta, because the filter's first text callback comes after the
+      // marker has been consumed.
       if (first) {
         first = false;
         status_ = "speaking...";
         set_state_locked(State::Speaking);
       }
     }
-    splitter.feed(delta);
+    // The transcript append that used to be here has moved inside the filter's
+    // text callback, so markers never reach it.
+    filter.feed(delta);
   }, &cancel_);
   if (cancel_) {
     // M2c.2. A cancelled turn says nothing, so anything riding on it was not
@@ -2367,6 +2472,9 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
     requeue_riding_reports(std::move(rider));
     return;  // the caller already moved the state on
   }
+  // Order matters: the filter releases any held-back candidate as text first,
+  // so a reply ending in a half-written marker still reaches the splitter.
+  filter.flush();
   splitter.flush();
   // AII_REPLY_LOG: the reply as one line, off unless asked for. main.cpp logs
   // every turn that is *sent* (`send:`) and nothing logs what came back, so a

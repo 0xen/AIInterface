@@ -273,6 +273,24 @@ void set_settings_digest(std::string text);
 // made untrue.
 void set_actions_digest(std::string text);
 
+// M13.3. The block `system/voices.md` substitutes for `{{voices}}`: the syntax
+// line for inline voice markers and a count of how many voices each language
+// has. Built by the app, for the same reason as the two above -- `core` must
+// not learn what a voice list is.
+//
+// **It expands to nothing when there are no secondary voices**, which is what
+// makes the feature free for anyone who never configures one: no block, no
+// tokens, and the blank-run collapse removes the gap the dropped text leaves.
+// Configured, it costs about 83 tokens a turn, inside the cached prefix.
+//
+// A count and not a list of names, deliberately. The model cannot hear these
+// voices, and a name is something it would then describe to the user; a count
+// bounds it to slots that exist and says nothing it cannot know.
+//
+// Part of the cache key, like the other two: a child restarted after the voices
+// changed must not be told the old count.
+void set_voices_digest(std::string text);
+
 // The composed system prompt for this process, computed once on first use:
 // the `system` graph, its conditional sections resolved against `policy`, then
 // `pre-prompt.md`.

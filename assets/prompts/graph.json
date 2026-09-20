@@ -35,13 +35,22 @@
           "kind": "global",
           "enabled": true,
           "pos": [320, 400]
+        },
+        {
+          "id": "voices",
+          "title": "Voices",
+          "file": "system/voices.md",
+          "kind": "global",
+          "enabled": true,
+          "pos": [320, 560]
         }
       ],
       "links": [
         { "from": "start", "to": "voice", "order": 0, "enabled": true },
         { "from": "start", "to": "workers", "order": 1, "enabled": true },
         { "from": "start", "to": "settings", "order": 2, "enabled": true },
-        { "from": "start", "to": "scripts", "order": 3, "enabled": true }
+        { "from": "start", "to": "scripts", "order": 3, "enabled": true },
+        { "from": "start", "to": "voices", "order": 4, "enabled": true }
       ]
     },
     "project": {

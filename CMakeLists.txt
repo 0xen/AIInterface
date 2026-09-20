@@ -35,6 +35,7 @@ add_library(aii_core STATIC
   src/core/button_registry.cpp
   src/core/config.cpp
   src/core/cwd_policy.cpp
+  src/core/directive_filter.cpp
   src/core/engines.cpp
   src/core/language.cpp
   src/core/model_choice.cpp
@@ -171,6 +172,20 @@ if(AII_BUILD_TESTS)
   target_compile_definitions(wake_word_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   if(MSVC)
     target_compile_options(wake_word_test PRIVATE /utf-8 /W4)
+  endif()
+
+  # ---- directive_filter_test: what is machine traffic and what is English ----
+  # Same rule as clip_utf8_test: directive_filter.cpp is standard-library-only,
+  # so M13.1's grammar and -- the part a probe caught the obvious design failing
+  # -- its one-delta/one-byte equivalence are both checked with no engine, no
+  # window and no CLI. The streaming property cannot be reproduced by hand at
+  # all: it needs the same reply fed at eight different chunk sizes.
+  add_executable(directive_filter_test tests/directive_filter_test.cpp
+                                       src/core/directive_filter.cpp)
+  target_include_directories(directive_filter_test PRIVATE src)
+  target_compile_definitions(directive_filter_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(directive_filter_test PRIVATE /utf-8 /W4)
   endif()
 
   # ---- app_strings_test: the canned lines, and that their bytes survive MSVC ----

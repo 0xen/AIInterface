@@ -77,6 +77,30 @@ void SentenceSplitter::flush() {
   emitted_any_ = false;
 }
 
+// M13.1. A sentence boundary that is not the end of the reply.
+//
+// `flush()` looks like the right call for this and is not, which a probe caught
+// before any of it was built (`docs/design-directives.md`, §3.3). flush() clears
+// `emitted_any_`, and that re-arms the early-chunk rule for the *rest* of the
+// reply: every later utterance then gets cut at its first comma, so the same
+// text spoke differently depending on how the CLI happened to chunk its deltas.
+// It clears `in_code_` too, which would desynchronise the fence state from the
+// filter's copy of it.
+//
+// So this emits what is pending and touches neither flag. A directive is a hard
+// boundary -- the voice must not change inside an utterance already handed to
+// the queue -- and that is the whole of what it has to buy.
+void SentenceSplitter::break_now() {
+  scan(false);
+  if (!in_code_) {
+    std::string rest = trim(buf_);
+    if (!rest.empty()) {
+      emit_sentence(rest);
+      buf_.clear();
+    }
+  }
+}
+
 void SentenceSplitter::reset() {
   buf_.clear();
   in_code_ = false;

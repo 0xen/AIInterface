@@ -19,6 +19,12 @@ class VoicevoxTts final : public TtsEngine {
   int sample_rate() const override { return 24000; }
   const char* name() const override { return "voicevox"; }
   bool synthesize(const std::string& text, AudioChunk& out) override;
+  bool synthesize_as(const std::string& text, int native_voice, AudioChunk& out) override;
+  // Whether a style id is in the loaded model. VOICEVOX loads exactly one
+  // `.vvm`, so a style outside it is not merely a different character -- it is
+  // a call that returns rc=6 and reaches the user as silence. Checked when the
+  // voice list loads rather than at synthesis, where it is already too late.
+  bool has_style(uint32_t style) const;
   std::string last_error() const { return error_; }
 
  private:
