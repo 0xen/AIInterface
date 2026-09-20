@@ -3,8 +3,9 @@
 # one backend is built here as a static lib.
 #
 # The D3D12 backend, not the Vulkan one the engine's own viewer uses: the
-# avatar needs a per-pixel-alpha swapchain, which on this AMD GPU only
-# D3D12's composition swapchain provides (see src/avatar/main.cpp). There is
+# avatar needs a per-pixel-alpha swapchain, which on the AMD (RDNA3) driver
+# this was developed against only D3D12's composition swapchain provides --
+# the engine's Vulkan path composites opaque (see src/avatar/main.cpp). There is
 # no platform backend — the engine's SDL3 backend owns the window and its
 # events, so imgui_layer.cpp feeds ImGui from rend::platform::Event instead.
 include(FetchContent)

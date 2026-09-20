@@ -19,15 +19,44 @@ Plan: `PROJECT_OUTLINE.md`. Research: `docs/`. Engine experiments and evidence: 
 
 ## Build
 
-Requires Visual Studio 2022, CMake 3.24+, the Claude Code CLI signed in to your subscription,
-the prebuilt engines and models described in the next section (about 1.3 GB, none of it in git),
-and for `avatar` the Renderer engine checked out beside this repo (`..\Renderer`, or set
-`AII_RENDERER_DIR`) plus the Vulkan SDK (its `dxc` compiles the shaders).
+Requires Visual Studio 2022 with the C++ workload, CMake 3.24+, the Vulkan SDK (its `dxc`
+compiles the shaders), and the Claude Code CLI signed in to your subscription. The engine
+comes with the repository as a submodule; the engines and models — about 1.27 GB, none of
+it in git — are fetched by the setup script.
 
 ```
+git clone --recurse-submodules https://github.com/0xen/AIInterface.git
+cd AIInterface
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
+
+If you already cloned without `--recurse-submodules`, run `git submodule update --init
+--recursive` first — `third_party\Renderer` is otherwise empty and the configure step
+stops with that instruction.
+
+`scripts\setup.ps1` checks the build tools, downloads each component from its own
+publisher, puts it where the build expects it, and verifies every path the app will look
+for at runtime. It is safe to re-run: each step skips what is already there.
+`-CheckOnly` verifies without downloading anything. It reports missing build tools with
+their download URLs rather than installing them for you. The next section documents what
+it fetches, for anyone who would rather do it by hand or needs to understand a failure.
+
+### The engine
+
+`third_party\Renderer` is a submodule pinned to the commit this app is known to build
+against, so a clone gets that engine rather than whatever its master happens to be. To
+build against a sibling checkout instead — which is how the engine itself is developed —
+name it explicitly:
+
+```
+cmake -S . -B build-engine -DAII_RENDERER_DIR=C:/github/Renderer
+```
+
+`AII_RENDERER_DIR` is cached, so a build directory configured before the submodule existed
+keeps the sibling path it was configured with until you pass the variable again or delete
+the cache.
 
 `avatar.exe` lands in `build\bin\Release\` next to `rend.dll` and the engine DLLs, and it is
 the only executable there: the tests and `voiceloop` are behind the options below.
@@ -127,6 +156,10 @@ what makes Japanese text work through the system fonts. Shaders live in
 `src/avatar/shaders/` and are compiled to DXIL and SPIR-V at build time.
 
 ## Getting the engines and models
+
+`scripts\setup.ps1` does all of this for you, and verifies the result. What follows is the
+same work by hand, for anyone who would rather see each step or is debugging one the
+script reported.
 
 Models, prebuilt SDKs, DLLs and executables are gitignored. `CMakeLists.txt` and `src/main.cpp`
 expect them at the exact paths below (the spike folders are reused on purpose until the project

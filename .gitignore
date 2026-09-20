@@ -1,9 +1,18 @@
 models/
 build/
+# Any other build tree: build-tests/, build-engine/, build-tracy/ and the like.
+# Nothing tracked begins with "build", so this cannot hide a real file.
+build*/
 latest/
 out/
 .vs/
+.vscode/
+.idea/
 *.user
+*.suo
+CMakeUserPresets.json
+compile_commands.json
+Thumbs.db
 spikes/**/bin/
 spikes/**/build/
 *.wav

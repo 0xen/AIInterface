@@ -247,12 +247,36 @@ if(AII_BUILD_TESTS)
   aii_copy_runtime_dlls(action_digest_test)
 endif()
 
-# ---- avatar: the corner window on the Renderer engine (sibling checkout) ----
-option(AII_BUILD_AVATAR "Build the avatar window (needs the Renderer checkout and the Vulkan SDK's dxc)" ON)
-set(AII_RENDERER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Renderer" CACHE PATH "Checkout of the rend engine")
+# ---- avatar: the corner window on the Renderer engine (submodule) ----
+#
+# The engine lives in `third_party/Renderer`, a submodule pinned to the commit
+# this app is known to build against. That pin is the whole point: a clone on
+# another machine gets *that* engine, not whatever its master happens to be.
+#
+# A sibling checkout is still honoured, and is how the engine itself is
+# developed from here -- but only when asked for by name, so that a stray
+# `..\Renderer` on someone else's disk can never silently replace the pin:
+#
+#     cmake -S . -B build-engine -DAII_RENDERER_DIR=C:/github/Renderer
+#
+# Note the variable is cached, so a build directory configured before the
+# submodule existed keeps the sibling path it was configured with.
+option(AII_BUILD_AVATAR "Build the avatar window (needs the Renderer submodule and the Vulkan SDK's dxc)" ON)
+set(AII_RENDERER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/Renderer"
+    CACHE PATH "Checkout of the rend engine (default: the third_party/Renderer submodule)")
 if(AII_BUILD_AVATAR)
   if(NOT EXISTS "${AII_RENDERER_DIR}/CMakeLists.txt")
-    message(FATAL_ERROR "Renderer not found at ${AII_RENDERER_DIR}; set AII_RENDERER_DIR or AII_BUILD_AVATAR=OFF")
+    if(AII_RENDERER_DIR STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/third_party/Renderer")
+      message(FATAL_ERROR
+        "The Renderer submodule at ${AII_RENDERER_DIR} is empty.\n"
+        "This clone was made without it. Fetch it with:\n"
+        "    git submodule update --init --recursive\n"
+        "(It is a private repository, so this needs a GitHub account with access.)\n"
+        "To build without the window instead, configure with -DAII_BUILD_AVATAR=OFF.")
+    endif()
+    message(FATAL_ERROR
+      "Renderer not found at ${AII_RENDERER_DIR}; correct AII_RENDERER_DIR, or unset it "
+      "to use the third_party/Renderer submodule, or configure with -DAII_BUILD_AVATAR=OFF.")
   endif()
   include(cmake/FetchImgui.cmake)
   set(REND_BUILD_APPS OFF CACHE BOOL "" FORCE)
