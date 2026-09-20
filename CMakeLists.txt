@@ -174,6 +174,19 @@ if(AII_BUILD_TESTS)
     target_compile_options(wake_word_test PRIVATE /utf-8 /W4)
   endif()
 
+  # ---- module_reference_test: the script reference, against the module ------
+  # Reads two files and compares them, so it links nothing at all. Both paths
+  # are baked in: the assets directory the same way every other target gets it,
+  # and the pyhost source because the reference is prose *about* that file and
+  # the point is to notice when the two drift apart.
+  add_executable(module_reference_test tests/module_reference_test.cpp)
+  target_compile_definitions(module_reference_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+    AII_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
+    AII_PYHOST_SOURCE="${CMAKE_SOURCE_DIR}/src/pyhost/aii_pyhost.cpp")
+  if(MSVC)
+    target_compile_options(module_reference_test PRIVATE /utf-8 /W4)
+  endif()
+
   # ---- directive_filter_test: what is machine traffic and what is English ----
   # Same rule as clip_utf8_test: directive_filter.cpp is standard-library-only,
   # so M13.1's grammar and -- the part a probe caught the obvious design failing

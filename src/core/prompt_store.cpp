@@ -656,11 +656,15 @@ std::string g_actions_digest;
 // M13.3. The same shape again: the voice syntax line and the per-language
 // counts, empty unless secondary voices are configured.
 std::string g_voices_digest;
+// The resolved scripts folder, so the reference sheet can be pointed at rather
+// than merely mentioned.
+std::string g_scripts_dir;
 }  // namespace
 
 void set_settings_digest(std::string text) { g_settings_digest = std::move(text); }
 void set_actions_digest(std::string text) { g_actions_digest = std::move(text); }
 void set_voices_digest(std::string text) { g_voices_digest = std::move(text); }
+void set_scripts_dir(std::string path) { g_scripts_dir = std::move(path); }
 
 const std::string& system_prompt(const ToolPolicy& policy) {
   // Keyed on the policy rather than computed once and for all — see the
@@ -718,6 +722,14 @@ const std::string& system_prompt(const ToolPolicy& policy) {
   // with no secondary voices pays nothing for a feature they have not set up.
   if (const size_t at = text.find("{{voices}}"); at != std::string::npos) {
     text.replace(at, std::strlen("{{voices}}"), trim_end(g_voices_digest));
+  }
+  // A path, not a digest, and the fallback is prose rather than nothing: an
+  // unset one still has to read as a sentence, because a human may be reading
+  // this file too.
+  if (const size_t at = text.find("{{scripts_dir}}"); at != std::string::npos) {
+    text.replace(at, std::strlen("{{scripts_dir}}"),
+                 g_scripts_dir.empty() ? std::string("%APPDATA%\\AIInterface\\scripts")
+                                       : g_scripts_dir);
   }
   std::string composed = expand_tool_sections(text, policy, &section_problems);
   for (const std::string& p : section_problems) std::fprintf(stderr, "[prompts] %s\n", p.c_str());

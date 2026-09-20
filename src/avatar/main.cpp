@@ -889,6 +889,10 @@ int main(int /*argc*/, char** /*argv*/) {
     actions.set_auto_allow(settings.get_bool("scripts", "auto_allow", false));
     actions.load();
     aii::set_actions_digest(actions.digest());
+    // Where the `aii` module reference lives, resolved. The prompt tells the
+    // model to read that file before writing a script, and an instruction to
+    // read a path it cannot resolve is an instruction it will skip.
+    aii::set_scripts_dir((aii::user_data_root() / "scripts").string());
     // M13.3. Tell the model it has voices, and only if it has any.
     //
     // The counts are the *configured* ones, because the system prompt is

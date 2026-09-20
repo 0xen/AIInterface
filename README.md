@@ -113,10 +113,14 @@ build\bin\Release\avatar.exe
 
 | Control | Action |
 |---|---|
-| SPACE or Talk | start listening; again to stop and send (also barges in while Claude speaks) |
-| S or Silence | stop the audio, keep the text coming |
-| E or Pause | cancel the reply in flight |
+| SPACE or the microphone button | start listening; again to stop and send (also barges in while Claude speaks) |
+| S or the speaker button | mute Claude's voice. A level, remembered across runs: audio already playing is cut and nothing further is spoken, while replies still arrive as text |
+| E or the stop button | cancel the reply in flight, close the mic, pause every worker |
+| the reset button | throw the conversation away and start a new one |
 | Esc or Q | quit |
+
+The assistant can mute itself, too: ask it to be quiet and it sets `panel.muted`
+and carries on replying in text. The speaker button or S brings it back.
 
 Flags: `--say "text"` sends one turn as soon as the engines are up, `--seconds N` quits after N
 seconds, `--no-voice` shows the window without loading any engine, `--opaque` gives a normal

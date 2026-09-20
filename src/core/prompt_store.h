@@ -291,6 +291,17 @@ void set_actions_digest(std::string text);
 // changed must not be told the old count.
 void set_voices_digest(std::string text);
 
+// The absolute path of the user's scripts folder, substituted for
+// `{{scripts_dir}}` in `system/scripts.md`.
+//
+// A path rather than prose, and it exists because the reference sheet the model
+// reads before writing a script is a *file*, and a file it cannot find is a
+// file it will not read. `%APPDATA%` is not a thing the model's Read tool
+// expands, so the prompt has to carry the resolved path or the instruction is
+// decorative. Left unset, the substitution falls back to the `%APPDATA%` form,
+// which is still the right answer for a human reading the prose.
+void set_scripts_dir(std::string path);
+
 // The composed system prompt for this process, computed once on first use:
 // the `system` graph, its conditional sections resolved against `policy`, then
 // `pre-prompt.md`.
