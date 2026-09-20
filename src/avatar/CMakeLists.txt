@@ -13,6 +13,8 @@ add_executable(avatar
   avatar_def.h
   action_store.cpp
   action_store.h
+  agent_menu_window.cpp
+  agent_menu_window.h
   approval_window.cpp
   approval_window.h
   avatar_renderer.cpp

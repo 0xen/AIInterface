@@ -76,6 +76,10 @@ struct WorkerStripResult {
   // only says which one, exactly as the primary strip only says that the cog
   // was pressed.
   std::string toggled;
+  // M11.1: the hamburger was pressed. Same contract as `toggled` and for the
+  // same reason — the agent menu is another real OS window, and a window may
+  // only be created or destroyed between frames, so this only *asks*.
+  bool menu_toggled = false;
 };
 
 // How many worker slots the strip will draw. The same physical bound as
@@ -99,7 +103,22 @@ class WorkerStripWindow {
 
   // This frame's workers. Call before dock(), because the strip's height is
   // sized from them and dock() is where a resize may happen.
+  //
+  // **Running workers only, since M11.1.** Finished ones are the agent menu's
+  // (`agent_menu_window.h`), and the reason is this window's own 8-slot cap:
+  // with no state filter, eight agents that had finished pushed every running
+  // one off the strip, so the surface for watching live work filled up with
+  // work that had stopped.
   void set_rows(std::vector<WorkerStripRow> rows);
+
+  // M11.1: how many agents have finished, and whether their menu is open. Call
+  // beside set_rows() and before dock(), for dock()'s reason — the hamburger is
+  // a slot and a slot is a row of height.
+  //
+  // Zero means no hamburger at all: this app runs with nothing running almost
+  // all of the time, and a control for an empty list is a control that teaches
+  // the user it is never worth pressing.
+  void set_finished(std::size_t count, bool menu_open);
 
   // Docks the strip so its **right edge** sits `kDockGap` px left of
   // `right_edge` and its **bottom edge** on the widget's bottom edge — the same
@@ -132,6 +151,9 @@ class WorkerStripWindow {
   HWND hwnd() const;
   unsigned width() const;
   unsigned height() const;
+  // How many 40 px slots the column draws this frame: the running workers plus
+  // the hamburger, when there is one.
+  std::size_t slot_count() const;
   // The strip's left edge in screen pixels, for whatever docks further left.
   int left() const;
 

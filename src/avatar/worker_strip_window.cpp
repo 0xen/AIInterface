@@ -44,6 +44,35 @@ unsigned strip_height(std::size_t slots) {
                                0.5f);
 }
 
+// M11.1: the hamburger. Three bars, which is the one icon on the internet
+// everybody already reads as "the rest of it is in here", and the user asked
+// for it by that name.
+//
+// File-local rather than in `pixel_icons.cpp` on purpose: that file holds the
+// grids reachable through `ButtonGlyph`, and a glyph there is a promise that a
+// registered toolbar button may ask for it. This one is chrome belonging to
+// one window, like the twelve grids `avatar_ui.cpp` keeps to itself, so it
+// costs `core/button_registry.h` nothing — which also keeps it out of a header
+// another agent is editing this session.
+//
+// Four cells of bar and three of gap: at 2x a 2-cell bar is 4 px and reads as
+// a line, and three lines with 2 px between them is a smear at this size.
+constexpr IconRows kIconAgentMenu = {
+    ".............",
+    ".............",
+    "..#########..",
+    "..#########..",
+    ".............",
+    ".............",
+    "..#########..",
+    "..#########..",
+    ".............",
+    ".............",
+    "..#########..",
+    "..#########..",
+    ".............",
+};
+
 // The state colours the panel's worker rows already use (avatar_ui.cpp's
 // worker_color). Repeated rather than shared because avatar_ui's palette
 // helpers are file-local there, and because a worker's icon and its panel row
@@ -109,6 +138,8 @@ struct WorkerStripWindow::Impl {
   bool shown = false;
   bool subclassed = false;
   std::vector<WorkerStripRow> rows;
+  std::size_t finished = 0;   // M11.1: agents in the menu
+  bool menu_open = false;
   std::string tooltip;
   float tooltip_y = 0.0f;  // screen space
 };
@@ -218,9 +249,21 @@ void WorkerStripWindow::set_rows(std::vector<WorkerStripRow> rows) {
   p_->rows = std::move(rows);
 }
 
+void WorkerStripWindow::set_finished(std::size_t count, bool menu_open) {
+  p_->finished = count;
+  p_->menu_open = menu_open;
+}
+
+// How many 40 px slots the column is drawing: the running workers, plus the
+// hamburger when there is anything behind it. The empty-strip slot is not
+// counted here — `strip_height` already floors at one.
+std::size_t WorkerStripWindow::slot_count() const {
+  return p_->rows.size() + (p_->finished ? 1u : 0u);
+}
+
 void WorkerStripWindow::dock(const RECT& widget, int right_edge) {
   Impl& s = *p_;
-  const unsigned want = strip_height(s.rows.size());
+  const unsigned want = strip_height(slot_count());
   const int x = right_edge - static_cast<int>(s.w) - kDockGap;
   // **Bottom-anchored**: the strip's bottom edge is the widget's bottom edge,
   // and the column grows upward from it as workers arrive. From `want` rather
@@ -308,7 +351,7 @@ WorkerStripResult WorkerStripWindow::draw(float dt) {
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const char* const* figure = icon_for_glyph(ButtonGlyph::Workers);
 
-  if (s.rows.empty()) {
+  if (s.rows.empty() && s.finished == 0) {
     // **The empty strip, which is the normal one.** This app runs with zero
     // workers nearly all of the time, so the case the user will see most often
     // is this one, and it must read as "nothing is running" rather than as a
@@ -370,6 +413,54 @@ WorkerStripResult WorkerStripWindow::draw(float dt) {
       s.tooltip_y = static_cast<float>(s.y) + p.y + kButton * 0.5f;
     }
     if (clicked) out.toggled = row.name;
+  }
+
+  // ---- M11.1: the hamburger ------------------------------------------
+  //
+  // **Last, so it is the bottom slot**, and the bottom slot is the only one
+  // that never moves: this window is bottom-anchored and grows upward, so a
+  // worker starting lifts the top edge and leaves everything measured from the
+  // bottom exactly where it was. The hamburger is the one control here that is
+  // pressed rather than watched, and a click target that walked up the screen
+  // every time an agent spawned would be the f713297 bug wearing a different
+  // hat.
+  //
+  // It is also why the running workers are drawn above it rather than below:
+  // they are the list that changes, and the list that changes goes on the end
+  // that is allowed to move.
+  if (s.finished) {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton("##agent_menu", ImVec2(kButton, kButton));
+    const ImGuiCol bg = ImGui::IsItemActive()    ? ImGuiCol_ButtonActive
+                        : ImGui::IsItemHovered() ? ImGuiCol_ButtonHovered
+                                                 : ImGuiCol_Button;
+    dl->AddRectFilled(p, ImVec2(p.x + kButton, p.y + kButton), ImGui::GetColorU32(bg), 5.0f);
+    // Dimmed against a running worker's green: this is history, and history
+    // must not compete with the thing that is happening now.
+    const ImU32 ink = ImGui::GetColorU32(s.menu_open ? ui_color(0.88f, 0.90f, 0.94f)
+                                                     : ui_color(0.62f, 0.65f, 0.72f));
+    draw_icon(dl, kIconAgentMenu,
+              ImVec2(p.x + (kButton - kIconPx) * 0.5f, p.y + (kButton - kIconPx) * 0.5f), ink, ink);
+    // The count, bottom-right, where a worker slot puts its initial — the same
+    // corner means the same question ("which one is this?") has its answer in
+    // the same place on every slot in the column.
+    {
+      const std::string badge = std::to_string(s.finished);
+      const ImVec2 size = ImGui::CalcTextSize(badge.c_str());
+      dl->AddText(ImVec2(p.x + kButton - size.x - 3.0f, p.y + kButton - size.y - 1.0f), ink,
+                  badge.c_str());
+    }
+    // Open: the same left-edge bar a watched worker gets, for the same reason.
+    if (s.menu_open)
+      dl->AddRectFilled(ImVec2(p.x + 1.0f, p.y + 5.0f), ImVec2(p.x + 3.0f, p.y + kButton - 5.0f),
+                        ink, 1.0f);
+    if (ImGui::IsItemHovered()) {
+      s.tooltip = s.finished == 1 ? "1 agent has finished" : std::to_string(s.finished) +
+                                                                 " agents have finished";
+      s.tooltip += s.menu_open ? "\nClick to close the list" : "\nClick to see them";
+      s.tooltip_y = static_cast<float>(s.y) + p.y + kButton * 0.5f;
+    }
+    if (clicked) out.menu_toggled = true;
   }
 
   ImGui::End();

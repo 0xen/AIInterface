@@ -134,6 +134,7 @@
 #include "core/worker_pool.h"
 #include "imgui_layer.h"
 #include "action_store.h"
+#include "agent_menu_window.h"
 #include "approval_window.h"
 #include "inspector_window.h"
 #include "loader_anim.h"
@@ -1671,6 +1672,15 @@ int main(int /*argc*/, char** /*argv*/) {
     // on a worker appearing, deliberately: the snapshot is taken well after the
     // geometry block, and drawing a row the window was not sized for clips it.
     std::vector<aii::WorkerStripRow> stripRows;
+    // M11.1: the finished agents, built in the same pass and for the same
+    // reason — one snapshot, split by state, so the two surfaces cannot
+    // disagree about where an agent is.
+    std::vector<aii::AgentMenuRow> agentRows;
+    // The hamburger's window, which has a life of its own exactly as the worker
+    // strip does: created on a click, destroyed on the next one, and both only
+    // ever between frames.
+    std::unique_ptr<aii::AgentMenuWindow> agentMenu;
+    bool agentMenuToggle = false;
 
     // One window per worker, and the same window for a second click on the same
     // icon — that is what makes the icon a toggle rather than a window factory.
@@ -1854,6 +1864,7 @@ int main(int /*argc*/, char** /*argv*/) {
         // wrong, which is a half-drawn icon.
         if (workerStrip) {
             workerStrip->set_rows(stripRows);
+            workerStrip->set_finished(agentRows.size(), agentMenu != nullptr);
             workerStrip->dock(widgetRect, dockEdge);
             dockEdge = workerStrip->left();
         }
@@ -2673,6 +2684,67 @@ int main(int /*argc*/, char** /*argv*/) {
             if (workerStrip) {
                 const aii::WorkerStripResult ws = workerStrip->draw(dt);
                 if (!ws.toggled.empty()) toggleWorker = ws.toggled;
+                if (ws.menu_toggled) agentMenuToggle = true;
+            }
+
+            // ---- M11.1: the agent menu's own life -------------------------
+            //
+            // Here, between the strip's frame and the widget's, which is the
+            // only place in this loop a window may be created or destroyed.
+            // Answered before the menu is drawn so that a press of the
+            // hamburger opens it on the frame it was pressed.
+            if (agentMenuToggle) {
+                agentMenuToggle = false;
+                if (agentMenu) {
+                    agentMenu.reset();
+                } else {
+                    // Anchored on the strip's left edge and the widget's bottom
+                    // — the corner the hamburger itself sits in — so the list
+                    // opens out of the control that opened it rather than
+                    // somewhere else on the desktop.
+                    RECT wr{};
+                    int ax = 0, ay = 0;
+                    if (GetWindowRect(hwnd, &wr)) {
+                        ax = (workerStrip ? workerStrip->left() : static_cast<int>(wr.left)) - 6;
+                        ay = wr.bottom;
+                    } else {
+                        RECT work{};
+                        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+                        ax = work.right - 8;
+                        ay = work.bottom - 8;
+                    }
+                    std::string agentMenuError;
+                    agentMenu = aii::AgentMenuWindow::create(*backend, *instance, *device, kFontPx,
+                                                             ax, ay, &agentMenuError);
+                    // Survivable, like every other window here: the hamburger
+                    // stays and the next click tries again.
+                    if (!agentMenu) log::warn("no agent menu: {}", agentMenuError);
+                }
+            }
+            if (agentMenu) {
+                if (agentRows.empty()) {
+                    // The last finished agent was cleared. A menu of nothing is
+                    // not a menu, and leaving an empty one up would be a window
+                    // the user has to dismiss to get rid of a list that is
+                    // already gone.
+                    agentMenu.reset();
+                } else {
+                    // Re-anchored every frame: the widget moves when the chat
+                    // opens and when the work area changes, and the strip's
+                    // left edge moves when a worker starts.
+                    RECT wr{};
+                    if (GetWindowRect(hwnd, &wr))
+                        agentMenu->set_anchor(
+                            (workerStrip ? workerStrip->left() : static_cast<int>(wr.left)) - 6,
+                            static_cast<int>(wr.bottom));
+                    aii::AgentMenuResult am;
+                    agentMenu->draw(dt, agentRows, &am);
+                    // Opening an agent from here is the *same* path as opening
+                    // it from the strip, down to the four-window cap: one way
+                    // to open a worker window, one place that counts them.
+                    if (!am.open.empty()) toggleWorker = am.open;
+                    if (am.close) agentMenuToggle = true;
+                }
             }
             if (!toggleWorker.empty()) {
                 const auto at = std::find_if(
@@ -2839,17 +2911,72 @@ int main(int /*argc*/, char** /*argv*/) {
             // next frame. Built here, at the bottom of this one, because this
             // is the first point at which both halves of a row are known: the
             // pool's state, and whether its window is open.
+            //
+            // **Running agents only, since M11.1.** The finished ones are built
+            // into `agentRows` just below and live in the hamburger instead. The
+            // strip caps at `kWorkerSlotsMax = 8`, so without this filter eight
+            // agents that had already finished pushed every running one off the
+            // column — the surface for watching live work, full of work that had
+            // stopped.
             stripRows.clear();
+            agentRows.clear();
             for (const aii::WorkerPool::Snapshot& w : snap.workers) {
+                const bool open = std::any_of(
+                    workerWindows.begin(), workerWindows.end(),
+                    [&](const OpenWorker& o) { return o.name == w.name; });
+                if (aii::agent_finished(w.state)) {
+                    aii::AgentMenuRow row;
+                    row.name = w.name;
+                    row.state = w.state;
+                    row.task = w.task;
+                    row.result = w.result;
+                    row.tool_calls = w.tool_calls;
+                    row.window_open = open;
+                    agentRows.push_back(std::move(row));
+                    continue;
+                }
                 aii::WorkerStripRow row;
                 row.name = w.name;
                 row.state = w.state;
                 row.activity = w.activity;
-                row.window_open = std::any_of(
-                    workerWindows.begin(), workerWindows.end(),
-                    [&](const OpenWorker& o) { return o.name == w.name; });
+                row.window_open = open;
                 stripRows.push_back(std::move(row));
             }
+            // Newest first, and bounded. The pool's order is spawn order, which
+            // is the wrong one here: four hours in, the agent worth opening is
+            // the one that just came back. `kAgentMenuMax` then drops the oldest
+            // **from the list only** — nothing is killed to make a menu shorter,
+            // and `Clear all` is the one thing that removes anything.
+            std::reverse(agentRows.begin(), agentRows.end());
+            // The same escape hatch AII_MIC_FACE and AII_RESET_FACE give the
+            // transport row, and for exactly their reason: a finished agent
+            // costs a real Claude turn and several minutes to produce, so
+            // without this there is no way to *look* at this window, and
+            // "verified by looking at a capture" is the standard this app's
+            // surfaces are held to. `AII_FAKE_FINISHED=n` seeds n rows.
+            //
+            // They are rows, not workers: nothing is added to the pool, so the
+            // strip, the transcript and the speech queue never see them, and a
+            // click on one opens a `WorkerWindow` whose `live` row is null —
+            // which is a real state the window already handles by greying the
+            // row and saying the worker is gone.
+            if (const char* fake = std::getenv("AII_FAKE_FINISHED")) {
+                const int n = std::clamp(std::atoi(fake), 0, 30);
+                for (int i = 0; i < n; ++i) {
+                    aii::AgentMenuRow r;
+                    r.name = "agent-" + std::to_string(i + 1);
+                    r.state = (i % 4 == 3) ? aii::WorkerPool::State::Failed
+                                           : aii::WorkerPool::State::Done;
+                    r.task = "a seeded row, for looking at this window";
+                    r.result = r.state == aii::WorkerPool::State::Failed
+                                   ? ""
+                                   : "Counted the numbers in notes.txt and wrote 4820 into "
+                                     "total.txt, then checked it back.";
+                    r.tool_calls = 3 + i * 2;
+                    agentRows.push_back(std::move(r));
+                }
+            }
+            if (agentRows.size() > aii::kAgentMenuMax) agentRows.resize(aii::kAgentMenuMax);
 
             // M5.1: the inspector's own life, answered here — between the
             // strip's frame and the widget's, which is the only place a window
@@ -3160,6 +3287,10 @@ int main(int /*argc*/, char** /*argv*/) {
     // a fresh run starts with the desktop it started with.
     workerWindows.clear();
     workerStrip.reset();
+    // M11.1, with them and for their reason: another real window on the user's
+    // desktop, and an orphan left behind by any exit is the worst outcome it
+    // has. Nothing is written down — the agents it listed are still in the pool.
+    agentMenu.reset();
     // M10.5. With them, and for exactly the same reason: it is a real window on
     // the user's desktop and an orphan left behind by any exit is the worst
     // outcome it has. Nothing is written down — an unanswered script is still
