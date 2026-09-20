@@ -1566,12 +1566,24 @@ void chat(const VoiceSession::Snapshot& snap) {
   ImGui::BeginChild("##chat", ImVec2(0.0f, kChatHeight), ImGuiChildFlags_None, 0);
 
   // Background instances, above the transcript: what each one is doing.
+  //
+  // **Live ones only, since M11.1.** A finished worker is never erased from the
+  // pool — only the explicit `stop` command erases — so before this filter every
+  // agent that had ever run stayed on this list for the rest of the session,
+  // pushing the transcript down inside a fixed-height region. They are in the
+  // agent menu now (`agent_menu_window.h`), which is what the user asked for
+  // and where a thing that has stopped happening belongs. Nothing is lost from
+  // this region: what a worker said was written into the transcript below when
+  // it reported back, and that is still there.
+  int live = 0;
   for (const auto& w : snap.workers) {
+    if (agent_finished(w.state)) continue;
     std::string line = w.name + " [" + worker_state_name(w.state) + "] " + w.activity;
     if (w.tool_calls) line += "  x" + std::to_string(w.tool_calls);
     ImGui::TextColored(worker_color(w.state), "%s", line.c_str());
+    ++live;
   }
-  if (!snap.workers.empty()) ImGui::Separator();
+  if (live) ImGui::Separator();
 
   for (const auto& l : snap.lines) {
     if (l.text.empty()) continue;

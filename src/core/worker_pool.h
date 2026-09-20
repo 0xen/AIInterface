@@ -89,6 +89,19 @@ class WorkerPool {
 
 const char* worker_state_name(WorkerPool::State s);
 
+// M11.1: has this agent stopped for good? One definition, here beside the enum,
+// because three surfaces now ask the question — the chat's worker rows, the
+// worker strip and the agent menu — and a disagreement between them would put
+// the same agent in two places at once or in neither.
+//
+// **`Paused` is not finished.** It is a turn that was interrupted and an entry
+// that is still in the pool on purpose; `stop` is what ends one. Filing it with
+// the finished agents would hide a worker the user deliberately held, which is
+// the opposite of what pausing it was for.
+inline bool agent_finished(WorkerPool::State s) {
+  return s == WorkerPool::State::Done || s == WorkerPool::State::Failed;
+}
+
 // One command parsed out of a fenced ```aii block in a reply.
 //
 // The block is this app's only agent→app command channel, and stays that way:
