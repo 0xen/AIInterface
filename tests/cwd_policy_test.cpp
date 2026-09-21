@@ -76,6 +76,26 @@ int main() {
         "a relative cwd is not a folder a child can be started in");
   check(resolve_worker_cwd(kApp, "").honoured,
         "the app's own folder is always allowed, whoever wrote it down");
+
+  // M15.3, review finding 10. The shortcut above matches through
+  // `normalize_for_match`, which throws away every separator and every case
+  // distinction -- that is what lets it recognise a dictated path, and it is
+  // also what makes strings that are *not* the app's folder normalise to the
+  // same thing. It used to return the asked-for spelling, so those strings
+  // became a bypassPermissions child's working directory. It returns the real
+  // folder now, and the absolute check runs first.
+  check(resolve_worker_cwd("C:\\github\\AI\\Interface", "").dir == kApp,
+        "**a path with a separator in the wrong place normalises the same, and is not "
+        "handed back as written**");
+  check(resolve_worker_cwd("c:/GITHUB/aiinterface", "").dir == kApp,
+        "nor is a differently-cased, differently-slashed spelling of the same folder");
+  check(resolve_worker_cwd("C:\\github\\AI\\Interface", "").honoured,
+        "it is still honoured -- it is the folder this policy would have chosen anyway");
+  check(resolve_worker_cwd("C:github\\AIInterface", "").dir == kApp,
+        "a drive-relative spelling normalises the same too, and is refused as not absolute");
+  check(!resolve_worker_cwd("C:github\\AIInterface", "").honoured,
+        "and unlike the two above it is reported as not-what-was-asked-for, because it names "
+        "whatever the current directory on C: happens to be");
   check(!resolve_worker_cwd("C:\\Users\\johng\\Documents", "").why.empty(),
         "every decision carries a reason for the log");
 
