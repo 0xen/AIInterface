@@ -35,6 +35,14 @@ extern "C" {
 // to. `false` means the arguments were bad or a registration is already live.
 bool aiiPyHostRegister(aii::AppBus* bus, const char* const* scriptPaths, int scriptCount);
 
+// Gives the registration back (M19.3). Only for the case where the caller
+// registered and then could not start the interpreter: with no interpreter
+// there is no script thread to be mid-call, and the module is left exactly as
+// it was before `aiiPyHostRegister`, so a retry can report its own failure
+// instead of "a registration is already live". **Never call this while a host
+// is running** — the scripts' bus would go out from under them.
+void aiiPyHostUnregister(void);
+
 // Flips `aii.should_quit()` and wakes anything blocked in `aii.wait()`. Called
 // before the interpreter is stopped, so a well-behaved script leaves its loop
 // on its own rather than on a KeyboardInterrupt.
@@ -54,5 +62,6 @@ namespace aii {
 // Function-pointer types for GetProcAddress consumers.
 using AiiPyRegisterFn = bool (*)(AppBus*, const char* const*, int);
 using AiiPyQuitFn = void (*)(void);
+using AiiPyUnregisterFn = void (*)(void);
 using AiiPyTextFn = const char* (*)(void);
 }  // namespace aii

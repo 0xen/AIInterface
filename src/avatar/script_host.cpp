@@ -123,10 +123,20 @@ bool ScriptHost::start(AppBus& bus, const std::vector<std::string>& scripts) {
 
   const fs::path dir = rend::executableDirectory();
 
-  // Our module first, and before the interpreter exists: `aii` registers
-  // itself into CPython's inittab as this DLL loads, which only works while
-  // Py_Initialize has not run. The engine's host is what runs it, on its own
-  // thread, in the call below.
+  // Our DLL is loaded first, and before the interpreter exists: `aii`
+  // registers itself into CPython's inittab as this DLL loads, which only
+  // works while Py_Initialize has not run. The engine's host is what runs it,
+  // on its own thread, in the call below.
+  //
+  // M19.3, finding 32. **Loading the DLL is not registering the bus, and the
+  // second of those is done last.** `aiiPyHostRegister` refuses a second
+  // registration, so when it ran here — ahead of the bootstrap write and the
+  // engine DLL — any later failure left the module pointing at a bus while
+  // `start()` returned false, and the *next* attempt reported "the aii module
+  // refused to register": a true sentence about the retry and a useless one
+  // about the fault, which was a missing DLL or an unwritable file. It now
+  // runs after everything that can fail without it, and the one failure that
+  // can still happen afterwards unregisters on its way out.
   impl_->aii_dll = LoadLibraryW((dir / L"aii_pyhost.dll").wstring().c_str());
   const auto reg = impl_->aii_dll ? reinterpret_cast<AiiPyRegisterFn>(
                                         GetProcAddress(impl_->aii_dll, "aiiPyHostRegister"))
@@ -142,16 +152,6 @@ bool ScriptHost::start(AppBus& bus, const std::vector<std::string>& scripts) {
                     : nullptr;
   if (!reg || !boot_name || !boot_src || !impl_->quit) {
     status_ = "aii_pyhost.dll is missing or out of date; scripts skipped.";
-    status_ok_ = false;
-    return false;
-  }
-
-  std::vector<const char*> ptrs;
-  for (const std::string& s : scripts_) ptrs.push_back(s.c_str());
-  // `ptrs.data()` on an empty vector may be null, which the registrar now
-  // accepts for a count of zero.
-  if (!reg(&bus, ptrs.empty() ? nullptr : ptrs.data(), static_cast<int>(ptrs.size()))) {
-    status_ = "the aii module refused to register; scripts skipped.";
     status_ok_ = false;
     return false;
   }
@@ -190,12 +190,29 @@ bool ScriptHost::start(AppBus& bus, const std::vector<std::string>& scripts) {
     return false;
   }
 
+  // Everything that can fail has been done. Now the bus goes in, immediately
+  // before the interpreter that will read it.
+  std::vector<const char*> ptrs;
+  for (const std::string& s : scripts_) ptrs.push_back(s.c_str());
+  // `ptrs.data()` on an empty vector may be null, which the registrar now
+  // accepts for a count of zero.
+  if (!reg(&bus, ptrs.empty() ? nullptr : ptrs.data(), static_cast<int>(ptrs.size()))) {
+    status_ = "the aii module refused to register; scripts skipped.";
+    status_ok_ = false;
+    return false;
+  }
+
   const std::string bootPath = boot.string();
   const char* one = bootPath.c_str();
   if (!start_fn(&impl_->queue, &one, 1)) {
     status_ = "the Python host refused to start; scripts skipped.";
     status_ok_ = false;
     impl_->stop = nullptr;
+    // The registration is given back, so a second `start()` reports whatever
+    // stopped the host rather than the leftovers of the first attempt.
+    if (const auto unreg = reinterpret_cast<AiiPyUnregisterFn>(
+            GetProcAddress(impl_->aii_dll, "aiiPyHostUnregister")))
+      unreg();
     return false;
   }
   impl_->started = true;
