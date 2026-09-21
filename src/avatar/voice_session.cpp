@@ -1678,7 +1678,24 @@ void VoiceSession::set_muted(bool muted) {
   log(muted ? "[mute] on (voice suppressed; text unaffected)" : "[mute] off");
 }
 
+size_t VoiceSession::pause_workers() {
+  if (!workers_) return 0;
+  const size_t running = workers_->running();
+  workers_->pause_all();
+  return running;
+}
+
 void VoiceSession::stop() {
+  // The count is taken before the pause, because after it there is nothing
+  // running to count. Zero means the user gets the plain sentence: "stopped (0
+  // worker(s) paused)" is the app reporting on a thing that did not happen.
+  const size_t paused_workers = pause_workers();
+  stop_reply_and_mic(paused_workers
+                         ? "stopped (" + std::to_string(paused_workers) + " worker(s) paused). ready."
+                         : "stopped. ready.");
+}
+
+void VoiceSession::stop_reply_and_mic(const std::string& stopped_status) {
   State s;
   {
     std::lock_guard<std::mutex> l(mutex_);
@@ -1692,16 +1709,21 @@ void VoiceSession::stop() {
   // M12.1. Stop is the user saying stop. A worker that reports afterwards must
   // not undo it -- and Stop pauses every running worker anyway, so the reports
   // this is guarding against are the ones already in flight.
+  //
+  // M17.1: the restarts reach this line too, and they no longer pause
+  // anything, so a worker running across a settings restart or a handoff will
+  // finish and report into the new session. It must not reopen the microphone
+  // there either. The microphone comes back on a restart through
+  // `relatch_after_reset_`, which is the user's latch and remembered
+  // separately; this forgets only the "a worker is still out, so reopen when
+  // it lands" memory, which is exactly the memory that is about to be wrong.
   listen_restore_.user_shut_the_mic();
   end_wake();
-  const size_t paused_workers = workers_ ? workers_->running() : 0;
-  if (workers_) workers_->pause_all();
   if (s == State::Thinking || s == State::Speaking) {
     cancel_ = true;
     speech_->clear();
     set_state(State::Idle);
-    set_status(paused_workers ? "stopped (" + std::to_string(paused_workers) + " worker(s) paused). ready."
-                              : "stopped. ready.");
+    set_status(stopped_status);
   } else if (s == State::Listening) {
     mic_->stop();
     std::lock_guard<std::mutex> l(mutex_);
@@ -1764,11 +1786,32 @@ void VoiceSession::begin_restart(RestartReason why) {
   // in flight, and reproducing one the user is no longer making would be the
   // app pressing its own button. See `relatch_after_reset_`.
   relatch_after_reset_ = mic_open_;
-  // Everything Stop does, and for the same reasons — a reply half-spoken into
-  // a conversation that is about to stop existing, a latch that would reopen
-  // the microphone on the next frame, a Talk press whose release would
-  // finalise an utterance into a session that never heard its beginning.
-  stop();
+  // Everything Stop does *to this app*, and for the same reasons — a reply
+  // half-spoken into a conversation that is about to stop existing, a latch
+  // that would reopen the microphone on the next frame, a Talk press whose
+  // release would finalise an utterance into a session that never heard its
+  // beginning.
+  //
+  // M17.1, review finding 3. What it deliberately no longer does to anything
+  // *else* is pause the workers. A worker is a separate process doing work the
+  // user asked for, and none of the three reasons above applies to it: it is
+  // not talking, it does not hold the microphone, and its report is a
+  // self-contained `<context>` block that the new child can deliver having
+  // never heard the conversation that started it. Only Reset pauses, and only
+  // because Reset is the user ending this conversation rather than the app
+  // replacing its own child — see stop() and the reset() header.
+  if (why == RestartReason::Reset) {
+    const size_t paused_workers = pause_workers();
+    if (paused_workers)
+      log("[reset] " + std::to_string(paused_workers) + " running worker(s) paused");
+  } else if (const size_t left = workers_ ? workers_->running() : 0) {
+    // Said out loud in the log, because "nothing happened" is exactly the kind
+    // of fix that cannot be seen afterwards. This line is the evidence that a
+    // handoff ran with work still going.
+    log(std::string(why == RestartReason::Handoff ? "[handoff] " : "[restart] ") +
+        std::to_string(left) + " worker(s) left running across the restart");
+  }
+  stop_reply_and_mic("stopped. ready.");
   // stop() only raises this for a turn it found Thinking or Speaking. Raised
   // unconditionally here so that a turn in any other shape still unwinds
   // rather than being waited on; run_reset() clears it after the join.
