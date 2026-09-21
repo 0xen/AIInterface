@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "sherpa-onnx/c-api/c-api.h"
+#include "stt/confidence.h"
 
 namespace aii {
 namespace {
@@ -118,6 +119,34 @@ size_t non_ascii_chars(const std::string& s) {
   return n;
 }
 
+// M23.2. The mirror of the two above, for a re-decode pinned to English rather
+// than to Japanese. A letter, not merely a byte under 0x80: the model emits
+// spaces and punctuation between tokens, and a "hypothesis" made of those is
+// not a word the pin recovered.
+bool has_ascii_letter(const std::string& s) {
+  for (unsigned char c : s)
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
+  return false;
+}
+
+size_t ascii_letters(const std::string& s) {
+  size_t n = 0;
+  for (unsigned char c : s)
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) ++n;
+  return n;
+}
+
+// Is `text` in `lang`'s script, and how much of it is. One pair of functions
+// selected by the language the second decode was pinned to, so the acceptance
+// rules below read the same whichever direction the recovery is going.
+bool in_script(const std::string& s, const char* lang) {
+  return std::strcmp(lang, "ja") == 0 ? non_ascii(s) : has_ascii_letter(s);
+}
+
+size_t script_len(const std::string& s, const char* lang) {
+  return std::strcmp(lang, "ja") == 0 ? non_ascii_chars(s) : ascii_letters(s);
+}
+
 }  // namespace
 
 Recognizer::Recognizer(const std::string& model_dir, int num_threads, float endpoint_silence) {
@@ -180,6 +209,7 @@ void Recognizer::begin() {
   audio_.clear();
   audio_usable_ = true;
   redecode_info_ = RedecodeInfo{};
+  confidence_ = Confidence{};
 }
 
 void Recognizer::feed(const float* samples, int n, int rate) {
@@ -229,6 +259,7 @@ std::string Recognizer::finish() {
   std::string text;
   std::vector<std::string> tokens;
   std::vector<float> times;
+  std::vector<float> probs;
   const SherpaOnnxOnlineRecognizerResult* r = SherpaOnnxGetOnlineStreamResult(recognizer_, stream_);
   if (r) {
     text = r->text ? r->text : "";
@@ -238,17 +269,49 @@ std::string Recognizer::finish() {
         times.push_back(r->timestamps[i]);
       }
     }
+    probs = ys_probs_from_json(r->json);
   }
   SherpaOnnxDestroyOnlineRecognizerResult(r);
   destroy_stream();
 
+  confidence_ = confidence_from_probs(probs);  // M23.1, see stt/confidence.h
+
   redecode_info_ = RedecodeInfo{};
-  // Only with both languages on. Pinned to one language the deletion does not
-  // happen, and re-decoding into a language the user switched off would undo
-  // the toggle they set.
+  // Under `auto`, M8.4 unchanged: both languages are on, the deletion happens,
+  // and the span is always re-decoded into Japanese because Japanese is the
+  // language that gets deleted.
   if (redecode_ && language_ == "auto" && audio_usable_ && !tokens.empty()) {
-    std::string spliced = redecode_and_splice(tokens, times);
+    std::string spliced = redecode_and_splice(tokens, times, "ja");
     if (!spliced.empty()) text = spliced;
+  } else if (pinned_recovery_ && audio_usable_ && (language_ == "en" || language_ == "ja")) {
+    // M23.2. Pinned: the same detector, aimed at whichever language the stream
+    // is *not* pinned to, and generalised to the case where the hole is the
+    // whole utterance.
+    const char* other = language_ == "ja" ? "en" : "ja";
+    // Which shape the hole is. "No tokens at all" is what a whole off-language
+    // utterance usually produces under a pin, but not always: measured, two of
+    // twenty whole Japanese sentences came back from an English-pinned stream
+    // with a token or two of rubbish in them. One or two tokens over seconds
+    // of continuous speech is the same event as none, and handing it to the
+    // gap detector splices the right answer *around* the rubbish rather than
+    // replacing it. So the whole-buffer branch takes anything under three
+    // tokens from an utterance at least 1.5 s long; `recover_whole` then still
+    // insists the gate heard someone speaking in it, so a long silence with
+    // one stray token goes nowhere near a second decode.
+    //
+    // This is the rule the corpus was measured with. A token *density* test
+    // (under two tokens per second of voiced audio) is the better-shaped
+    // version of it and would also catch the one clip this misses -- four
+    // tokens of rubbish over 3.2 s -- but the re-measurement was not finished,
+    // so it is written down in the research document and not in the code.
+    const bool empty_utterance = tokens.size() < 3 && audio_.size() >= kRate * 3 / 2;
+    if (tokens.empty() || empty_utterance) {
+      std::string whole = recover_whole(other);
+      if (!whole.empty()) text = whole;
+    } else {
+      std::string spliced = redecode_and_splice(tokens, times, other);
+      if (!spliced.empty()) text = spliced;
+    }
   }
   audio_.clear();
   audio_.shrink_to_fit();
@@ -282,7 +345,7 @@ std::string Recognizer::decode_segment(const std::vector<float>& pcm, const char
 // when nothing fired or nothing came back worth splicing, and the caller keeps
 // the original text.
 std::string Recognizer::redecode_and_splice(const std::vector<std::string>& tokens,
-                                            const std::vector<float>& times) {
+                                            const std::vector<float>& times, const char* other) {
   const float dur = static_cast<float>(audio_.size()) / kRate;
   if (dur <= 0.0f) return {};
   const std::vector<char> gate = gate_frames(audio_);
@@ -315,10 +378,13 @@ std::string Recognizer::redecode_and_splice(const std::vector<std::string>& toke
   //    the same damaged word, so they belong inside the window that is decoded
   //    again and inside the range that gets replaced. Without this the correct
   //    reading would be spliced in *beside* the broken one.
+  //    Over tokens in the language being *recovered*, not in the carrier's:
+  //    the damaged fragment is a partial reading of the off-language word, so
+  //    growing the other way would swallow the sentence around it.
   size_t first = after;  // index of the first replaced token
-  while (first > 0 && non_ascii(tokens[first - 1])) --first;
+  while (first > 0 && in_script(tokens[first - 1], other)) --first;
   size_t last = after;   // one past the last replaced token
-  while (last < tokens.size() && non_ascii(tokens[last])) ++last;
+  while (last < tokens.size() && in_script(tokens[last], other)) ++last;
 
   // 3. The cut runs between the surviving tokens either side, so it cannot
   //    clip the onset of a word whose timestamp sits later than its first
@@ -338,6 +404,7 @@ std::string Recognizer::redecode_and_splice(const std::vector<std::string>& toke
   if (cut_b - cut_a < 0.1f) return {};
 
   redecode_info_.fired = true;
+  redecode_info_.lang = other;
   redecode_info_.gap = best;
   redecode_info_.cut_a = cut_a;
   redecode_info_.cut_b = cut_b;
@@ -352,7 +419,7 @@ std::string Recognizer::redecode_and_splice(const std::vector<std::string>& toke
   seg.insert(seg.end(), pad, 0.0f);
 
   const auto t0 = std::chrono::steady_clock::now();
-  std::string ja = decode_segment(seg, "ja");
+  std::string ja = decode_segment(seg, other);
   redecode_info_.ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
   redecode_info_.decoded = ja;
 
@@ -360,7 +427,7 @@ std::string Recognizer::redecode_and_splice(const std::vector<std::string>& toke
   //    English span with an empty string far more often than with a wrong
   //    word, but "far more often" is not "always", and a re-decode that can
   //    replace English with English could damage an utterance that was right.
-  if (ja.empty() || !non_ascii(ja)) return {};
+  if (ja.empty() || !in_script(ja, other)) return {};
 
   // 5. When the span being replaced already held Japanese, the re-decode has
   //    to bring back *more* of it than it takes away. Measured: without this
@@ -370,8 +437,8 @@ std::string Recognizer::redecode_and_splice(const std::vector<std::string>& toke
   //    opinion that is allowed to shorten a good answer is a coin toss; one
   //    that may only lengthen it cannot lose ground.
   size_t had = 0;
-  for (size_t i = first; i < last; ++i) had += non_ascii_chars(tokens[i]);
-  if (had > 0 && non_ascii_chars(ja) < had) return {};
+  for (size_t i = first; i < last; ++i) had += script_len(tokens[i], other);
+  if (had > 0 && script_len(ja, other) < had) return {};
 
   std::string out;
   for (size_t i = 0; i < first; ++i) out += tokens[i];
@@ -383,6 +450,54 @@ std::string Recognizer::redecode_and_splice(const std::vector<std::string>& toke
   out += rest;
   redecode_info_.spliced = true;
   return out;
+}
+
+// M23.2. The whole-utterance case.
+//
+// A stream pinned to English, handed a whole sentence of Japanese, returns
+// nothing at all -- no text, no tokens, no timestamps. There is no gap between
+// tokens to find because there are no tokens, so the detector above cannot see
+// it, and the utterance reaches the app as silence. The hole is the utterance.
+//
+// The test is the same one in a different shape: the app's own noise gate says
+// someone spoke for a while and the decoder produced nothing. "A while" is the
+// same 0.6 s the gap detector uses -- below that there is nothing worth a
+// second decode, and a cough or a door is exactly what should not trigger one.
+std::string Recognizer::recover_whole(const char* other) {
+  const float dur = static_cast<float>(audio_.size()) / kRate;
+  if (dur < kMinGapSec) return {};
+  const std::vector<char> gate = gate_frames(audio_);
+  size_t loud = 0;
+  for (char c : gate) loud += static_cast<size_t>(c);
+  const float voiced = loud * 0.02f;
+  if (voiced < kMinGapSec) return {};
+
+  redecode_info_.fired = true;
+  redecode_info_.whole = true;
+  redecode_info_.lang = other;
+  redecode_info_.gap = voiced;
+  redecode_info_.cut_a = 0.0f;
+  redecode_info_.cut_b = dur;
+
+  std::vector<float> seg;
+  const size_t pad = static_cast<size_t>(kPadSec * kRate);
+  seg.reserve(pad * 2 + audio_.size());
+  seg.assign(pad, 0.0f);
+  seg.insert(seg.end(), audio_.begin(), audio_.end());
+  seg.insert(seg.end(), pad, 0.0f);
+
+  const auto t0 = std::chrono::steady_clock::now();
+  std::string alt = decode_segment(seg, other);
+  redecode_info_.ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  redecode_info_.decoded = alt;
+
+  // The same acceptance rule as the spliced case, and for the same reason: an
+  // answer that is not in the language the second stream was pinned to is not
+  // evidence of a switch. There is nothing to compare lengths against here --
+  // the first pass produced no text at all -- so this is the whole test.
+  if (alt.empty() || !in_script(alt, other)) return {};
+  redecode_info_.spliced = true;
+  return alt;
 }
 
 }  // namespace aii

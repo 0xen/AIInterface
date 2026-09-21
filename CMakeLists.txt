@@ -26,6 +26,7 @@ add_library(aii_core STATIC
   src/audio/audio_out.cpp
   src/audio/resample.cpp
   src/audio/mic_in.cpp
+  src/stt/confidence.cpp
   src/stt/recognizer.cpp
   src/llm/claude_client.cpp
   src/llm/claude_code_client.cpp
@@ -186,6 +187,17 @@ if(AII_BUILD_TESTS)
     target_compile_options(client_kill_test PRIVATE /utf-8 /W4)
   endif()
   aii_copy_runtime_dlls(client_kill_test)
+  # ---- confidence_test: ys_probs, and the two numbers made out of it -------
+  # M23.1. `src/stt/confidence.h` is a header so that this can exist: the parse
+  # and the arithmetic are checked with no model loaded and no sherpa-onnx call
+  # anywhere, against a real result JSON and against the malformed shapes a
+  # library this project does not build could hand it.
+  add_executable(confidence_test tests/confidence_test.cpp src/stt/confidence.cpp)
+  target_include_directories(confidence_test PRIVATE src third_party)
+  target_compile_definitions(confidence_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(confidence_test PRIVATE /utf-8 /W4)
+  endif()
 
   # ---- memory_store_test: the file the user's "remember this" lands in ----
   # Same rule as cwd_policy_test: memory_store.cpp is standard-library-only, so
