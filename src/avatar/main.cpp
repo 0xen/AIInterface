@@ -3115,6 +3115,11 @@ int main(int /*argc*/, char** /*argv*/) {
                 avatarOptions.scripts.push_back({a.name, a.description, a.armed, a.in_digest});
             avatarOptions.art_status = avatarSource.status();
             avatarOptions.art_status_ok = avatarSource.status_ok();
+            // M20.1. The same carry for the file the surface writes to. Before
+            // this the status went only to the log, and the panel went on
+            // saying "Saved" over a write that had failed.
+            avatarOptions.settings_status = settings.status();
+            avatarOptions.settings_status_failed = settings.save_failed();
             avatarOptions.derived = avatarSource.derived();
             avatarOptions.custom_theme = avatarSource.theme() == aii::AvatarSource::custom_theme();
             // M8.3. What the session is really doing, which is not always what

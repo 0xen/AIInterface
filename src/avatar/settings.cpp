@@ -1,5 +1,6 @@
 #include "settings.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -26,6 +27,17 @@ namespace {
 // before a user who just clicked something reaches for the close button —
 // and flush() on the way out covers them if they do not.
 constexpr float kDebounceSeconds = 1.0f;
+
+// M20.1. How long a *failed* write waits before it is tried again, and how
+// far that wait is allowed to grow. A save that failed is still a change the
+// user made, so it is kept and retried rather than dropped; the backoff is
+// what stops an unwritable directory turning one failure into a write attempt
+// per second for the rest of the run. The first retry is soon enough to catch
+// the ordinary cause — an editor or a scanner holding the file open for a
+// moment — and the ceiling is low enough that a directory made writable again
+// is picked up without a restart.
+constexpr float kRetryFirstSeconds = 2.0f;
+constexpr float kRetryMaxSeconds = 30.0f;
 
 // nlohmann's const operator[] asserts on a missing key, and a missing key is
 // the ordinary case here (it is what "this field has never been set" looks
@@ -193,7 +205,11 @@ void Settings::set_enum(const char* section, const char* key, const char* const*
 void Settings::tick(float dt) {
   if (!dirty_) return;
   since_change_ += dt;
-  if (since_change_ >= kDebounceSeconds) save();
+  // M20.1. The debounce while nothing has gone wrong; the backoff once
+  // something has. One clock rather than two, because the two states are
+  // exclusive: a save either cleared `dirty_` or set `retry_wait_`.
+  const float wait = retry_wait_ > 0.0f ? retry_wait_ : kDebounceSeconds;
+  if (since_change_ >= wait) save();
 }
 
 void Settings::flush() {
@@ -207,17 +223,37 @@ bool Settings::take_status_change() {
 }
 
 void Settings::note(std::string line, bool ok) {
+  // M20.1. Saying the same thing again is not news. This is what lets a
+  // failed save be retried on a backoff without the retry turning into a log
+  // full of one line — the concern the old "clear `dirty_` either way" was
+  // written for, answered here where it belongs rather than by throwing the
+  // user's change away.
+  if (line == status_ && ok == status_ok_) {
+    status_ = std::move(line);
+    return;
+  }
   status_ = std::move(line);
   status_ok_ = ok;
   status_new_ = true;
 }
 
+// M20.1. A write that failed, kept. `dirty_` stays set so the change is still
+// owed to the file, and `retry_wait_` grows so that owing it does not cost a
+// write attempt per frame.
+void Settings::fail(std::string line) {
+  note(std::move(line), false);
+  retry_wait_ = retry_wait_ <= 0.0f ? kRetryFirstSeconds
+                                    : std::min(retry_wait_ * 2.0f, kRetryMaxSeconds);
+}
+
 void Settings::save() {
-  // Clear first either way: a failed save that keeps trying every second
-  // would turn one unwritable directory into a log full of the same line.
-  dirty_ = false;
   since_change_ = 0.0f;
-  if (path_.empty()) return;
+  if (path_.empty()) {
+    // Nothing to write to, ever: there is no failure here to report and no
+    // retry that could succeed, so the change is simply not owed to a file.
+    dirty_ = false;
+    return;
+  }
 
   if (!member(root_, "version").is_number_integer()) root_["version"] = 1;
 
@@ -232,7 +268,7 @@ void Settings::save() {
   {
     std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
     if (!out) {
-      note("settings not saved - cannot write " + tmp.string(), false);
+      fail("settings not saved - cannot write " + tmp.string());
       return;
     }
     // Indented: this file is meant to be opened and edited by hand, the same
@@ -242,7 +278,7 @@ void Settings::save() {
     if (!out) {
       out.close();
       fs::remove(tmp, ec);
-      note("settings not saved - write failed for " + tmp.string(), false);
+      fail("settings not saved - write failed for " + tmp.string());
       return;
     }
   }
@@ -261,8 +297,19 @@ void Settings::save() {
     const std::string why = ec.message();
     std::error_code cleanup;
     fs::remove(tmp, cleanup);
-    note("settings not saved - " + path_.string() + ": " + why, false);
+    fail("settings not saved - " + path_.string() + ": " + why);
+    return;
   }
+
+  // M20.1. The only path that owes the file nothing.
+  dirty_ = false;
+  // A recovery is said out loud, because the failure was: the panel has been
+  // showing an amber line for however long the directory was unwritable, and
+  // it has to be able to go back to being quiet. A run that never failed
+  // leaves `status_` empty and says nothing at all, which is the ordinary
+  // case and the one that must stay silent.
+  if (retry_wait_ > 0.0f) note("settings saved - " + path_.string(), true);
+  retry_wait_ = 0.0f;
 }
 
 // ----------------------------------------------------------------- M3.14

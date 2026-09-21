@@ -229,6 +229,19 @@ struct AvatarOptions {
   std::string art_status;
   bool art_status_ok = true;
 
+  // M20.1. `Settings`' one-line status, shown at the top of the surface. Every
+  // control below it says "Saved" in one wording or another, and each of those
+  // sentences is true of the panel state and was being said about the file as
+  // well. A write that failed made all of them wrong at once, which is why
+  // this line is at the top of the surface rather than beside any one control:
+  // it is not about a setting, it is about whether any of them reached disk.
+  //
+  // Empty is the ordinary case and draws nothing. `settings_status_failed`
+  // and not `!ok` decides the colour, because a recovered save reports itself
+  // through the same line and is not a warning.
+  std::string settings_status;
+  bool settings_status_failed = false;
+
   // M1c.5. What the picked body colour currently derives to, so the surface
   // can show the derived inks and say honestly how far it had to go. The
   // panel does not derive anything itself: the rule is one function in
