@@ -272,7 +272,11 @@ if(AII_BUILD_TESTS)
   # no window and -- the point -- no microphone. It is where M12's negative
   # cases live: the near-misses that must not open the mic, and the worker that
   # must not reopen a mic the user shut on purpose.
-  add_executable(wake_word_test tests/wake_word_test.cpp src/core/wake_word.cpp)
+  #
+  # text_util.cpp joins it at M24.2 and costs nothing: it is standard-library
+  # only too, and it is where the one UTF-8 decoder now lives.
+  add_executable(wake_word_test tests/wake_word_test.cpp src/core/wake_word.cpp
+                                src/core/text_util.cpp)
   target_include_directories(wake_word_test PRIVATE src)
   target_compile_definitions(wake_word_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   if(MSVC)

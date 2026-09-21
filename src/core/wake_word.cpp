@@ -2,32 +2,21 @@
 
 #include <cstdint>
 
+#include "core/text_util.h"
+
 namespace aii {
 namespace {
 
-// The lead byte says how long the sequence is. A malformed lead is treated as
-// one byte, which keeps the walk moving rather than running off the end — this
-// text comes out of a recogniser and off a settings file, and neither is a
-// guaranteed-valid UTF-8 source worth throwing over.
-int seq_len(unsigned char c) {
-  if (c < 0x80) return 1;
-  if ((c & 0xE0) == 0xC0) return 2;
-  if ((c & 0xF0) == 0xE0) return 3;
-  if ((c & 0xF8) == 0xF0) return 4;
-  return 1;
-}
-
-uint32_t decode(const std::string& s, size_t i, int len) {
-  const unsigned char* p = reinterpret_cast<const unsigned char*>(s.data()) + i;
-  switch (len) {
-    case 2: return ((p[0] & 0x1Fu) << 6) | (p[1] & 0x3Fu);
-    case 3: return ((p[0] & 0x0Fu) << 12) | ((p[1] & 0x3Fu) << 6) | (p[2] & 0x3Fu);
-    case 4:
-      return ((p[0] & 0x07u) << 18) | ((p[1] & 0x3Fu) << 12) | ((p[2] & 0x3Fu) << 6) |
-             (p[3] & 0x3Fu);
-    default: return p[0];
-  }
-}
+// M24.2. The lead-byte decoder that used to live here — `seq_len` plus a
+// `decode` that trusted it — is now `aii::utf8_next` in text_util, which is
+// the same decoder `has_japanese` and the button registry walk with. This text
+// comes out of a recogniser and off a settings file, neither of which is a
+// guaranteed-valid UTF-8 source worth throwing over, so malformed bytes are
+// still survivable: `utf8_next` hands back U+FFFD one byte at a time and
+// `fold` below drops it. That keeps the old visible behaviour of a truncated
+// tail — dropped whole, never split — while no longer letting a stray
+// continuation byte through into a normalised phrase as a real character,
+// which the local decoder did.
 
 void append_utf8(std::string& out, uint32_t cp) {
   if (cp < 0x80) {
@@ -73,6 +62,10 @@ void append_utf8(std::string& out, uint32_t cp) {
 //   * Everything else is kept as it stands: kana, kanji, and any script this
 //     recogniser might learn later.
 uint32_t fold(uint32_t cp) {
+  // A byte that was not part of a well-formed sequence. It is not a character
+  // the user typed or the recogniser heard, so it is dropped rather than
+  // carried into a phrase that is then matched against.
+  if (cp == kUtf8Replacement) return 0;
   if (cp < 0x80) {
     if (cp >= 'A' && cp <= 'Z') return cp - 'A' + 'a';
     if ((cp >= 'a' && cp <= 'z') || (cp >= '0' && cp <= '9')) return cp;
@@ -96,11 +89,8 @@ std::string normalise_wake(const std::string& text) {
   std::string out;
   out.reserve(text.size());
   for (size_t i = 0; i < text.size();) {
-    const int len = seq_len(static_cast<unsigned char>(text[i]));
-    if (i + static_cast<size_t>(len) > text.size()) break;  // truncated tail: stop, never split
-    const uint32_t kept = fold(decode(text, i, len));
+    const uint32_t kept = fold(utf8_next(text, i));
     if (kept) append_utf8(out, kept);
-    i += static_cast<size_t>(len);
   }
   return out;
 }
@@ -108,8 +98,10 @@ std::string normalise_wake(const std::string& text) {
 int wake_chars(const std::string& text) {
   const std::string n = normalise_wake(text);
   int count = 0;
-  for (size_t i = 0; i < n.size(); i += static_cast<size_t>(seq_len(static_cast<unsigned char>(n[i]))))
+  for (size_t i = 0; i < n.size();) {
+    utf8_next(n, i);
     ++count;
+  }
   return count;
 }
 

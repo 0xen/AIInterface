@@ -1,9 +1,54 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace aii {
+
+// What `utf8_next` returns for a byte that does not begin a well-formed
+// sequence: U+FFFD, the replacement character.
+constexpr std::uint32_t kUtf8Replacement = 0xFFFDu;
+
+// M24.2. The one UTF-8 lead-byte decoder. There were three of these — this
+// file's `next_cp`, `wake_word.cpp`'s `seq_len`/`decode` pair, and a one-line
+// ternary inside `button_registry.cpp`'s `truncate_chars` — and they disagreed
+// about every kind of malformed input. This project has already shipped one
+// byte-level UTF-8 bug; it does not need three chances at the next one.
+//
+// Decodes the sequence starting at `s[i]` and advances `i` past what it
+// consumed. `i` must be less than `s.size()`. The returned value is the code
+// point, and `i` always moves by at least one byte, so a loop over a string of
+// any bytes at all terminates.
+//
+// **Malformed input yields `kUtf8Replacement` and consumes exactly one byte**,
+// which is what the three old decoders each did differently. The cases, and
+// what each of them used to do:
+//
+//   * a stray continuation byte (0x80..0xBF): replacement. `next_cp` also gave
+//     U+FFFD; `wake_word` decoded it as a code point in 0x80..0xBF and *kept*
+//     it, so a broken byte could survive into a normalised wake phrase;
+//     `truncate_chars` counted it as one character.
+//   * a lead byte no sequence starts with (0xF8..0xFF): replacement, as all
+//     three effectively did.
+//   * a sequence truncated by the end of the string: replacement per remaining
+//     byte. `next_cp` consumed the rest of the string and returned whatever
+//     partial value it had accumulated; `wake_word` stopped the walk and
+//     dropped the tail whole (still the visible behaviour there, because its
+//     fold drops the replacement character); `truncate_chars` counted the tail
+//     as one character.
+//   * a sequence whose continuation bytes are not continuation bytes
+//     ("\xE3" "ab"): replacement for the lead byte, and the following bytes are
+//     then decoded on their own. All three previously swallowed them into one
+//     garbage code point, so an ASCII letter after a bad lead byte disappeared.
+//   * an overlong encoding ("\xC0\x80"), a surrogate, or a value above
+//     U+10FFFF: replacement. `next_cp` and `wake_word` both decoded these,
+//     which is how a NUL arrives spelled as two bytes.
+//
+// It does not sanitise, it decodes: the caller decides what a replacement
+// character means. `clip_utf8` below deliberately does not use it, because it
+// walks *backwards* from a byte cap and never needs a code point's value.
+std::uint32_t utf8_next(const std::string& s, std::size_t& i);
 
 // One stretch of a mixed-script sentence, already routed to a voice.
 struct ScriptRun {

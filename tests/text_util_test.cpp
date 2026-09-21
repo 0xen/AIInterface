@@ -254,6 +254,109 @@ int main() {
   check_runs("ascii punctuation between japanese keeps one run",
              kNihongo + " --- " + kKonnichiwa, {{true, kNihongo + " --- " + kKonnichiwa}});
 
+  // ---- M24.2: the one UTF-8 decoder, on the bytes nobody meant to send -----
+  //
+  // There were three lead-byte decoders in this repo: this file's `next_cp`,
+  // `wake_word.cpp`'s `seq_len`/`decode` pair, and a one-line ternary in
+  // `button_registry.cpp`. On well-formed text they agreed. On malformed text
+  // they did three different things, and the cases below are exactly the ones
+  // they disagreed about. `utf8_next` is now what all three call, and the rule
+  // it settled on is: **one replacement character per byte that is not part of
+  // a well-formed sequence, and never more than that byte consumed.** The
+  // header states why for each case; this asserts it.
+  //
+  // The fourth decoder the review counted is not in `main.cpp` in this tree —
+  // see the report for that. `action_store.cpp` and `avatar_ui.cpp` scan
+  // *backwards* for a continuation byte to find a boundary, which is what
+  // `clip_utf8` does too; that is a different job and is deliberately left
+  // alone.
+  std::printf("\nutf8_next: malformed input\n");
+  {
+    // Decodes `in` whole, as "cp,cp,cp" in hex, so a failure line shows both
+    // what came out and how far each step advanced.
+    const auto decode_all = [](const std::string& in) {
+      std::string out;
+      std::size_t i = 0;
+      while (i < in.size()) {
+        char buf[16];
+        std::snprintf(buf, sizeof buf, "%s%X", out.empty() ? "" : ",",
+                      aii::utf8_next(in, i));
+        out += buf;
+      }
+      return out;
+    };
+    const auto cps = [&](const char* name, const std::string& in, const char* want) {
+      check_str("utf8_next", name, decode_all(in), want);
+    };
+
+    cps("ascii", "Az", "41,7A");
+    cps("two-byte sequence", "\xC3\xA9", "E9");
+    cps("three-byte sequence", kWo, "3092");
+    cps("four-byte sequence (U+1F600)", "\xF0\x9F\x98\x80", "1F600");
+
+    // A continuation byte with no lead. `next_cp` gave U+FFFD like this;
+    // wake_word's decoder returned it *as* a code point (0x80..0xBF) and then
+    // kept it, so a broken byte could end up inside a normalised wake phrase.
+    cps("a stray continuation byte is one replacement", "\x80", "FFFD");
+    cps("and does not eat what follows it", "\x80" "a", "FFFD,61");
+
+    // 0xF8..0xFF begins nothing. All three treated it as one byte.
+    cps("an impossible lead byte", "\xF8", "FFFD");
+    cps("0xFF likewise", "\xFF" "a", "FFFD,61");
+
+    // Truncated by the end of the string. `next_cp` consumed the rest and
+    // returned the partial value it had accumulated; `truncate_chars` counted
+    // the tail as one character; wake_word stopped the walk and dropped it.
+    cps("a truncated three-byte sequence is bytes, not a character",
+        std::string("\xE3\x82"), "FFFD,FFFD");
+    cps("a lone lead byte at the end", "a\xE3", "61,FFFD");
+
+    // The case that used to swallow good text: a lead byte whose continuation
+    // bytes are not continuation bytes. All three old decoders consumed the
+    // full declared length, so the "ab" after a bad lead vanished into one
+    // garbage code point.
+    cps("a lead byte whose continuations are ascii keeps the ascii",
+        "\xE3" "ab", "FFFD,61,62");
+
+    // Overlongs and surrogates: bit patterns that decode, and are not
+    // characters. `next_cp` and wake_word's decoder both accepted them, which
+    // is how a NUL arrives spelled as two bytes.
+    cps("an overlong NUL is refused, not decoded to zero", "\xC0\x80", "FFFD,FFFD");
+    cps("an overlong slash likewise", "\xE0\x80\xAF", "FFFD,FFFD,FFFD");
+    cps("a lone surrogate is refused", "\xED\xA0\x80", "FFFD,FFFD,FFFD");
+    cps("a value above U+10FFFF is refused", "\xF7\xBF\xBF\xBF", "FFFD,FFFD,FFFD,FFFD");
+
+    // The property every caller depends on to terminate at all.
+    {
+      bool always_advanced = true;
+      const std::string kGarbage("\x80\xC0\xE3\xF8\xFF\x9A\xF0\x9F", 8);
+      std::size_t i = 0;
+      while (i < kGarbage.size()) {
+        const std::size_t before = i;
+        aii::utf8_next(kGarbage, i);
+        if (i <= before) {
+          always_advanced = false;
+          break;
+        }
+      }
+      check_bool("utf8_next", "every step advances, so a walk terminates", always_advanced,
+                 true);
+    }
+
+    // And what the callers make of it: a truncated Japanese character is no
+    // longer Japanese, and no longer worth speaking.
+    check_bool("has_japanese", "a truncated kana is not kana",
+               has_japanese(std::string(kWo).substr(0, 2)), false);
+    // Recorded, not endorsed: `has_speakable_content`'s last clause is
+    // "anything at or above U+00C0", and U+FFFD is above it, so a replacement
+    // character still counts as worth speaking. That was true of the old
+    // decoder too — it returned U+FFFD for a stray continuation byte — so this
+    // is unchanged behaviour rather than something M24.2 introduced. If it is
+    // ever tightened, this is the case to change with it.
+    check_bool("has_speakable", "a replacement character still counts (see comment)",
+               has_speakable_content(std::string("\x80\x81", 2)), true);
+  }
+
   std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
               g_failures == 1 ? "" : "s");
   return g_failures == 0 ? 0 : 1;
