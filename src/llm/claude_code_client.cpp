@@ -13,14 +13,6 @@ using json = nlohmann::json;
 namespace aii {
 namespace {
 
-std::wstring widen(const std::string& s) {
-  if (s.empty()) return {};
-  int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
-  std::wstring w(n, L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
-  return w;
-}
-
 // Quote one argument the way CommandLineToArgvW expects.
 std::string quote_arg(const std::string& a) {
   if (!a.empty() && a.find_first_of(" \t\"") == std::string::npos) return a;

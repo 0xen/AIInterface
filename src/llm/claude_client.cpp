@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <string>
 
+#include "core/text_util.h"
 #include "json.hpp"
 #include "llm/json_shape.h"
 
@@ -13,14 +14,6 @@ using json = nlohmann::json;
 
 namespace aii {
 namespace {
-
-std::wstring widen(const std::string& s) {
-  if (s.empty()) return {};
-  int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
-  std::wstring w(n, L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
-  return w;
-}
 
 struct Handle {
   HINTERNET h = nullptr;
