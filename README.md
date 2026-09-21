@@ -116,6 +116,7 @@ build\bin\Release\avatar.exe
 | SPACE or the microphone button | start listening; again to stop and send (also barges in while Claude speaks) |
 | S or the speaker button | mute Claude's voice. A level, remembered across runs: audio already playing is cut and nothing further is spoken, while replies still arrive as text |
 | E or the stop button | cancel the reply in flight, close the mic, pause every worker |
+| Type, then Enter | send a typed message. This works while the microphone is open: what was being heard is discarded, the typed text is the turn, and listening resumes after the reply |
 | the reset button | throw the conversation away and start a new one |
 | Esc or Q | quit |
 

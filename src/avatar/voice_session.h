@@ -540,6 +540,20 @@ class VoiceSession {
   // The same close and decode, but the text becomes a dictation for the
   // message field instead of a turn (M1b.3).
   void end_listening_unsent();
+  // The same close and decode again, and then the words are **thrown away**.
+  //
+  // It exists for one case: the user typed a message and pressed Enter while
+  // the microphone was open. They have chosen the keyboard for this turn, so
+  // whatever the room was saying is not a dictation to be edited and not a
+  // turn to be sent -- putting it in the field would overwrite what they typed
+  // with something they did not ask for. The decoder is still flushed, because
+  // leaving a half-decoded utterance in it would surface inside the *next* one.
+  //
+  // **The latch is deliberately untouched.** Typing is not closing the
+  // microphone: with the latch still on, update() reopens listening once the
+  // reply is over, so the voice channel survives a typed turn instead of being
+  // ended by it.
+  void discard_utterance();
   // Why the child is being replaced. The mechanism is identical either way —
   // this decides one status line and one log line, and nothing else. It is not
   // a mode: a restart for a setting still clears the transcript, still keeps

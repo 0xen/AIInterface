@@ -2928,7 +2928,11 @@ const char* send_refusal(const VoiceSession::Snapshot& snap, bool voice_enabled,
   switch (snap.state) {
     case VoiceSession::State::Loading: return "still starting up";
     case VoiceSession::State::Failed: return "the session failed to start";
-    case VoiceSession::State::Listening: return "the microphone is open";
+    // Listening is deliberately **not** a refusal. An open microphone used to
+    // stop a typed message being sent at all, which made the keyboard
+    // unavailable for as long as the voice channel was up. The session now
+    // takes it: what was being heard is discarded, the typed text is the turn,
+    // and the latch survives, so listening resumes once the reply is over.
     case VoiceSession::State::Thinking:
     case VoiceSession::State::Speaking: return "Claude is still replying";
     default: return nullptr;

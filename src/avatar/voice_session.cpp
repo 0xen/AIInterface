@@ -986,6 +986,21 @@ void VoiceSession::end_listening_unsent() {
                          : "in the message box. edit it, then press Enter.";
 }
 
+void VoiceSession::discard_utterance() {
+  const std::string dropped = finish_utterance();
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    partial_.clear();
+    set_state_locked(State::Idle);
+  }
+  // The length and not the words. Everything else this app logs about speech is
+  // something the user chose to send; this is the one line about speech they
+  // decided against, and writing it down would make the log a record of things
+  // said in the room and not sent.
+  if (!dropped.empty())
+    rend::log::trace("mic: discarded {} characters, the keyboard had the turn", dropped.size());
+}
+
 void VoiceSession::toggle_mic() { set_mic_open(!mic_open_); }
 
 void VoiceSession::talk_pressed() {
@@ -1550,8 +1565,18 @@ void VoiceSession::say(const std::string& text) {
     std::lock_guard<std::mutex> l(mutex_);
     s = state_;
   }
-  if (s == State::Loading || s == State::Failed || s == State::Listening) return;
-  if (s != State::Idle) {
+  if (s == State::Loading || s == State::Failed) return;
+  // Typed while the microphone was open. This used to return here, so a
+  // message written during a latched listen could be sent only by closing the
+  // mic first -- the keyboard was locked out of the app for as long as the
+  // voice channel was up, which is backwards: the two are alternatives, not
+  // modes, and the panel already lets speech and typing share the field.
+  //
+  // Frame-loop only, like everything that touches the recogniser: both callers
+  // are on it (the panel directly, the bus through apply_pending()).
+  if (s == State::Listening) {
+    discard_utterance();
+  } else if (s != State::Idle) {
     cancel_ = true;
     speech_->clear();
   }
