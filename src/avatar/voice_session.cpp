@@ -1912,7 +1912,20 @@ void VoiceSession::apply_stt_language() {
 void VoiceSession::ensure_japanese_voice() {
   if (!loaded_) return;                       // the startup load owns the engines until it is done
   if (!requested_langs().japanese) return;
+  // Review finding 19. A load that failed is not retried from here, and here
+  // is every frame: update() calls this unconditionally, so a failure that
+  // cleared `ja_started_` on its own would respawn the loader sixty times a
+  // second against a VOICEVOX that is not going to appear. The retry is the
+  // *user* asking again -- set_languages() clears this on the edge where the
+  // checkbox comes back on -- which is the gesture finding 19 says must work
+  // and which, before this, did nothing at all.
+  if (ja_failed_) return;
   if (ja_started_.exchange(true)) return;     // built at startup, or already loading, or done
+  // The previous attempt's thread, which is finished (it cleared `ja_started_`
+  // as its last act) but still joinable. Assigning over a joinable std::thread
+  // calls terminate(), so this is not tidiness: it is the line that makes the
+  // retry safe.
+  if (ja_loader_.joinable()) ja_loader_.join();
   ja_loading_ = true;
   log("[lang] loading the Japanese voice...");
   ja_loader_ = std::thread([this] {
@@ -1936,7 +1949,16 @@ void VoiceSession::ensure_japanese_voice() {
                       std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count());
     } else {
       ja_error_ = err;
+      // Review finding 19. **Cleared, and in this order.** `ja_started_` means
+      // "a load is under way or has succeeded", and a failure is neither; left
+      // set, it made the guard above permanent and every later attempt -- the
+      // user unticking Japanese and ticking it again, which is the only thing
+      // the settings surface offers them to do about a failure -- a silent
+      // no-op. `ja_failed_` is raised first so the frame loop's call cannot
+      // slip through the cleared flag before the reason for refusing it is
+      // visible; the retry lowers `ja_failed_` again on the user's own edge.
       ja_failed_ = true;
+      ja_started_.store(false);
       log("[lang] " + err);
     }
     ja_loading_ = false;
@@ -1948,6 +1970,21 @@ void VoiceSession::set_languages(LanguageSelection sel) {
   const unsigned bits = pack_langs(sel);
   if (langs_bits_.exchange(bits) == bits) return;  // a level, not an edge
   log(std::string("[lang] ") + language_spec(sel));
+  // Review finding 19, the other half. This is the edge -- the checkbox has
+  // moved and Japanese is wanted -- so a previous failure stops standing in
+  // the way. Off-and-on-again is the whole of the user interface a failed
+  // voice has (the settings surface shows the error and offers nothing else),
+  // and until this it was a gesture that did nothing: `ja_started_` was left
+  // set by the failure, so every retry returned at the first line.
+  if (sel.japanese && ja_failed_) {
+    // The flag and not the message: `ja_error_` is a plain string the loader
+    // thread writes and snapshot() reads whenever `ja_failed_` is up, so
+    // clearing it from here would be a write racing that read for no gain.
+    // It is only ever shown behind the flag, and the next failure overwrites
+    // it before raising the flag again.
+    ja_failed_ = false;
+    log("[lang] the Japanese voice failed to load last time; trying again");
+  }
   // Japanese first: it is what effective_langs() may still be waiting on, and
   // starting the load before the recogniser is told anything means the two are
   // never out of step in the wrong direction.
