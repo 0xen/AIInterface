@@ -60,6 +60,21 @@ aii::ClaudeCodeClient::Options stand_in() {
   return o;
 }
 
+// M26.1. The other stand-in: built beside this test (see CMakeLists.txt), it
+// writes a sign-in failure on stderr and exits 3.
+std::string stderr_stand_in_exe() {
+  char buf[MAX_PATH] = {0};
+  const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+  std::string self(buf, n);
+  const size_t slash = self.find_last_of("\\/");
+  return (slash == std::string::npos ? std::string() : self.substr(0, slash + 1)) +
+         "stderr_stand_in.exe";
+}
+
+bool contains(const std::string& haystack, const std::string& needle) {
+  return haystack.find(needle) != std::string::npos;
+}
+
 double seconds_since(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
@@ -193,6 +208,30 @@ int main() {
     check(reported == aii::WorkerPool::State::Paused,
           std::string("and it reports as stopped, not failed (") +
               aii::worker_state_name(reported) + ")");
+  }
+
+  // ---- 4. a child that dies saying why ----------------------------------
+  //
+  // M26.1, finding 17. `start()` used to report "claude exited during startup:"
+  // and stop there, because the child's stderr was handed to a console handle
+  // the windowed app does not own and nothing in this class ever read it. The
+  // stand-in prints a banner, then the reason, then exits 3; both the code and
+  // the reason have to reach the string the caller is given, and the banner
+  // must not crowd them out.
+  std::printf("\nstart() on a child that fails the way a signed-out CLI fails\n");
+  {
+    aii::ClaudeCodeClient::Options o = stand_in();
+    o.exe = stderr_stand_in_exe();
+    aii::ClaudeCodeClient client(o);
+    std::string err;
+    const bool started = client.start(&err);
+    check(!started, "start() fails, as it did before");
+    std::printf("       the error string is: \"%s\"\n", err.c_str());
+    check(contains(err, "not signed in: run `claude /login`"),
+          "and it now carries what the child said on stderr");
+    check(contains(err, "exit code 3"), "and the exit code");
+    check(!err.empty() && err.back() != ':' && err.back() != ' ',
+          "and does not trail off after a colon, which was the finding");
   }
 
   std::printf(failures ? "\nFAILED: %d\n" : "\nall passed\n", failures);

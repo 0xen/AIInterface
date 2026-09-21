@@ -4,6 +4,7 @@
 #include <ctime>
 #include <cstdio>
 
+#include "core/text_util.h"
 #include "json.hpp"
 #include "llm/json_shape.h"
 
@@ -40,6 +41,34 @@ std::string quote_arg(const std::string& a) {
   out.append(backslashes * 2, '\\');
   out.push_back('"');
   return out;
+}
+
+// M26.1. How much of the child's stderr is kept, and how much of that is
+// allowed into a sentence the user sees. The first is generous because it is
+// only memory and a stack trace is worth having in the log; the second is
+// tight because it goes in a status line beside everything else.
+constexpr std::size_t kStderrTailBytes = 8192;
+constexpr std::size_t kStderrInErrorBytes = 200;
+
+// The useful end of what the child said. A CLI that fails on startup prints
+// its reason last, and usually prints blank lines and a banner before it, so
+// take the final non-empty lines rather than the final N bytes -- a byte cut
+// would just as happily hand back the tail of a stack frame.
+std::string last_words(const std::string& tail) {
+  std::string out;
+  std::size_t end = tail.size();
+  while (end > 0 && out.size() < kStderrInErrorBytes) {
+    while (end > 0 && (tail[end - 1] == '\n' || tail[end - 1] == '\r' || tail[end - 1] == ' ' ||
+                       tail[end - 1] == '\t'))
+      --end;
+    if (end == 0) break;
+    std::size_t begin = tail.find_last_of("\r\n", end - 1);
+    begin = begin == std::string::npos ? 0 : begin + 1;
+    std::string line = trim(tail.substr(begin, end - begin));
+    if (!line.empty()) out = out.empty() ? line : line + " / " + out;
+    end = begin;
+  }
+  return clip_utf8(out, kStderrInErrorBytes);
 }
 
 // `resetsAt` is unix seconds, but be tolerant of a millisecond value: a
@@ -81,6 +110,42 @@ ClaudeCodeClient::~ClaudeCodeClient() {
   // above, is; the pipe breaks and ReadFile returns.
   if (reader_.joinable()) reader_.join();
   if (stdout_r_) CloseHandle(stdout_r_);
+  // M26.1: the stderr reader unwinds for the same reason and under the same
+  // rule -- its pipe breaks when the child goes, and the handle is closed only
+  // after the thread that is inside `ReadFile` on it has been joined.
+  if (err_reader_.joinable()) err_reader_.join();
+  if (stderr_r_) CloseHandle(stderr_r_);
+}
+
+std::string ClaudeCodeClient::exit_detail() const {
+  std::string code;
+  DWORD status = 0;
+  if (process_ && GetExitCodeProcess(process_, &status) && status != STILL_ACTIVE)
+    code = "exit code " + std::to_string(static_cast<long long>(static_cast<int>(status)));
+  const std::string said = last_words(stderr_tail_);
+  if (code.empty()) return said;
+  if (said.empty()) return code;
+  return code + ": " + said;
+}
+
+void ClaudeCodeClient::stderr_loop() {
+  char buf[4096];
+  for (;;) {
+    DWORD got = 0;
+    if (!ReadFile(stderr_r_, buf, sizeof(buf), &got, nullptr) || got == 0) break;
+    // Still to the app's own stderr as well, which `main.cpp` has already
+    // pointed at `avatar.log`. Piping it here is about getting the text into
+    // `last_error_` where the user can be told; it must not also mean the log
+    // stops carrying what the CLI reports.
+    std::fwrite(buf, 1, got, stderr);
+    std::lock_guard<std::mutex> lock(mutex_);
+    stderr_tail_.append(buf, got);
+    if (stderr_tail_.size() > kStderrTailBytes)
+      stderr_tail_.erase(0, stderr_tail_.size() - kStderrTailBytes);
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  err_done_ = true;
+  cv_.notify_all();
 }
 
 void ClaudeCodeClient::kill() {
@@ -109,13 +174,16 @@ bool ClaudeCodeClient::start(std::string* error) {
   SECURITY_ATTRIBUTES sa{};
   sa.nLength = sizeof(sa);
   sa.bInheritHandle = TRUE;
-  HANDLE stdin_r = nullptr, stdout_w = nullptr;
-  if (!CreatePipe(&stdin_r, &stdin_w_, &sa, 0) || !CreatePipe(&stdout_r_, &stdout_w, &sa, 1 << 20)) {
+  HANDLE stdin_r = nullptr, stdout_w = nullptr, stderr_w = nullptr;
+  if (!CreatePipe(&stdin_r, &stdin_w_, &sa, 0) ||
+      !CreatePipe(&stdout_r_, &stdout_w, &sa, 1 << 20) ||
+      !CreatePipe(&stderr_r_, &stderr_w, &sa, 1 << 16)) {
     if (error) *error = "CreatePipe failed";
     return false;
   }
   SetHandleInformation(stdin_w_, HANDLE_FLAG_INHERIT, 0);
   SetHandleInformation(stdout_r_, HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(stderr_r_, HANDLE_FLAG_INHERIT, 0);
 
   std::string cmd = quote_arg(opt_.exe) +
                     " -p --input-format stream-json --output-format stream-json --verbose"
@@ -160,13 +228,21 @@ bool ClaudeCodeClient::start(std::string* error) {
   si.dwFlags = STARTF_USESTDHANDLES;
   si.hStdInput = stdin_r;
   si.hStdOutput = stdout_w;
-  si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+  // M26.1, finding 17. Was `GetStdHandle(STD_ERROR_HANDLE)`, which is whatever
+  // the windowed app happened to have -- nothing at all, before `main.cpp`
+  // started redirecting the streams, and the log file afterwards. Either way
+  // the text went somewhere this class could not read, so the one question the
+  // user actually asks of a dead child ("why?") had no answer here. A pipe of
+  // our own, drained by `stderr_loop` and echoed on to the app's stderr so the
+  // log keeps it too.
+  si.hStdError = stderr_w;
   PROCESS_INFORMATION pi{};
   std::wstring wcwd = widen(opt_.cwd);
   BOOL okay = CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
                              wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi);
   CloseHandle(stdin_r);
   CloseHandle(stdout_w);
+  CloseHandle(stderr_w);  // the child holds the only write end now, so EOF means "it is gone"
   if (!okay) {
     if (error) *error = "CreateProcess failed (" + std::to_string(GetLastError()) + "): " + cmd;
     return false;
@@ -174,13 +250,23 @@ bool ClaudeCodeClient::start(std::string* error) {
   CloseHandle(pi.hThread);
   process_ = pi.hProcess;
   reader_ = std::thread([this] { reader_loop(); });
+  err_reader_ = std::thread([this] { stderr_loop(); });
 
   // In stream-json input mode the CLI sends its init event only once the first
   // message arrives, so just make sure the process survived launch.
   std::unique_lock<std::mutex> lock(mutex_);
   cv_.wait_for(lock, std::chrono::milliseconds(500), [&] { return exited_; });
   if (exited_) {
-    if (error) *error = "claude exited during startup: " + last_error_;
+    // M26.1. The stdout pipe breaks first and the stderr thread may still be
+    // holding the sentence that explains why, so give it a moment -- the wait
+    // is against `err_done_`, which the stderr reader sets when *its* pipe
+    // closes, and that has already happened by the time a child has exited.
+    cv_.wait_for(lock, std::chrono::milliseconds(250), [&] { return err_done_; });
+    const std::string why = exit_detail();
+    if (error)
+      *error = why.empty() ? "claude exited during startup, saying nothing"
+                           : "claude exited during startup: " + why;
+    if (!why.empty()) last_error_ = why;
     return false;
   }
   return true;
@@ -216,10 +302,23 @@ void ClaudeCodeClient::reader_loop() {
       if (!line.empty()) handle_line(line);
     }
   }
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
   exited_ = true;
+  // M26.1. Same reason as in `start()`: stdout is closed and stderr may not be
+  // yet, and the half-second of text on stderr is the entire content of the
+  // message about to be composed. Bounded, and on a thread whose only
+  // remaining job is this.
+  cv_.wait_for(lock, std::chrono::milliseconds(250), [&] { return err_done_; });
   if (turn_active_ && !turn_done_) {
-    current_.error = "claude process exited: " + last_error_;
+    // "claude process exited: " with nothing after the colon was finding 17
+    // itself. Every branch here now ends in something a person can act on: the
+    // CLI's own last words, or the exit code, or -- when there is genuinely
+    // neither -- a sentence that says so rather than trailing off.
+    std::string why = exit_detail();
+    if (why.empty()) why = last_error_;
+    current_.error = why.empty() ? "claude process exited without saying why"
+                                 : "claude process exited: " + why;
+    last_error_ = current_.error;
     turn_done_ = true;
   }
   cv_.notify_all();
@@ -389,8 +488,13 @@ ChatResult ClaudeCodeClient::turn(const std::string& user_text, const DeltaFn& o
     // result that can never come.
     if (exited_ || killed_) {
       ChatResult r;
+      // The same dangling colon as finding 17, one branch along: `last_error_`
+      // is empty whenever the child died without a `result` event and without
+      // a word on stderr.
+      std::string why = last_error_.empty() ? exit_detail() : last_error_;
       r.error = killed_ ? "the app stopped this instance"
-                        : "claude process is not running: " + last_error_;
+                        : why.empty() ? "claude process is not running"
+                                      : "claude process is not running: " + why;
       return r;
     }
     current_ = ChatResult{};

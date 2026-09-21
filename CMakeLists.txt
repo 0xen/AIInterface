@@ -170,8 +170,18 @@ if(AII_BUILD_TESTS)
   # a real child -- but the child is `cmd.exe`, which ignores this app's whole
   # command line and then sits reading its stdin, which is exactly the shape of
   # the worker this finding is about. No `claude` process and no model call.
+  #
+  # M26.1 adds a second stand-in beside it, `stderr_stand_in.exe`: a child that
+  # prints a sign-in failure on stderr and exits 3, which `cmd.exe` cannot be
+  # made to do from a command line this app composes. It is built into the same
+  # directory and the test finds it beside itself.
+  add_executable(stderr_stand_in tests/stderr_stand_in.cpp)
+  if(MSVC)
+    target_compile_options(stderr_stand_in PRIVATE /utf-8 /W4)
+  endif()
   add_executable(client_kill_test tests/client_kill_test.cpp)
   target_link_libraries(client_kill_test PRIVATE aii_core)
+  add_dependencies(client_kill_test stderr_stand_in)
   if(MSVC)
     target_compile_options(client_kill_test PRIVATE /utf-8 /W4)
   endif()
