@@ -200,6 +200,21 @@ if(AII_BUILD_TESTS)
     target_compile_options(handoff_policy_test PRIVATE /utf-8 /W4)
   endif()
 
+  # ---- barge_policy_test: when talking over the reply becomes a barge-in ----
+  # Header-only, so there is no source but the test, for handoff_policy_test's
+  # reason and one more: M18.0 measured the room, the leak and a person with the
+  # speakers on, and the whole of M18.1 is arithmetic over those tables. Asking
+  # "does it fire?" by talking over a reply is a test nobody can re-run and
+  # nobody can make fail the same way twice; the frame sequences here are the
+  # measured ones and they run in a millisecond, with no microphone, no speaker
+  # and no room.
+  add_executable(barge_policy_test tests/barge_policy_test.cpp)
+  target_include_directories(barge_policy_test PRIVATE src)
+  target_compile_definitions(barge_policy_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(barge_policy_test PRIVATE /utf-8 /W4)
+  endif()
+
   # ---- clip_utf8_test: the shared byte cap that must not split a character ----
   # Same rule as schedule_test: text_util.cpp is standard-library-only, so this
   # builds and runs without an engine DLL anywhere near it. It reads the two caps
