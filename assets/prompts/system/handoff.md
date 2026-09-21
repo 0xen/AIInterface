@@ -35,6 +35,9 @@ being held in:
 - what we are doing, and why
 - what has been decided, including anything you were asked not to do again
 - what is outstanding, or was about to happen next
+- any background workers still running: what each was asked to do and what you
+  meant to do with the answer. The handover does not stop them, so their
+  reports will arrive in your replacement's lap for work it never started
 - anything the user has told you about themselves or their setup that you
   would be embarrassed to have to ask for twice
 

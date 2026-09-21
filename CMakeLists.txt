@@ -165,6 +165,18 @@ if(AII_BUILD_TESTS)
   endif()
   aii_copy_runtime_dlls(json_shape_test)
 
+  # ---- client_kill_test: ending a child that will not end itself -----------
+  # M17.3. Links aii_core for the same reason json_shape_test does, and starts
+  # a real child -- but the child is `cmd.exe`, which ignores this app's whole
+  # command line and then sits reading its stdin, which is exactly the shape of
+  # the worker this finding is about. No `claude` process and no model call.
+  add_executable(client_kill_test tests/client_kill_test.cpp)
+  target_link_libraries(client_kill_test PRIVATE aii_core)
+  if(MSVC)
+    target_compile_options(client_kill_test PRIVATE /utf-8 /W4)
+  endif()
+  aii_copy_runtime_dlls(client_kill_test)
+
   # ---- memory_store_test: the file the user's "remember this" lands in ----
   # Same rule as cwd_policy_test: memory_store.cpp is standard-library-only, so
   # stable ids, the cap and the hand-edit rules are all checked against a temp

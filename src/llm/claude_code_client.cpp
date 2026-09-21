@@ -59,13 +59,50 @@ std::string fmt_reset(long long epoch) {
 }  // namespace
 
 ClaudeCodeClient::~ClaudeCodeClient() {
-  if (stdin_w_) { CloseHandle(stdin_w_); stdin_w_ = nullptr; }  // EOF -> the CLI exits
-  if (process_) {
-    if (WaitForSingleObject(process_, 3000) != WAIT_OBJECT_0) TerminateProcess(process_, 0);
-    CloseHandle(process_);
+  // M17.3. The handles are taken out under the lock and used outside it. Under
+  // it, because `kill()` may be running on another thread and two threads
+  // closing one handle is a handle number that gets reused between them;
+  // outside it, because the wait below is three seconds long and the reader
+  // thread takes the same lock for every line the CLI sends.
+  HANDLE proc = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stdin_w_) { CloseHandle(stdin_w_); stdin_w_ = nullptr; }  // EOF -> the CLI exits
+    proc = process_;
+    process_ = nullptr;  // nothing may terminate it after this line
   }
+  if (proc) {
+    if (WaitForSingleObject(proc, 3000) != WAIT_OBJECT_0) TerminateProcess(proc, 0);
+    CloseHandle(proc);
+  }
+  // `stdout_r_` is deliberately left alone until the reader has been joined:
+  // the reader loop is inside ReadFile on it, and closing a handle a thread is
+  // blocked on is not how you stop that thread. Closing stdin, or terminating
+  // above, is; the pipe breaks and ReadFile returns.
   if (reader_.joinable()) reader_.join();
   if (stdout_r_) CloseHandle(stdout_r_);
+}
+
+void ClaudeCodeClient::kill() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  killed_ = true;
+  // stdin first: on a child that is merely slow this alone is enough, and it
+  // is the polite half of the pair.
+  if (stdin_w_) { CloseHandle(stdin_w_); stdin_w_ = nullptr; }
+  // TerminateProcess does not wait, so it is safe under the lock, and being
+  // under the lock is what keeps the destructor from closing the handle
+  // between the read and the call.
+  if (process_) TerminateProcess(process_, 1);
+  // Do not wait for the reader to notice. It will -- the pipe is broken -- but
+  // a caller that has got this far has already waited as long as it means to,
+  // and the whole point is that it stops waiting now.
+  if (turn_active_ && !turn_done_) {
+    current_.ok = false;
+    current_.error = "the app stopped this instance";
+    last_error_ = current_.error;
+    turn_done_ = true;
+  }
+  cv_.notify_all();
 }
 
 bool ClaudeCodeClient::start(std::string* error) {
@@ -152,6 +189,15 @@ bool ClaudeCodeClient::start(std::string* error) {
 bool ClaudeCodeClient::write_line(const std::string& line) {
   std::string data = line + "\n";
   DWORD written = 0;
+  // M17.3. Under the lock, because `kill()` closes this handle and a write
+  // racing that close is a write to a handle number the OS may already have
+  // handed to something else. Held across the WriteFile rather than copying
+  // the handle out, which would leave the same window open; the lines written
+  // here are one JSON message each and the CLI drains its stdin continuously,
+  // so the pipe does not fill and the call does not block. Both callers --
+  // turn()'s send and its interrupt -- release `mutex_` before they get here.
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!stdin_w_) return false;
   return WriteFile(stdin_w_, data.data(), (DWORD)data.size(), &written, nullptr) && written == data.size();
 }
 
@@ -337,9 +383,14 @@ ChatResult ClaudeCodeClient::turn(const std::string& user_text, const DeltaFn& o
                                   std::atomic<bool>* cancel) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (exited_) {
+    // M17.3: `killed_` as well as `exited_`, because a kill is instant and the
+    // reader may not have noticed the broken pipe yet. A turn started in that
+    // window would otherwise be written to a closed stdin and then wait for a
+    // result that can never come.
+    if (exited_ || killed_) {
       ChatResult r;
-      r.error = "claude process is not running: " + last_error_;
+      r.error = killed_ ? "the app stopped this instance"
+                        : "claude process is not running: " + last_error_;
       return r;
     }
     current_ = ChatResult{};

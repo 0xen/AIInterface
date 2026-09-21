@@ -90,6 +90,30 @@ class ClaudeCodeClient final : public LlmClient {
   // `tests/json_shape_test.cpp`. It throws nothing, whatever it is given.
   void handle_line(const std::string& line);
 
+  // M17.3, review finding 2. End the child now, from any thread.
+  //
+  // `turn()` returns on one event and one event only: the CLI's `result`. The
+  // interrupt it sends when `cancel` goes up is a `control_request`, which the
+  // CLI is free to take its time over or to ignore — a child halfway through a
+  // Bash command does exactly that — and nothing escalated. So a worker that
+  // would not stop froze `WorkerPool::stop()` in its join, and `start_turn()`
+  // behind that, and the conversation was over for the rest of the run. The
+  // destructor hung the same way at exit.
+  //
+  // This is the escalation, and it is deliberately brutal: close the child's
+  // stdin, terminate the process, and finish the turn here with an error
+  // rather than waiting for one to arrive. The reader thread then sees the
+  // pipe break and unwinds on its own. Safe to call twice, safe to call on a
+  // client that never started, and safe to call while the reader is mid-line
+  // -- everything it touches is under `mutex_`, which is also why it must
+  // never be called with a lock the activity callback takes already held.
+  //
+  // A killed turn comes back `ok == false`. When the caller raised `cancel`
+  // first -- which is the only way this is reached inside this app -- it also
+  // comes back `stop_reason == "interrupted"`, so a worker the app stopped on
+  // purpose still reports as stopped rather than as failed.
+  void kill();
+
  private:
   void reader_loop();
   bool write_line(const std::string& line);
@@ -103,6 +127,7 @@ class ClaudeCodeClient final : public LlmClient {
   mutable std::mutex mutex_;
   std::condition_variable cv_;
   bool exited_ = false;
+  bool killed_ = false;  // M17.3: kill() has been here; the child is not coming back
   bool turn_done_ = false;
   bool turn_active_ = false;
   ChatResult current_;

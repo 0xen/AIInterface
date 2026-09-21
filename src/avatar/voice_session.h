@@ -206,6 +206,12 @@ class VoiceSession {
   // gesture, and pause every running worker. It was called pause() until
   // 16 Sep 2026; nothing here can resume a paused worker turn, so the name was
   // the only pause-like thing about it. The behaviour is unchanged.
+  //
+  // M17.1 (review finding 3): the two halves of it are now two functions, and
+  // this is the one that does both. Stopping the reply and pausing a worker
+  // are the same act only when the *user* asked for it; three of the four
+  // callers this had were the app replacing its own child, and for those the
+  // second half was a bug — see `stop_reply_and_mic()`.
   void stop();
   // Reset: throw the conversation away and start a fresh one (user, 19 Sep
   // 2026). **Frame loop only**, and a no-op until the engines are up.
@@ -237,13 +243,25 @@ class VoiceSession {
   //   * Mute is untouched: it is a preference about this window, not a fact
   //     about the conversation. Language selection, the listen timeout, the
   //     avatar and the settings file likewise.
-  //   * **Workers are not killed.** A worker is a separate process doing work
-  //     the user asked for; clearing the chat is not a reason to throw away
-  //     ten minutes of a build. They are paused by stop(), exactly as Stop
+  //   * **Workers are not killed, and Reset is the one restart that still
+  //     pauses them.** A worker is a separate process doing work the user
+  //     asked for; clearing the chat is not a reason to throw away ten minutes
+  //     of a build. They are paused by stop(), exactly as Stop
   //     pauses them, and reports they have already queued stay queued — every
   //     one of them is a self-contained `<context …>` block naming the work,
   //     so the fresh session can deliver it without ever having heard the
   //     conversation that started it.
+  //
+  //     M17.1 kept the pause here and took it off the other two restarts, and
+  //     the asymmetry is the meaning of the button rather than an oversight.
+  //     Reset is the user saying "forget this"; a worker is work *this*
+  //     conversation started, and letting it run on into a session that never
+  //     asked for it is the app continuing something the user has just ended.
+  //     Pausing rather than stopping is what keeps that from being
+  //     destructive: the process is still there, its output is still there,
+  //     and the user can look at it. A settings restart and a handoff are the
+  //     app replacing its own child for its own reasons, and the user did not
+  //     ask for anything to stop.
   //   * **Schedules are not cancelled.** A schedule is a promise made to the
   //     user in words. Reset clears what the AI remembers, not what the app
   //     owes, and the new session is told what is outstanding on its first
@@ -311,6 +329,13 @@ class VoiceSession {
   // nothing half-spoken, the microphone not in the middle of an utterance.
   // A handoff that cuts a reply in half is worse than one that waits, and
   // waiting costs a turn's worth of context at most.
+  //
+  // Until M17.1 that sentence was false about the one thing a handoff is most
+  // likely to be interrupting: every running worker was paused, because the
+  // restart went through stop(). It is true now. Workers run on across the
+  // handover and report into the session that comes up, which is told to
+  // expect them (`prompts/system/handoff.md`); the report is a self-contained
+  // `<context>` block and has never needed the conversation that started it.
   //
   // Returns false and arms nothing when the engines are not up, while a
   // restart is already running, and while a handoff is already under way —
@@ -560,9 +585,30 @@ class VoiceSession {
   // a mode: a restart for a setting still clears the transcript, still keeps
   // the workers and the schedules, still gives the latch back.
   enum class RestartReason { Reset, Settings, Handoff };
+  // M17.1, review finding 3. The half of stop() that is about *this* app: the
+  // reply in flight is cancelled, the speech queue emptied, the microphone
+  // latch and any held Talk gesture dropped, the wake watch ended. It touches
+  // no worker.
+  //
+  // This is what a restart needs and all a restart needs. Before M17.1 every
+  // restart went through stop(), so a settings change — and, far worse, the
+  // *automatic* handoff at 40% of context, which the user neither asks for
+  // nor is asked about — paused every running worker. A build three minutes
+  // into a ten-minute compile was stopped because the conversation in front
+  // of it had grown long, and the header for handoff_now() promised in as many
+  // words that it would interrupt nothing.
+  //
+  // `stopped_status` is what the status line says when there was a reply or a
+  // listen to interrupt. Every restart overwrites it a moment later with its
+  // own line, so it only really matters for the Stop button.
+  void stop_reply_and_mic(const std::string& stopped_status);
+  // The other half: interrupt every running worker's turn. Returns how many
+  // were actually running, so a caller can say so — and, when it is none, say
+  // nothing rather than "0 worker(s) paused".
+  size_t pause_workers();
   // The shared body of reset() and apply_llm_settings(), on the frame loop:
-  // everything stop() does, the latch noted, the fence released and the thread
-  // started. See both callers for what each of them means by it.
+  // everything stop_reply_and_mic() does, the latch noted, the fence released
+  // and the thread started. Workers are paused only for a Reset; see stop().
   void begin_restart(RestartReason why);
   // begin_restart()'s tail, on `reset_`. Joins the turn thread, replaces the
   // child, clears the transcript and the injected-prompt set, and publishes
@@ -695,6 +741,28 @@ class VoiceSession {
   // Frame loop only, and deliberately tried *after* flush_announcements(), so
   // a canned line already waiting is heard before a turn is spent.
   bool flush_injected_turns();
+  // M17.2, review finding 4. The user's own words, said or typed while a
+  // handover was under way, sent to the session that came up out of it.
+  //
+  // The queue exists because a handoff takes several seconds and the
+  // microphone can be open for part of them: the housekeeping line is spoken
+  // with the latch still on, and the latch reopens the microphone as soon as
+  // the line finishes. What the user says into it used to reach start_turn(),
+  // go to a child that was about to be replaced, and be cancelled by
+  // begin_restart() a frame or two later -- with the transcript cleared behind
+  // it. They were answered by silence and there was nothing left on screen to
+  // say they had spoken at all.
+  //
+  // Queued rather than refused, and it is queued as *the user's turn* rather
+  // than as an injected one: they are owed an answer in their own words, spoken
+  // back the ordinary way, with their line in the transcript above it. An
+  // injected turn has no user line by design (see start_injected_turn()) and
+  // would have put the words nowhere.
+  //
+  // Delivered from the Idle branch once the handover is over and the new child
+  // is up, which is the same gate everything else in that chain waits at.
+  // Frame loop only, like the rest of this chain.
+  bool flush_queued_user_turn();
   // M2b.4. Queue one report for the conversational instance. Any thread — a
   // worker thread is where a scheduled worker's report arrives.
   // M2c.1: `fallback` rides with it; see start_injected_turn().
@@ -1043,6 +1111,13 @@ class VoiceSession {
   // thread, and those two are ordered by `resetting_` — no turn starts while
   // it is set, and the write happens before it falls.
   std::string carry_over_;
+  // M17.2. What the user said or typed while the handover was running, waiting
+  // for the new child. Frame loop only -- start_turn() is the single choke
+  // point for a user turn and flush_queued_user_turn() is in the Idle chain,
+  // and both are on it -- so this needs no lock. A vector and not one joined
+  // string: two things said in one handover are two turns, because they were
+  // two turns, and merging them would answer both in one breath.
+  std::vector<std::string> handoff_user_turns_;
 
   std::atomic<bool> loaded_{false};
   std::atomic<bool> load_failed_{false};
