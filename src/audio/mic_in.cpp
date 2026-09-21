@@ -8,6 +8,9 @@ MicIn::~MicIn() { close(); }
 
 bool MicIn::open(int sample_rate) {
   if (open_) return true;
+  // Allocated before the device exists, so nothing is allocated under a
+  // running callback.
+  ring_.reset(static_cast<size_t>(sample_rate) * kBufferSeconds);
   ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
   cfg.capture.format = ma_format_f32;
   cfg.capture.channels = 1;
@@ -45,32 +48,37 @@ void MicIn::close() {
 }
 
 void MicIn::drain(std::vector<float>& out) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  out.insert(out.end(), queue_.begin(), queue_.end());
-  queue_.clear();
+  const size_t want = ring_.available();
+  if (want == 0) return;
+  const size_t at = out.size();
+  out.resize(at + want);  // the reader's thread, not the callback's
+  const size_t got = ring_.read(out.data() + at, want);
+  out.resize(at + got);
 }
 
-void MicIn::discard() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  queue_.clear();
-}
+void MicIn::discard() { ring_.request_discard(); }
 
-float MicIn::peak_and_reset() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  float p = peak_;
-  peak_ = 0.f;
-  return p;
-}
+float MicIn::peak_and_reset() { return peak_.exchange(0.f, std::memory_order_acq_rel); }
 
 void MicIn::callback(ma_device* dev, void*, const void* in, ma_uint32 frames) {
   auto* self = static_cast<MicIn*>(dev->pUserData);
   const float* src = static_cast<const float*>(in);
-  std::lock_guard<std::mutex> lock(self->mutex_);
+  float block_peak = 0.f;
   for (ma_uint32 i = 0; i < frames; ++i) {
-    float a = std::fabs(src[i]);
-    if (a > self->peak_) self->peak_ = a;
+    const float a = std::fabs(src[i]);
+    if (a > block_peak) block_peak = a;
   }
-  self->queue_.insert(self->queue_.end(), src, src + frames);
+  // The meter keeps the loudest sample since the last read, so this raises the
+  // published value and never lowers it; peak_and_reset() is what clears it.
+  float seen = self->peak_.load(std::memory_order_relaxed);
+  while (block_peak > seen && !self->peak_.compare_exchange_weak(seen, block_peak,
+                                                                std::memory_order_relaxed,
+                                                                std::memory_order_relaxed)) {
+  }
+  // Anything that does not fit is counted rather than silently growing the
+  // queue; dropped() is how a caller finds out.
+  const size_t taken = self->ring_.write(src, frames);
+  if (taken < frames) self->ring_.note_dropped(frames - taken);
 }
 
 }  // namespace aii

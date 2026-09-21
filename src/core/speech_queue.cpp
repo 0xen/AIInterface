@@ -3,6 +3,7 @@
 #include <chrono>
 #include <vector>
 
+#include "audio/resample.h"
 #include "core/text_util.h"
 
 namespace aii {
@@ -105,9 +106,30 @@ void SpeechQueue::run() {
       AudioChunk chunk;
       bool okay = engine && engine->synthesize_as(run.text, voice, chunk);
       if (okay && gen == generation_) {  // discard if a clear() happened meanwhile
-        if (chunk.sample_rate != out_->sample_rate() && on_status_)
-          on_status_("warning: engine rate " + std::to_string(chunk.sample_rate) + " != output rate " +
-                     std::to_string(out_->sample_rate()));
+        // M21.2 (finding 31). This used to warn and push the chunk anyway,
+        // which plays it at the wrong speed and pitch -- the one failure the
+        // listener cannot diagnose, because the status line is not where
+        // somebody hearing a chipmunk looks. Resample rather than refuse: the
+        // sentence is one the user is waiting for, and a linear conversion on
+        // this thread costs microseconds next to the synthesis above it.
+        // Dormant today, both engines being 24 kHz; `resample_test` is what
+        // proves it, since no engine here can.
+        if (chunk.sample_rate > 0 && out_->sample_rate() > 0 &&
+            chunk.sample_rate != out_->sample_rate()) {
+          std::vector<float> converted;
+          if (resample_mono(chunk.samples, chunk.sample_rate, out_->sample_rate(), converted)) {
+            chunk.samples = std::move(converted);
+            chunk.sample_rate = out_->sample_rate();
+          } else {
+            // Refused rather than played wrong: a chunk that cannot be
+            // converted would be audibly broken, and silence with a line in
+            // the status is the honest outcome.
+            if (on_status_)
+              on_status_("dropped: could not convert " + std::to_string(chunk.sample_rate) +
+                         " Hz to " + std::to_string(out_->sample_rate()) + " Hz");
+            continue;
+          }
+        }
         // Handing straight from one voice to the other inside a sentence is
         // jarring: the two engines have different timbre and neither leaves
         // any room at its edges, so the switch lands as a splice. A beat of

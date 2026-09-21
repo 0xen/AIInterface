@@ -12,7 +12,7 @@ namespace aii {
 VoicevoxTts::VoicevoxTts(const std::string& core_dir, const std::string& models_dir, uint32_t style_id)
     : style_(style_id) {
   auto fail = [&](const char* what, VoicevoxResultCode r) {
-    error_ = std::string(what) + ": " + voicevox_error_result_to_message(r);
+    set_error(std::string(what) + ": " + voicevox_error_result_to_message(r));
     return false;
   };
 
@@ -104,7 +104,7 @@ bool VoicevoxTts::synthesize_as(const std::string& text, int native_voice, Audio
   VoicevoxResultCode r =
       voicevox_synthesizer_tts(synth_, text.c_str(), style, voicevox_make_default_tts_options(), &wav_len, &wav);
   if (r != VOICEVOX_RESULT_OK) {
-    error_ = std::string("tts: ") + voicevox_error_result_to_message(r);
+    set_error(std::string("tts: ") + voicevox_error_result_to_message(r));
     return false;
   }
   // Parse the in-memory RIFF/WAVE buffer (16-bit PCM mono 24 kHz).
@@ -135,7 +135,7 @@ bool VoicevoxTts::synthesize_as(const std::string& text, int native_voice, Audio
     }
   }
   voicevox_wav_free(wav);
-  if (!okay) error_ = "unexpected WAV format from voicevox";
+  if (!okay) set_error("unexpected WAV format from voicevox");
   return okay;
 }
 

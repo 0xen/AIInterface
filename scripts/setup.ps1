@@ -129,27 +129,117 @@ function Check-Prerequisites {
 }
 
 # --- downloads --------------------------------------------------------------
+#
+# M21.3 (review finding 34). Three things were wrong here and all three are
+# below:
+#
+#   1. Nothing checked what 1.27 GB of HTTP actually delivered. Every download
+#      now carries a SHA-256 and a file that does not match it is deleted, not
+#      extracted.
+#   2. `tar` writing into the final directory meant a failure part way through
+#      an archive left a tree that the next run's "already installed" test
+#      accepted. Extraction now happens in a sibling temp directory and is
+#      moved into place only after tar exits 0.
+#   3. `Verify` did not name two files `kokoro_tts.cpp` opens, so a tree
+#      missing them passed the acceptance check and failed at runtime.
+#
+# Where the hashes came from, exactly
+# -----------------------------------
+# They were computed on the machine this app was developed on, from the file
+# that tree was actually built from -- not from a publisher's checksum page,
+# because none of these releases publishes one.
+#
+#   sherpa-onnx ...tar.bz2   the archive still in %TEMP% on that machine. It is
+#                            provably the one installed there: the
+#                            sherpa-onnx-c-api.dll inside it is byte-identical
+#                            (SHA-256 F86ED157...) to the installed one.
+#   download-windows-x64.exe the VOICEVOX downloader in spikes\tts_cpu\voicevox.
+#
+# The Nemotron and Kokoro archives were deleted after extraction and are not on
+# that machine any more, so there is nothing honest to pin them to yet. They
+# are left unpinned *and say so*: the script prints the hash it got and asks
+# for it to be filled in here. Pinning a hash computed from a re-download would
+# be pinning whatever the network happened to serve, which is the thing this
+# change exists to stop. Anyone who runs a fresh setup should paste the two
+# hashes it prints into the table below.
 
-function Get-Archive([string]$Url, [string]$ToFile) {
+$script:Sha = @{
+  Sherpa   = '3E971A04B2E0BA4DFA53D381A006367CE8C9F5F09B4AE00043E9845C2BADED22'
+  Nemotron = ''   # not pinned; see above
+  Kokoro   = ''   # not pinned; see above
+  VvDownloader = '4F0AE2758F3149F084CC91556065009553BF81010F58498C89ACB6E2289546B6'
+}
+
+function Test-Sha256([string]$File, [string]$Expected, [string]$Label) {
+  $actual = (Get-FileHash -Path $File -Algorithm SHA256).Hash
+  if ([string]::IsNullOrWhiteSpace($Expected)) {
+    Warn "$Label is not pinned. Its SHA-256 is $actual"
+    Warn "  -- paste it into `$script:Sha in scripts\setup.ps1 so the next machine is checked."
+    return $true
+  }
+  if ($actual -ne $Expected.ToUpper()) {
+    Bad "$Label does not match its pinned SHA-256."
+    Info "  expected $($Expected.ToUpper())"
+    Info "  got      $actual"
+    return $false
+  }
+  Ok "$Label matches its pinned SHA-256"
+  return $true
+}
+
+function Get-Archive([string]$Url, [string]$ToFile, [string]$Sha256) {
+  $leaf = Split-Path -Leaf $ToFile
   if (Test-Path $ToFile) {
-    Info "already downloaded: $(Split-Path -Leaf $ToFile)"
+    Info "already downloaded: $leaf"
+    # Checked again rather than trusted: a cached archive is exactly the thing
+    # that can have been truncated by a previous interrupted run.
+    if (-not (Test-Sha256 $ToFile $Sha256 $leaf)) {
+      Remove-Item $ToFile -Force
+      throw "$leaf was corrupt and has been deleted. Run this script again to fetch it."
+    }
     return
   }
-  Info "downloading $(Split-Path -Leaf $ToFile)"
+  Info "downloading $leaf"
   $partial = "$ToFile.partial"
   if (Test-Path $partial) { Remove-Item $partial -Force }
   & curl.exe -L --retry 5 --fail -o $partial $Url
   if ($LASTEXITCODE -ne 0) {
+    if (Test-Path $partial) { Remove-Item $partial -Force }
     throw "Download failed ($Url). curl exited $LASTEXITCODE."
+  }
+  if (-not (Test-Sha256 $partial $Sha256 $leaf)) {
+    Remove-Item $partial -Force
+    throw "$leaf did not match its pinned SHA-256 and has been deleted. Nothing was extracted."
   }
   Move-Item $partial $ToFile
 }
 
+# Extracts into a temp directory beside the destination and moves the result in
+# only if tar succeeded, so a failure part way through an archive leaves the
+# destination exactly as it was rather than a half tree the next run calls
+# installed.
 function Expand-TarArchive([string]$Archive, [string]$Into) {
   if (-not (Test-Path $Into)) { New-Item -ItemType Directory -Path $Into -Force | Out-Null }
-  Info "extracting into $Into"
-  & tar.exe xjf $Archive -C $Into
-  if ($LASTEXITCODE -ne 0) { throw "tar failed on $Archive (exit $LASTEXITCODE)." }
+  $staging = Join-Path $Into (".extracting-" + [System.IO.Path]::GetRandomFileName())
+  New-Item -ItemType Directory -Path $staging -Force | Out-Null
+  try {
+    Info "extracting into $staging"
+    & tar.exe xjf $Archive -C $staging
+    if ($LASTEXITCODE -ne 0) { throw "tar failed on $Archive (exit $LASTEXITCODE). Nothing was installed." }
+    foreach ($item in Get-ChildItem -LiteralPath $staging -Force) {
+      $dest = Join-Path $Into $item.Name
+      if (Test-Path $dest) {
+        # Only reachable if a previous run installed this and the caller's
+        # "already installed" test did not see it; the extracted copy is the
+        # one that was just checked, so it wins.
+        Remove-Item -LiteralPath $dest -Recurse -Force
+      }
+      Move-Item -LiteralPath $item.FullName -Destination $dest
+    }
+    Info "moved into $Into"
+  } finally {
+    if (Test-Path $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+  }
 }
 
 function Install-Sherpa {
@@ -158,7 +248,7 @@ function Install-Sherpa {
   if (Test-Path (Join-Path $target 'lib\sherpa-onnx-c-api.dll')) { Ok 'already installed'; return }
   $url = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-win-x64-shared-MD-Release.tar.bz2'
   $archive = Join-Path $env:TEMP 'sherpa-onnx-v1.13.8.tar.bz2'
-  Get-Archive $url $archive
+  Get-Archive $url $archive $script:Sha.Sherpa
   Expand-TarArchive $archive $SherpaBin
   Ok 'installed'
 }
@@ -169,7 +259,7 @@ function Install-Nemotron {
   if (Test-Path (Join-Path $target 'encoder.int8.onnx')) { Ok 'already installed'; return }
   $url = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11.tar.bz2'
   $archive = Join-Path $env:TEMP 'nemotron-3.5.tar.bz2'
-  Get-Archive $url $archive
+  Get-Archive $url $archive $script:Sha.Nemotron
   Expand-TarArchive $archive $Models
   Ok 'installed'
 }
@@ -182,7 +272,7 @@ function Install-Kokoro {
   if (Test-Path (Join-Path $target 'model.onnx')) { Ok 'already installed'; return }
   $url = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2'
   $archive = Join-Path $env:TEMP 'kokoro-multi-lang-v1_0.tar.bz2'
-  Get-Archive $url $archive
+  Get-Archive $url $archive $script:Sha.Kokoro
   Expand-TarArchive $archive $Models
   Ok 'installed'
 }
@@ -197,7 +287,7 @@ function Install-Voicevox {
   if (-not (Test-Path $VvDir)) { New-Item -ItemType Directory -Path $VvDir -Force | Out-Null }
   $downloader = Join-Path $VvDir 'download-windows-x64.exe'
   if (-not (Test-Path $downloader)) {
-    Get-Archive 'https://github.com/VOICEVOX/voicevox_core/releases/download/0.17.0/download-windows-x64.exe' $downloader
+    Get-Archive 'https://github.com/VOICEVOX/voicevox_core/releases/download/0.17.0/download-windows-x64.exe' $downloader $script:Sha.VvDownloader
   }
 
   # The bare release holds only the C API; this downloader also fetches the matching
@@ -259,6 +349,14 @@ function Verify {
     @{ Path = "$asr\tokens.txt"; What = 'recogniser tokens' },
     @{ Path = 'models\kokoro-multi-lang-v1_0\model.onnx'; What = 'English voice model' },
     @{ Path = 'models\kokoro-multi-lang-v1_0\voices.bin'; What = 'English voice styles' },
+    # M21.3. These two were missing from this list and are not optional:
+    # src\tts\kokoro_tts.cpp builds its config from model.onnx, voices.bin,
+    # tokens.txt, espeak-ng-data and lexicon-us-en.txt, so a tree without them
+    # passed this check and then failed to synthesise a word. (lexicon-zh.txt is
+    # deliberately absent: that one is tested for at runtime and appended only
+    # if present.)
+    @{ Path = 'models\kokoro-multi-lang-v1_0\tokens.txt'; What = 'English voice tokens' },
+    @{ Path = 'models\kokoro-multi-lang-v1_0\lexicon-us-en.txt'; What = 'English lexicon' },
     @{ Path = 'models\kokoro-multi-lang-v1_0\espeak-ng-data'; What = 'English phonemiser data' },
     @{ Path = 'models\voicevox\dict\open_jtalk_dic_utf_8-1.11'; What = 'Open JTalk dictionary' },
     @{ Path = 'models\voicevox\models\vvms\0.vvm'; What = 'Japanese voice model' },
