@@ -24,6 +24,7 @@ endforeach()
 add_library(aii_core STATIC
   src/audio/miniaudio_impl.cpp
   src/audio/audio_out.cpp
+  src/audio/resample.cpp
   src/audio/mic_in.cpp
   src/stt/recognizer.cpp
   src/llm/claude_client.cpp
@@ -221,6 +222,19 @@ if(AII_BUILD_TESTS)
   target_compile_definitions(spsc_ring_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   if(MSVC)
     target_compile_options(spsc_ring_test PRIVATE /utf-8 /W4)
+  endif()
+
+  # ---- resample_test: a chunk that arrives at the wrong rate ----------------
+  # resample.cpp is miniaudio and nothing else, so this pulls in the miniaudio
+  # translation unit and no engine. It is the proof for M21.2's resampling
+  # path, which no engine exercises today: both are 24 kHz, so the only way to
+  # see it work is to hand it a synthetic 22.05 kHz chunk.
+  add_executable(resample_test tests/resample_test.cpp src/audio/resample.cpp
+                               src/audio/miniaudio_impl.cpp)
+  target_include_directories(resample_test PRIVATE src third_party)
+  target_compile_definitions(resample_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(resample_test PRIVATE /utf-8 /W4)
   endif()
 
   # ---- audio_out_bench: M21.1's measurement, not a test ---------------------
