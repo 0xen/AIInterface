@@ -261,23 +261,11 @@ std::wstring wideFromUtf8(const std::string& s) {
 // A colour that does not parse yields 0 and the caller leaves the setting
 // alone, which is the same contract every other value in settings.json has:
 // a bad hand edit costs that key, never the file.
-bool colourFromHex(const std::string& text, std::uint32_t& out) {
-    std::string s = text;
-    if (!s.empty() && s.front() == '#') s.erase(s.begin());
-    if (s.size() != 6) return false;
-    std::uint32_t v[6]{};
-    for (std::size_t i = 0; i < 6; ++i) {
-        const char c = s[i];
-        if (c >= '0' && c <= '9') v[i] = static_cast<std::uint32_t>(c - '0');
-        else if (c >= 'a' && c <= 'f') v[i] = static_cast<std::uint32_t>(c - 'a' + 10);
-        else if (c >= 'A' && c <= 'F') v[i] = static_cast<std::uint32_t>(c - 'A' + 10);
-        else return false;
-    }
-    out = aii::avatar_rgba(static_cast<std::uint8_t>(v[0] * 16 + v[1]),
-                           static_cast<std::uint8_t>(v[2] * 16 + v[3]),
-                           static_cast<std::uint8_t>(v[4] * 16 + v[5]), 255);
-    return true;
-}
+//
+// M24.1. Hex *in* is no longer one of the two: `aii::avatar_colour_from_hex`
+// in avatar_def.h is the single parser, and this file's copy — which differed
+// from it only by rejecting an eight-digit value — is gone. Hex *out* stays
+// here, because it is only ever written for the settings file this file owns.
 
 std::string colourToHex(std::uint32_t c) {
     static const char* kDigits = "0123456789abcdef";
@@ -1135,8 +1123,9 @@ int main(int /*argc*/, char** /*argv*/) {
         // flashing past. An unparseable value simply leaves the colour unset
         // and the derived theme starts from the theme it would have had.
         if (std::uint32_t picked = 0;
-            colourFromHex(colourArg.empty() ? settings.get_string("avatar", "colour", "") : colourArg,
-                          picked)) {
+            aii::avatar_colour_from_hex(
+                colourArg.empty() ? settings.get_string("avatar", "colour", "") : colourArg,
+                picked)) {
             avatarSource.set_custom_colour(picked);
         }
         const std::filesystem::path dir = avatarDirOverride.empty()

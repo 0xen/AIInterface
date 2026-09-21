@@ -27,24 +27,6 @@ constexpr std::size_t kCellsMax = kAvatarMaxCells;
 // cannot leave a thought bubble over the avatar for the rest of the session.
 constexpr float kDecorLeaseDefault = AvatarController::kScriptLeaseMax;
 
-bool colour_from_hex(const std::string& text, std::uint32_t& out) {
-  std::string s = text;
-  if (!s.empty() && s.front() == '#') s.erase(s.begin());
-  if (s.size() != 6) return false;
-  std::uint32_t v[6]{};
-  for (std::size_t i = 0; i < 6; ++i) {
-    const char c = s[i];
-    if (c >= '0' && c <= '9') v[i] = static_cast<std::uint32_t>(c - '0');
-    else if (c >= 'a' && c <= 'f') v[i] = static_cast<std::uint32_t>(c - 'a' + 10);
-    else if (c >= 'A' && c <= 'F') v[i] = static_cast<std::uint32_t>(c - 'A' + 10);
-    else return false;
-  }
-  out = avatar_rgba(static_cast<std::uint8_t>(v[0] * 16 + v[1]),
-                    static_cast<std::uint8_t>(v[2] * 16 + v[3]),
-                    static_cast<std::uint8_t>(v[4] * 16 + v[5]), 255);
-  return true;
-}
-
 // An avatar name is a directory name under %APPDATA%\AIInterface\avatars, and
 // a script does not get to say where that is. Letters, digits, dash and
 // underscore: no separators, no dots, so there is no `..` to reason about.
@@ -214,7 +196,7 @@ void BusBindings::on_theme(const BusMessage& m, std::string* error) {
   }
   if (m.verb == "colour" || m.verb == "color") {
     std::uint32_t rgba = 0;
-    if (!colour_from_hex(m.str("value"), rgba)) {
+    if (!avatar_colour_from_hex(m.str("value"), rgba)) {
       if (error) *error = "colour: expected #rrggbb";
       return;
     }

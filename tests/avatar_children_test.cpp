@@ -239,6 +239,53 @@ int main(int argc, char** argv) {
               std::to_string(entrance_run(false)) + "/60 frames)");
   }
 
+  // ---- M24.1: the one hex-colour parser ------------------------------------
+  //
+  // There were three of these, and they disagreed. main.cpp's `colourFromHex`
+  // and bus_bindings.cpp's `colour_from_hex` were byte-for-byte the same
+  // function under two names and accepted six digits only; avatar_def.cpp's
+  // palette loader accepted six or eight and read the alpha of the eight. None
+  // of the three ever accepted a three-digit short form, and all three treated
+  // a leading `#` as optional. The eight-digit form is the only behavioural
+  // difference and it is a widening, so it is what survives: the two callers
+  // that used to reject `#rrggbbaa` both discard the alpha anyway
+  // (`set_custom_colour` forces it opaque; the bus binding reads only r/g/b),
+  // so nothing that used to work reads differently now.
+  //
+  // This test lives here because this is the one executable that links
+  // avatar_def.cpp.
+  {
+    const auto parses = [](const char* text, std::uint32_t expect) {
+      std::uint32_t got = 0;
+      return aii::avatar_colour_from_hex(text, got) && got == expect;
+    };
+    const auto rejects = [](const char* text) {
+      std::uint32_t got = 0;
+      return !aii::avatar_colour_from_hex(text, got);
+    };
+    const std::uint32_t red = aii::avatar_rgba(0xFF, 0x00, 0x00, 0xFF);
+    check(parses("#ff0000", red), "a six-digit colour with the hash parses");
+    check(parses("ff0000", red), "and without it: the hash is optional");
+    check(parses("FF0000", red), "upper case parses to the same colour");
+    check(parses("#fF0000", red), "and so does a mixture of cases");
+    check(parses("#ff0000ff", red),
+          "an eight-digit value parses, which two of the three parsers refused");
+    check(parses("#ff000080", aii::avatar_rgba(0xFF, 0x00, 0x00, 0x80)),
+          "and its alpha is read rather than forced opaque");
+    check(rejects("#f00"), "the three-digit short form is not accepted by any of them");
+    check(rejects("#ff00000"), "seven digits is neither form");
+    check(rejects("#ff00zz"), "a non-hex character fails the whole value");
+    check(rejects("#ff 000"), "and so does a space, because nothing is trimmed");
+    check(rejects(""), "an empty value parses as nothing, not as black");
+    check(rejects("#"), "a bare hash likewise");
+    check(rejects("##ff0000"), "only the first hash is stripped");
+    {
+      std::uint32_t got = 0x12345678u;
+      aii::avatar_colour_from_hex("nonsense", got);
+      check(got == 0x12345678u, "a value that does not parse leaves the output alone");
+    }
+  }
+
   std::printf("\n%s\n", failures ? "FAILURES" : "all good");
   return failures ? 1 : 0;
 }
