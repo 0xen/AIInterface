@@ -1,15 +1,27 @@
 #include "audio/audio_out.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 namespace aii {
+namespace {
+// How long push() is willing to wait for the device to make room before it
+// gives up on the rest of a chunk. Only reachable if the device has stopped
+// delivering callbacks without saying so; a normal drain frees a block every
+// few milliseconds.
+constexpr int kPushWaitMs = 20000;
+}  // namespace
 
 AudioOut::~AudioOut() { stop(); }
 
 bool AudioOut::start(int sample_rate) {
   if (started_) return true;
+  // Allocated before the device exists, so nothing is ever allocated with a
+  // callback running.
+  ring_.reset(static_cast<size_t>(sample_rate) * kBufferSeconds);
   ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
   cfg.playback.format = ma_format_f32;
   cfg.playback.channels = 1;
@@ -29,41 +41,56 @@ bool AudioOut::start(int sample_rate) {
 
 void AudioOut::stop() {
   if (!started_) return;
+  started_ = false;  // released first so a waiting push() stops waiting
   ma_device_uninit(&device_);
-  started_ = false;
 }
 
 void AudioOut::push(const float* samples, size_t n) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  // Compact once the consumed prefix is large.
-  if (read_pos_ > 0 && read_pos_ * 2 > buffer_.size()) {
-    buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(read_pos_));
-    read_pos_ = 0;
+  if (!started_) {
+    ring_.note_dropped(n);
+    return;
   }
-  buffer_.insert(buffer_.end(), samples, samples + n);
+  const uint64_t mark = ring_.discard_mark();
+  size_t at = 0;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kPushWaitMs);
+  while (at < n) {
+    at += ring_.write(samples + at, n - at);
+    if (at >= n) break;
+    // Full. Wait for the device rather than drop the tail of a sentence.
+    const bool gave_up = !started_ || ring_.discard_mark() != mark ||
+                         std::chrono::steady_clock::now() > deadline;
+    if (gave_up) {  // stopped, barge-in (the rest is stale), or the device died
+      ring_.note_dropped(n - at);
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
 }
 
-void AudioOut::clear() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  buffer_.clear();
-  read_pos_ = 0;
-}
+void AudioOut::clear() { ring_.request_discard(); }
 
 double AudioOut::pending_seconds() const {
-  std::lock_guard<std::mutex> lock(mutex_);
   if (rate_ <= 0) return 0.0;
-  return static_cast<double>(buffer_.size() - read_pos_) / rate_;
+  return static_cast<double>(ring_.available()) / rate_;
 }
 
 void AudioOut::callback(ma_device* dev, void* out, const void*, ma_uint32 frames) {
   auto* self = static_cast<AudioOut*>(dev->pUserData);
+  const auto t0 = std::chrono::steady_clock::now();
   float* dst = static_cast<float*>(out);
-  std::lock_guard<std::mutex> lock(self->mutex_);
-  size_t avail = self->buffer_.size() - self->read_pos_;
-  size_t n = std::min<size_t>(avail, frames);
-  if (n > 0) std::memcpy(dst, self->buffer_.data() + self->read_pos_, n * sizeof(float));
-  if (n < frames) std::memset(dst + n, 0, (frames - n) * sizeof(float));
-  self->read_pos_ += n;
+  // No lock and no allocation: one atomic load, a memcpy, one atomic store.
+  const size_t n = self->ring_.read(dst, frames);
+  if (n < frames) {
+    std::memset(dst + n, 0, (frames - n) * sizeof(float));
+    // A block with nothing in it at all, following a block that was also
+    // empty, is not an underrun: it is the app not speaking. What counts is a
+    // block that ran short while audio was in flight -- the audible glitch.
+    if (n > 0 || self->had_audio_) {
+      self->underruns_.fetch_add(1, std::memory_order_relaxed);
+      self->pad_frames_.fetch_add(frames - n, std::memory_order_relaxed);
+    }
+  }
+  self->had_audio_ = n > 0;
   // Over the whole block, silence included: a half-filled block is genuinely
   // half as loud, and the tail of a reply has to fall to zero rather than hold
   // the last full block's level.
@@ -71,6 +98,15 @@ void AudioOut::callback(ma_device* dev, void* out, const void*, ma_uint32 frames
   for (ma_uint32 i = 0; i < frames; ++i) sum += double(dst[i]) * double(dst[i]);
   self->level_.store(frames ? static_cast<float>(std::sqrt(sum / double(frames))) : 0.0f,
                      std::memory_order_relaxed);
+  const auto us = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0)
+          .count());
+  self->callbacks_.fetch_add(1, std::memory_order_relaxed);
+  self->total_callback_us_.fetch_add(us, std::memory_order_relaxed);
+  uint64_t worst = self->max_callback_us_.load(std::memory_order_relaxed);
+  while (us > worst && !self->max_callback_us_.compare_exchange_weak(
+                           worst, us, std::memory_order_relaxed, std::memory_order_relaxed)) {
+  }
 }
 
 }  // namespace aii

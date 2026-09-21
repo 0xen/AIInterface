@@ -212,6 +212,31 @@ if(AII_BUILD_TESTS)
     target_compile_options(clip_utf8_test PRIVATE /utf-8 /W4)
   endif()
 
+  # ---- spsc_ring_test: the ring both audio callbacks now go through ---------
+  # Header-only and standard-library-only, so M21.1's ring is tested with no
+  # device, no engine DLL and no window -- including the concurrent case, which
+  # is the whole point of it and cannot be reproduced by hand.
+  add_executable(spsc_ring_test tests/spsc_ring_test.cpp)
+  target_include_directories(spsc_ring_test PRIVATE src)
+  target_compile_definitions(spsc_ring_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(spsc_ring_test PRIVATE /utf-8 /W4)
+  endif()
+
+  # ---- audio_out_bench: M21.1's measurement, not a test ---------------------
+  # Opens the real playback device and takes twenty seconds, so it is not in
+  # the acceptance list; it is how the before/after numbers in the milestone
+  # were produced and how they can be reproduced. It carries its own copy of
+  # the implementation it replaced so both halves run on one machine, one
+  # device and one chunk.
+  add_executable(audio_out_bench tests/audio_out_bench.cpp src/audio/audio_out.cpp
+                                 src/audio/miniaudio_impl.cpp)
+  target_include_directories(audio_out_bench PRIVATE src third_party)
+  target_compile_definitions(audio_out_bench PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(audio_out_bench PRIVATE /utf-8 /W4)
+  endif()
+
   # ---- wake_word_test: M12's two decisions, both of them provable offline ----
   # Same rule as clip_utf8_test: wake_word.cpp is standard-library-only and
   # listen_restore.h is header-only, so this builds and runs with no engine DLL,
