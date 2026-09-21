@@ -855,6 +855,16 @@ int main(int /*argc*/, char** /*argv*/) {
     // environment override wins for that run, and the settings surface says
     // which model is actually in force rather than showing the picker's row
     // as though it were.
+    //
+    // M20.2. And the override must not be *written back*, which is what it was
+    // doing. The picker below is seeded from whatever is in force, the frame
+    // loop mirrors the picker into `settings.json` every frame, and so a run
+    // with AII_MODEL set replaced the user's stored choice within a second of
+    // starting — the same trap `--theme` was given `themeFromArgs` for, and
+    // this is the same guard under a different name. An override is for one
+    // run by definition; a run must not be able to change what the next one
+    // comes up as unless the user asked it to.
+    const bool modelFromEnv = !voiceCfg.model_override.empty();
     if (voiceCfg.model_override.empty()) {
         const std::string key = settings.get_string("model", "name",
                                                     aii::model_choice(aii::kModelChoiceDefault).key);
@@ -3254,7 +3264,16 @@ int main(int /*argc*/, char** /*argv*/) {
             // through the table tomorrow when the alias behind it has moved on
             // — and so that an entry dropped from the table degrades to the
             // CLI's default at the next read rather than onto a command line.
-            settings.set_string("model", "name", aii::model_choice(uiState.model).key);
+            //
+            // M20.2. Not while AII_MODEL is set, exactly as the theme is not
+            // written while --theme is. The picker is showing the override,
+            // and storing what the environment said for this run would make an
+            // override a permanent change nobody asked for. A model picked by
+            // hand during such a run still restarts the child on it — the
+            // choice is honoured, it is simply not what the next run comes up
+            // as, which is what "for this run" means.
+            if (!modelFromEnv)
+                settings.set_string("model", "name", aii::model_choice(uiState.model).key);
             // The scrim and the caption belong to the loader, not the panel:
             // the loading screen has to look the same whether or not there is
             // anything underneath it. The foreground draw list puts them over
