@@ -16,6 +16,7 @@
 
 #include "audio/audio_out.h"
 #include "audio/mic_in.h"
+#include "core/barge_policy.h"
 #include "core/config.h"
 #include "core/engines.h"
 #include "core/language.h"
@@ -527,7 +528,11 @@ class VoiceSession {
   // Frame loop only. Deliberately *not* set_mic_open(false), which sends what
   // was captured — see the definition.
   void close_latch_after_silence(float quiet_for);
-  void begin_listening();
+  // `preroll` is M18.3's: the fraction of a second the barge watch had already
+  // captured when it fired, fed into the fresh recogniser stream so the
+  // syllable that interrupted the reply is not the one that is lost. Empty on
+  // every other path, which is every path that predates M18.
+  void begin_listening(std::vector<float> preroll = {});
 
   // ------------------------------------------------------------- M12
   //
@@ -545,6 +550,32 @@ class VoiceSession {
   // feature could break the app it is bolted onto.
   void begin_wake(const std::string& phrase);
   void end_wake();
+
+  // ------------------------------------------------------------- M18.2
+  //
+  // The barge watch: the microphone stays up while the app is Thinking and
+  // Speaking, in a mode that **can never send**. It is deliberately not the
+  // `Listening` state and not the wake state, because four separate
+  // mechanisms — the listen timeout, M12.1's listen restore, M12.2's wake
+  // phrase and M3.15's handoff — each have "no microphone is open while the
+  // app speaks" written into their comments, and a third state is how that
+  // invariant survives this. Nothing decoded here reaches the recogniser at
+  // all: `BargePolicy` is four numbers a frame and no text, so there is
+  // nothing captured in this mode that *could* be sent.
+  //
+  // `barge_watch_wanted()` is the whole of "when": the latch is on or a wake
+  // phrase is armed, and no hold gesture, reset or handover has a claim on the
+  // device. `tick_barge()` owns the device for as long as it is open and is
+  // the only thing that drains it; `end_barge_watch()` is idempotent and is
+  // called from every path that takes the microphone back, exactly as
+  // `end_wake()` is.
+  bool barge_watch_wanted() const;
+  void begin_barge_watch();
+  // `handing_over` is the fire path passing the still-running capture device
+  // straight to `begin_listening()`; every other caller wants the device shut.
+  // Either way this is where `AII_BARGE_DEBUG`'s one line per reply is written.
+  void end_barge_watch(bool handing_over = false);
+  void tick_barge();
   // One hypothesis, compared against the phrase. On a match it drops the
   // segment, sets the latch level and announces -- see the definition for why
   // the utterance that woke the app is never sent.
@@ -557,9 +588,17 @@ class VoiceSession {
   // and `AII_WAKE_SAY` pushes a hypothesis through M12.2's gate without a
   // person at the microphone.
   void tick_harnesses();
-  // Closes the mic and decodes what is left, returning the final text. Both
-  // ends of an utterance go through here so the decode is written once.
-  std::string finish_utterance();
+  // Ends the mic's turn and decodes what is left, returning the final text.
+  // Both ends of an utterance go through here so the decode is written once.
+  //
+  // M18.2. `may_watch` is whether this end-of-utterance is allowed to hand the
+  // capture device to the barge watch instead of stopping it — true only where
+  // a reply is about to be spoken and the microphone's next job is to listen
+  // for the user talking over it. It is a parameter rather than a test of
+  // `hold_` inside because `talk_released()` clears `hold_` *before* it calls
+  // the dictation path, so by the time this function runs a hold and a latch
+  // are indistinguishable from the member alone.
+  std::string finish_utterance(bool may_watch);
   // Closes the mic, decodes what is left and starts the turn. Leaves the
   // state Idle instead when nothing intelligible was said.
   void end_listening_and_send();
@@ -991,6 +1030,40 @@ class VoiceSession {
   // can print a real-time factor rather than an impression. Frame loop only.
   float wake_decode_ms_ = 0.0f;
   float wake_audio_sec_ = 0.0f;
+
+  // ---------------------------------------------------------------- M18.2
+  //
+  // The barge watch's own state. Frame loop only, apart from `barged_`, which
+  // the turn thread reads for every sentence the splitter emits.
+  //
+  // `barged_` is the per-reply silence flag and it is the point of the whole
+  // feature: the splitter in run_turn() honours it exactly as it honours
+  // `muted_`, so the sentence is logged and not enqueued while the reply's
+  // text goes on arriving in the panel. **`cancel_` is deliberately not set**
+  // — that would send the CLI an interrupt and truncate the reply, which is
+  // what the manual SPACE barge-in does and is the opposite of what was asked
+  // for. It is cleared at the top of run_turn() and nowhere else, so a barged
+  // reply stays silent for the rest of its life and the next reply starts
+  // audible without anything having to remember to re-arm it.
+  //
+  // `barge_floor_` is this mode's noise floor, and it is not shared with
+  // `noise_floor_` on purpose: that one belongs to an utterance the user is in
+  // the middle of, and the two windows do not overlap. It is adapted only
+  // while the speaker is silent, so a reply cannot teach the gate to ignore
+  // the room it is playing into.
+  bool barge_watch_ = false;
+  BargePolicy barge_;
+  std::atomic<bool> barged_{false};
+  std::chrono::steady_clock::time_point barge_open_at_{};
+  float barge_floor_ = 0.0f;
+  // The last `kBargePrerollSec` of captured audio, kept so that a fire can
+  // hand the onset run itself to the fresh recogniser stream. Trimmed to the
+  // run's start and never further back; see the fire path for why the earlier
+  // audio is dropped rather than kept.
+  std::vector<float> barge_preroll_;
+  // Where in the reply the rule fired, for `AII_BARGE_DEBUG`'s one line per
+  // reply; negative means it never did.
+  float barge_fired_at_ = -1.0f;
   // M12.2's harness: `AII_WAKE_SAY`'s remaining scripted utterances and when
   // the script started. Empty in every ordinary run.
   std::vector<std::pair<float, std::string>> wake_script_;
