@@ -223,6 +223,43 @@ bool ClaudeCodeClient::start(std::string* error) {
   if (opt_.suppress_cli_context) cmd += " --safe-mode --disable-slash-commands";
   std::wstring wcmd = widen(cmd);
 
+  // M26.2, finding 21. `CreateProcessW` writes the command line into the new
+  // process's environment block and caps it at 32,767 characters including the
+  // terminating NUL -- and almost all of what is on this one is
+  // `--system-prompt`, which grows every time a prompt file or a digest does.
+  // Nobody was checking. Over the limit, `CreateProcessW` fails with a plain
+  // "the parameter is incorrect", which is not a sentence anybody could act on.
+  //
+  // Measured on 21 Sep 2026 against a freshly seeded prompt tree, with no
+  // memories and one action: **20,278 of 32,767 characters**, of which the
+  // system prompt is 19,943 bytes. About 12,000 characters of headroom, which
+  // sounds comfortable and is not: it is roughly the size of two more prompt
+  // files, and `memories.md` alone is allowed 4,000 characters of it. Logged
+  // on every start, because the only way this stops being a surprise is if the
+  // number is written down every run.
+  //
+  // The pinned CLI (2.1.278) has `--system-prompt-file <path>`, which would
+  // take the prompt off the command line altogether and end the ceiling as a
+  // concern. Not used here: it is a change of how the prompt reaches the child
+  // and it wants its own milestone, with the file's lifetime, its location
+  // under `%APPDATA%` and its removal all decided rather than assumed.
+  constexpr std::size_t kCommandLineMax = 32767;
+  std::fprintf(stderr, "[claude] command line: %zu of %zu characters (system prompt %zu)\n",
+               wcmd.size() + 1, kCommandLineMax, opt_.system_prompt.size());
+  // stderr is redirected onto the log file in the windowed app, where it is a
+  // block-buffered FILE* and not the unbuffered console stream this would
+  // otherwise be. Without this the line is still sitting in the buffer when
+  // the run people are reading the log of has finished.
+  std::fflush(stderr);
+  if (wcmd.size() + 1 > kCommandLineMax) {
+    if (error)
+      *error = "the command line for claude is " + std::to_string(wcmd.size() + 1) +
+               " characters, over Windows' limit of " + std::to_string(kCommandLineMax) +
+               "; the system prompt (" + std::to_string(opt_.system_prompt.size()) +
+               " bytes) is what has grown";
+    return false;
+  }
+
   STARTUPINFOW si{};
   si.cb = sizeof(si);
   si.dwFlags = STARTF_USESTDHANDLES;
@@ -244,7 +281,14 @@ bool ClaudeCodeClient::start(std::string* error) {
   CloseHandle(stdout_w);
   CloseHandle(stderr_w);  // the child holds the only write end now, so EOF means "it is gone"
   if (!okay) {
-    if (error) *error = "CreateProcess failed (" + std::to_string(GetLastError()) + "): " + cmd;
+    // M26.2, finding 20. This used to append `cmd`, which is the whole command
+    // line -- and the whole command line is a 20 KB system prompt. It went
+    // into the status line, where it is a wall of text where a reason should
+    // be, and into the log, where it is the app's own prompts written out in
+    // full every time a path is wrong. The exe and the error code are what
+    // identifies the fault; the prompt is in `assets/` for anyone who wants it.
+    if (error)
+      *error = "CreateProcess failed (" + std::to_string(GetLastError()) + ") for " + opt_.exe;
     return false;
   }
   CloseHandle(pi.hThread);

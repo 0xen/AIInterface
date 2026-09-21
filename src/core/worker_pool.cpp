@@ -216,6 +216,13 @@ void WorkerPool::run(Worker* w) {
       // A CLI error can end in a dangling "reason:" with nothing after it
       // ("claude process exited: "), which is read out as a colon-shaped
       // pause. Spoken, a full stop is the honest punctuation.
+      //
+      // M26.1 fixed the source of that particular string -- the client now
+      // puts the child's exit code and its last words after the colon, or says
+      // it has neither -- so this no longer has a known caller. It stays
+      // because it is three lines and because the error text here comes from
+      // another program: a `result` event carrying "Error:" and nothing else
+      // would land in exactly the same shape.
       while (!why.empty() && (why.back() == ':' || why.back() == ' ')) why.pop_back();
       if (!why.empty() && why.back() != '.' && why.back() != '!' && why.back() != '?') why += '.';
       shown = app_text(Msg::WorkerFailedShown, w->name, why);

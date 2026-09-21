@@ -234,6 +234,42 @@ int main() {
           "and does not trail off after a colon, which was the finding");
   }
 
+  // ---- 5. the command line, and what a failure to start is allowed to say --
+  //
+  // M26.2, findings 20 and 21. Nothing here starts a child: both cases fail
+  // before `CreateProcessW` or in it.
+  std::printf("\nstart() failures say the exe and the size, not the prompt\n");
+  {
+    // A system prompt past Windows' 32,767-character command-line ceiling.
+    // Before this the call reached CreateProcessW and came back "the parameter
+    // is incorrect", which names neither the cause nor the cure.
+    aii::ClaudeCodeClient::Options o = stand_in();
+    o.system_prompt = std::string(40000, 'x');
+    aii::ClaudeCodeClient client(o);
+    std::string err;
+    check(!client.start(&err), "a system prompt over the ceiling fails to start");
+    std::printf("       the error string is: \"%s\"\n", err.c_str());
+    check(contains(err, "32767"), "and says what the limit is");
+    check(err.find(o.system_prompt) == std::string::npos,
+          "without quoting the prompt back at the user");
+    check(err.size() < 300, "in a sentence that fits a status line (" +
+                                std::to_string(err.size()) + " characters)");
+  }
+  {
+    // Finding 20 proper: the exe does not exist, so CreateProcessW fails, and
+    // the message used to append the entire command line -- prompt included --
+    // to the status line and the log.
+    aii::ClaudeCodeClient::Options o = stand_in();
+    o.exe = "C:\\no\\such\\claude.exe";
+    o.system_prompt = "SECRET-PROMPT-MARKER and twenty kilobytes more";
+    aii::ClaudeCodeClient client(o);
+    std::string err;
+    check(!client.start(&err), "a missing exe fails to start");
+    std::printf("       the error string is: \"%s\"\n", err.c_str());
+    check(contains(err, o.exe), "the error names the exe");
+    check(!contains(err, "SECRET-PROMPT-MARKER"), "and does not carry the system prompt");
+  }
+
   std::printf(failures ? "\nFAILED: %d\n" : "\nall passed\n", failures);
   return failures ? 1 : 0;
 }
