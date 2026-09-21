@@ -213,26 +213,68 @@ Msg failure_reason(const std::string& client_error) {
   for (char c : client_error)
     e += (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
   auto has = [&e](const char* needle) { return e.find(needle) != std::string::npos; };
+  // M20.4. Anchored at the front, which is where every string this app builds
+  // puts its own words.
+  //
+  // What this replaces: needles matched anywhere in the string. That is the
+  // right rule for the one input that is free prose and the wrong one for
+  // every other, and the two were not separated. `has("cancel")` classified
+  // "the user cancelled the subscription" -- which the CLI can hand back as
+  // the text of a failed result -- as a turn the app itself had stopped, and
+  // said so out loud; `has("connect")` claimed any sentence containing the
+  // word, `has("429")` any error whose code happened to contain those digits.
+  //
+  // Every error string in this app is a literal followed by a detail:
+  // `"claude process exited: " + last_error_`, `"WinHttpSendRequest failed ("
+  // + code + ")"`. So the literal is at offset zero and a prefix identifies
+  // it exactly, while the free prose it carries cannot reach in and be
+  // mistaken for one. The full list of producers is `claude_code_client.cpp`,
+  // `claude_client.cpp` and `worker_pool.cpp`; every one of them is below.
+  auto starts = [&e](const char* prefix) { return e.rfind(prefix, 0) == 0; };
 
-  // Order matters where two needles can both be present. "HTTP 429" is a
-  // limit before it is a network error; "claude exited during startup" is a
-  // start that failed before it is a process that exited.
-  if (has("already running")) return Msg::FailAlreadyRunning;
-  if (has("cancel")) return Msg::FailStoppedByUs;
-  if (has("refusal")) return Msg::FailWouldNotDo;
-  if (has("usage limit") || has("rate limit") || has("429") || has("overloaded"))
-    return Msg::FailAtItsLimit;
-  if (has("during startup") || has("createprocess") || has("createpipe"))
+  // --- what this app writes (core/worker_pool.cpp, llm/claude_code_client.cpp)
+  //
+  // The worker name sits in the middle of its sentence, so this one is a
+  // prefix and a tail rather than a prefix alone -- a worker called "cancel"
+  // is still only this message.
+  if (starts("a worker named ") && has(" is already running")) return Msg::FailAlreadyRunning;
+  if (starts("createpipe failed") || starts("createprocess failed") ||
+      starts("claude exited during startup"))
     return Msg::FailCouldNotStart;
-  if (has("not running")) return Msg::FailNeverStarted;
-  if (has("exited") || has("exit code")) return Msg::FailStopped;
-  if (has("stdin")) return Msg::FailCouldNotSend;
-  if (has("winhttp") || has("http ") || has("timed out") || has("timeout") ||
-      has("connect"))
-    return Msg::FailCouldNotReach;
-  // Unrecognised -- including the CLI's own `is_error` result text, which is
-  // free prose and can be anything. It degrades to the one line that admits it
-  // cannot explain, instead of reading the prose out loud.
+  if (starts("claude process is not running")) return Msg::FailNeverStarted;
+  if (starts("failed to write to claude stdin")) return Msg::FailCouldNotSend;
+
+  // --- the API backend (llm/claude_client.cpp) ---------------------------
+  //
+  // `"cancelled"` is written whole and alone, so it is matched whole and
+  // alone. This is the needle finding 22 was about.
+  if (e == "cancelled") return Msg::FailStoppedByUs;
+  if (starts("refusal: ")) return Msg::FailWouldNotDo;
+  // "HTTP " + status + " " + message. The two statuses that mean "not now"
+  // rather than "not working" are named before the general case, which is the
+  // ordering the old comment was about and the only ordering that still
+  // matters here.
+  if (starts("http 429") || starts("http 529")) return Msg::FailAtItsLimit;
+  if (starts("winhttp") || starts("http ")) return Msg::FailCouldNotReach;
+
+  // --- free prose from the other side ------------------------------------
+  //
+  // The CLI's own `is_error` result text (claude_code_client.cpp, the `res`
+  // branch), which can be anything and is the one input a substring is the
+  // only available rule for. It is also what `"claude process exited: "`
+  // carries, so it is tested before that prefix: a child that stopped because
+  // the subscription ran out is at its limit first and stopped second.
+  //
+  // Kept deliberately narrow. These are multi-word phrases that do not occur
+  // in ordinary description of something else, unlike the bare "cancel",
+  // "connect" and "429" that used to be here.
+  if (has("usage limit reached") || has("rate limit") || has("overloaded_error"))
+    return Msg::FailAtItsLimit;
+  if (starts("claude process exited")) return Msg::FailStopped;
+
+  // Unrecognised -- including the rest of that result text. It degrades to the
+  // one line that admits it cannot explain, instead of reading the prose out
+  // loud.
   return Msg::FailUnclear;
 }
 
