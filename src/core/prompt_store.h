@@ -65,6 +65,50 @@ struct PromptNode {
   std::string body_error;
 };
 
+// ------------------------------------------- M16.2: the format of a prompt
+//
+// The incident this closes: a refreshed `workers.md` full of `{{#file_write}}`
+// markers reached a binary with no template expander, the markers went through
+// as prose, and the assistant told the user it could write files it had never
+// been granted. M16.1 made seeding content-based -- it now knows whether the
+// user edited a file -- but it stayed format-blind on purpose: nothing on
+// either side said which *language* the file was written in, so a new-format
+// prompt landing on an old binary still looked exactly like an ordinary
+// refresh.
+//
+// So both sides say it now. `graph.json` carries a top-level `"format": 1`,
+// and every body under `prompts/system/` carries one line inside an HTML
+// comment:
+//
+//     <!-- aii-prompt-format: 1 -->
+//
+// A comment, because that is how the headers in these files are already
+// written, and because `compose()` strips every `<!-- ... -->` span out of a
+// body before it is sent: the line therefore costs no tokens, is never read by
+// the model as an instruction, and a `{{` inside a comment can reach neither
+// `expand_tool_sections` nor Claude. The marker only counts inside a comment,
+// so the same words in ordinary prose -- which the model *would* see -- are
+// not a declaration.
+//
+// **Bump this in the same commit as the change that needs it.** It is not a
+// version of the app and not a version of the prose. It is the version of what
+// a binary has to understand in order to read one of these files *correctly*:
+// a new `{{...}}` mechanism, a change to the tag syntax, a slot the app
+// substitutes. Rewording a paragraph does not touch it. Bumping it here
+// without re-heading the shipped files makes every shipped prompt fall back to
+// itself and log about it at every launch; re-heading the files without
+// bumping it here is the incident again, exactly.
+constexpr int kPromptFormat = 1;
+
+// What a body declares, or -1 when it declares nothing. `<!-- aii-prompt-format: 2 -->`
+// is 2; a marker with no number after it, or one outside any comment, is -1,
+// which is the same answer as "no header" and is handled as such.
+int declared_prompt_format(const std::string& text);
+
+// The marker itself, in one place, so the parser and anything that writes a
+// header agree on the spelling.
+extern const char kPromptFormatMarker[];
+
 struct PromptLink {
   std::string from;
   std::string to;
@@ -105,6 +149,26 @@ class PromptStore {
   // channel instead, `problems()`, which cannot be missed by a caller that
   // checks the return value, and `PromptNode::body_error`, which carries it as
   // far as the inspector.
+  //
+  // **M16.2, the format check.** An installed file that declares a format this
+  // binary does not know is not read. The copy that shipped with this build is
+  // used for that node instead, the user's file is left exactly where it is
+  // and untouched, and `problems()` carries a sentence naming which of the two
+  // is in force and where the other one is. It is never fatal: an app with no
+  // prompt at all is a worse outcome than an app running on the prompt it was
+  // built with, and there is always a shipped copy to fall back to.
+  //
+  // A *newer* declared format does the same thing as an older one, with a
+  // different sentence, and that is the honest answer rather than a cautious
+  // one. A binary cannot read a format it has never seen -- it can only guess
+  // that the parts it recognises still mean what they used to, and guessing is
+  // the whole of what went wrong the first time. What differs between the two
+  // cases is what the user should do about it (update the app, versus update
+  // the file), so the difference lives in the wording and nowhere else.
+  //
+  // A file with **no header at all** -- every install that predates this, and
+  // any prompt the user writes from scratch -- is read as the current format
+  // and noted, not refused. One note per load, naming the files.
   bool load(std::string* error = nullptr);
   bool reload(std::string* error = nullptr) { return load(error); }
 

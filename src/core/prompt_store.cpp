@@ -80,6 +80,45 @@ std::string trim_end(std::string s) {
   return s;
 }
 
+// What actually reaches Claude from a body: every `<!-- ... -->` span out
+// first, then trimmed at both ends.
+//
+// **The comments used to be sent.** Nothing stripped them from a graph body --
+// only `pre-prompt.md` and `handoff.md` went through `strip_html_comments` --
+// so the explanatory header at the top of `voices.md` was in the system prompt
+// of every launch, and its own text says so ("would survive into Claude's
+// context as a literal"). M16.2 needs a header line in every one of these
+// files, and a version number is the last thing worth spending tokens telling
+// a model, so the strip moved to where the bytes are chosen. It is done here
+// and not in `load()` on purpose: `save()` writes `body` back, and a load that
+// stripped would delete the user's own comments out of their file the first
+// time anything saved the graph.
+std::string body_text(const std::string& body) {
+  std::string s = strip_html_comments(body);
+  std::size_t i = 0;
+  while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) ++i;
+  return trim_end(s.substr(i));
+}
+
+// The sentence a format mismatch gets. Long and in plain words, because
+// `problems()` is the only channel this has: it is printed with a `[prompts]`
+// tag at every launch and listed in the inspector, and the one thing the user
+// has to be able to read off it is *which copy is in force* and where the
+// other one is.
+std::string format_note(const std::string& what, int declared, const fs::path& yours,
+                        bool shipped_in_force) {
+  std::string s = what + " declares format " + std::to_string(declared) + " and this build reads format " +
+                  std::to_string(kPromptFormat) + ". ";
+  s += declared > kPromptFormat
+           ? "It was written for a newer version of this app than the one running, which cannot read it. "
+           : "It was written for an older format this build no longer reads. ";
+  s += shipped_in_force
+           ? "The copy that shipped with this build is in force; your file is untouched at " + yours.string() + "."
+           : "The copy that shipped with this build could not be used either, so your file is in force exactly "
+             "as it is written and may describe things this build cannot do: " + yours.string();
+  return s;
+}
+
 // What goes between two node bodies. One blank line — the separator the
 // milestone asks for, and the one already between the two paragraphs of the
 // prompt this replaces.
@@ -108,9 +147,14 @@ bool PromptStore::load(std::string* error) {
   // and the shipped replacement turns up beside it as `<name>.new`; that is
   // what `seed_notes` carries, and it belongs in `problems()` where the rest of
   // the store's complaints are already shown and logged.
+  //
+  // Where the copy that shipped with this build lives. It is the seed source,
+  // and since M16.2 it is also the fallback for an installed file this binary
+  // cannot read.
+  const fs::path shipped_dir = fs::path(AII_ASSETS_DIR) / "prompts";
   std::string seed_err;
   std::vector<std::string> seed_notes;
-  if (!seed_tree(fs::path(AII_ASSETS_DIR) / "prompts", dir, &seed_err, &seed_notes)) {
+  if (!seed_tree(shipped_dir, dir, &seed_err, &seed_notes)) {
     problems_.push_back(seed_err);  // not fatal: an existing store still loads
     if (error) *error = seed_err;
   }
@@ -126,6 +170,42 @@ bool PromptStore::load(std::string* error) {
     if (error) *error = (dir / "graph.json").string() + " is not valid JSON";
     return false;
   }
+
+  // ---- M16.2: which format is this store written in? ----------------------
+  //
+  // The graph file first, because it decides what the node objects mean. A
+  // graph this binary cannot read is replaced wholesale by the shipped one for
+  // this load -- enable flags, positions and all -- because there is no way to
+  // take half of a structure whose shape is unknown. Nothing is written: the
+  // user's file stays where it is and is read again by the next build that
+  // understands it.
+  if (const json& fj = member(root_j, "format"); fj.is_number_integer()) {
+    if (const int declared = fj.get<int>(); declared != kPromptFormat) {
+      std::string shipped_text;
+      json shipped_j;
+      if (read_file(shipped_dir / "graph.json", &shipped_text))
+        shipped_j = json::parse(shipped_text, nullptr, false);
+      const bool usable = shipped_j.is_object() && member(shipped_j, "graphs").is_object();
+      problems_.push_back(format_note("graph.json", declared, dir / "graph.json", usable));
+      if (error) *error = problems_.back();
+      if (usable) root_j = std::move(shipped_j);
+    }
+  } else {
+    // No declaration: every store written before this, and any graph.json a
+    // user hand-edits from one of those. Read as the current format, said out
+    // loud once, never refused -- the file is almost certainly fine, and the
+    // note is what makes the silence impossible.
+    problems_.push_back("graph.json declares no format; reading it as format " +
+                        std::to_string(kPromptFormat) + ". A `\"format\": " +
+                        std::to_string(kPromptFormat) +
+                        "` line is what lets a later build tell.");
+  }
+
+  // Bodies with no header of their own, collected rather than reported one by
+  // one: on an install that predates M16.2 that is every prompt in the store,
+  // and eight identical lines in a log is how a real warning gets scrolled
+  // past.
+  std::vector<std::string> headerless;
 
   const json& graphs_j = member(root_j, "graphs");
   if (!graphs_j.is_object()) {
@@ -158,7 +238,12 @@ bool PromptStore::load(std::string* error) {
       }
       for (const json& t : member(nj, "triggers"))
         if (t.is_string()) n.triggers.push_back(t.get<std::string>());
-      if (!n.file.empty() && !read_file(dir / fs::path(n.file), &n.body)) {
+      // `lexically_normal` only so that the path in a problem sentence is
+      // written the way Windows writes one: `n.file` uses forward slashes (the
+      // format says so, so that a store copied between machines still links
+      // up) and a raw join leaves both separators in the same string.
+      const fs::path body_path = (dir / fs::path(n.file)).lexically_normal();
+      if (!n.file.empty() && !read_file(body_path, &n.body)) {
         // A declared body that is not on disk is worth saying out loud: it is
         // exactly the shape of the avatar-seed bug, and composing silently
         // without it would be the same silent degradation.
@@ -172,6 +257,28 @@ bool PromptStore::load(std::string* error) {
         n.body_error = "cannot read " + n.file;
         problems_.push_back("prompt `" + n.id + "`: " + n.body_error);
         if (error) *error = problems_.back();
+      } else if (!n.file.empty()) {
+        // M16.2. The body read; does this binary know the language it is
+        // written in? A file that says it is something else is not guessed at:
+        // the shipped copy takes its place for this load and the user is told
+        // which one Claude is getting.
+        const int declared = declared_prompt_format(n.body);
+        if (declared < 0) {
+          headerless.push_back(n.file);
+        } else if (declared != kPromptFormat) {
+          std::string shipped;
+          // The shipped copy has to be one *this* binary can read, which is
+          // its own check and not an assumption: a build whose assets and
+          // whose `kPromptFormat` disagree is a build bug, and falling back
+          // onto a file this code cannot read either would be the incident
+          // again with the fallback wearing its coat.
+          const bool usable = read_file(shipped_dir / fs::path(n.file), &shipped) &&
+                              declared_prompt_format(shipped) == kPromptFormat;
+          if (usable) n.body = std::move(shipped);
+          problems_.push_back("prompt `" + n.id + "`: " +
+                              format_note(n.file, declared, body_path, usable));
+          if (error) *error = problems_.back();
+        }
       }
       g.nodes.push_back(std::move(n));
     }
@@ -187,6 +294,18 @@ bool PromptStore::load(std::string* error) {
     }
     graphs_.push_back(std::move(g));
   }
+  if (!headerless.empty()) {
+    std::string note = headerless.size() == 1 ? "no format header in " : "no format header in these prompts: ";
+    for (std::size_t i = 0; i < headerless.size(); ++i) {
+      if (i) note += ", ";
+      note += headerless[i];
+    }
+    note += headerless.size() == 1 ? "; reading it as format " : "; reading them as format ";
+    note += std::to_string(kPromptFormat) + ". A `<!-- " + kPromptFormatMarker + " " +
+            std::to_string(kPromptFormat) + " -->` line is what lets a later build tell.";
+    problems_.push_back(std::move(note));
+  }
+
   // The graphs themselves in a fixed order, so anything that iterates them —
   // M5's inspector, a save — does not depend on JSON object key order.
   std::sort(graphs_.begin(), graphs_.end(),
@@ -200,6 +319,10 @@ bool PromptStore::save(std::string* error) const {
   fs::create_directories(dir, ec);
   json root_j;
   root_j["version"] = 1;
+  // M16.2. Written back, so that a save can never strip the declaration off a
+  // store and leave the next build guessing. `PromptStore::save()` is the only
+  // writer of this file, which is what makes one line here enough.
+  root_j["format"] = kPromptFormat;
   json graphs_j = json::object();
   for (const PromptGraph& g : graphs_) {
     json gj;
@@ -299,7 +422,7 @@ std::vector<std::string> PromptStore::compose_order(const std::string& name) con
     if (id != g->start_id) {
       const PromptNode* n = g->find(id);
       if (!n || !n->enabled) continue;  // and do not walk on through it
-      if (!trim_end(n->body).empty()) parts.push_back(n->id);
+      if (!body_text(n->body).empty()) parts.push_back(n->id);
     }
 
     std::vector<const PromptLink*> out;
@@ -324,7 +447,7 @@ std::string PromptStore::compose(const std::string& name) const {
     if (!n) continue;  // cannot happen: compose_order only names nodes it found
     if (!first) composed += kSeparator;
     first = false;
-    composed += trim_end(n->body);
+    composed += body_text(n->body);
   }
   return composed;
 }
@@ -508,6 +631,42 @@ std::string strip_html_comments(const std::string& s) {
     i = close + 3;
   }
   return out;
+}
+
+const char kPromptFormatMarker[] = "aii-prompt-format:";
+
+int declared_prompt_format(const std::string& text) {
+  // Inside a comment or it does not count. The marker is meant to be invisible
+  // to the model, and `compose()` only makes it invisible when it is in a
+  // comment -- so a line of prose that happens to say these words is prose,
+  // and is read by Claude as prose, and must not quietly become a declaration
+  // that changes which file the app runs on.
+  std::size_t i = 0;
+  while (true) {
+    const std::size_t open = text.find("<!--", i);
+    if (open == std::string::npos) return -1;
+    const std::size_t close = text.find("-->", open + 4);
+    const std::size_t end = close == std::string::npos ? text.size() : close;
+    const std::size_t at = text.find(kPromptFormatMarker, open + 4);
+    if (at != std::string::npos && at < end) {
+      std::size_t j = at + std::strlen(kPromptFormatMarker);
+      while (j < end && (text[j] == ' ' || text[j] == '\t')) ++j;
+      int n = 0;
+      bool any = false;
+      while (j < end && text[j] >= '0' && text[j] <= '9') {
+        if (n > 1000000) return -1;  // not a version number; treat as no header
+        n = n * 10 + (text[j] - '0');
+        ++j;
+        any = true;
+      }
+      // A marker with nothing readable after it is not a declaration. It says
+      // nothing this code can act on, and the safe reading of "says nothing"
+      // is the same as having no header at all: current format, with a note.
+      return any ? n : -1;
+    }
+    if (close == std::string::npos) return -1;  // unterminated: nothing past it is a comment
+    i = close + 3;
+  }
 }
 
 namespace {
@@ -834,7 +993,9 @@ PromptInventory build_inventory(const PromptStore& store, const PromptInjector& 
       r.section = PromptSection::Global;
       r.title = n->title.empty() ? n->id : n->title;
       r.source = n->file.empty() ? n->id : n->file;
-      r.est_tokens = estimate_tokens(n->body);
+      // The bytes that were sent, not the bytes on disk: the comments in
+      // these files are stripped before composition and cost nothing.
+      r.est_tokens = estimate_tokens(body_text(n->body));
       r.injected = true;
       r.at_session_start = true;
       inv.rows.push_back(std::move(r));

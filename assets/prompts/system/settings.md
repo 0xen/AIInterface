@@ -1,3 +1,5 @@
+<!-- aii-prompt-format: 1 -->
+
 This app keeps its settings in a file, and these are its keys and what they are set to right now:
 
 ```

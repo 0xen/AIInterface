@@ -403,6 +403,18 @@ if(AII_BUILD_TESTS)
   endif()
   aii_copy_runtime_dlls(prompt_tools_test)
 
+  # ---- prompt_format_test: a prompt written for another binary ------------
+  # Same shape as the two above, and it needs the shipped assets for real:
+  # the behaviour under test is "fall back to the copy that shipped with this
+  # build", so `AII_ASSETS_DIR` -- already defined for aii_core -- is what it
+  # falls back onto.
+  add_executable(prompt_format_test tests/prompt_format_test.cpp)
+  target_link_libraries(prompt_format_test PRIVATE aii_core)
+  if(MSVC)
+    target_compile_options(prompt_format_test PRIVATE /utf-8 /W4)
+  endif()
+  aii_copy_runtime_dlls(prompt_format_test)
+
   # ---- action_digest_test: an unarmed action is visible as unarmed --------
   # Compiles `src/avatar/action_store.cpp` directly rather than linking the
   # avatar target: the store is deliberately free of ImGui, the engine and the
