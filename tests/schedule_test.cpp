@@ -394,14 +394,13 @@ int main(int argc, char** argv) {
                                           "\"1h30\" reads as 1h plus 30 seconds");
       else check(!ok, std::string("parse_delay refuses \"") + b + "\"");
     }
-    // The block parser itself is deliberately *not* exercised here.
-    // `parse_commands` lives in `worker_pool.cpp`, which drags in
-    // ClaudeCodeClient and ButtonRegistry, and linking those would cost this
-    // target the one property it exists to have: no engine DLLs beside it, so
-    // a timing harness cannot fail for a reason that is not timing. The block
-    // shapes are verified against a live model instead (`voiceloop --say`
-    // prints every `schedule` line it parsed), which is better evidence than
-    // a literal a human typed.
+    // The block parser itself is deliberately *not* exercised here, and since
+    // M15.1 it does not need to be: `parse_commands` moved out of
+    // `worker_pool.cpp` -- which drags in ClaudeCodeClient and ButtonRegistry --
+    // into the standard-library-only `core/aii_block.cpp`, and
+    // `aii_block_test` is where its cases now live. This target keeps the one
+    // property it exists to have: no engine DLLs beside it, so a timing harness
+    // cannot fail for a reason that is not timing.
     std::printf("case 9  M2b.3: every delay string the prompt teaches parses\n\n");
   }
 

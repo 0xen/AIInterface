@@ -30,6 +30,7 @@ add_library(aii_core STATIC
   src/llm/claude_code_client.cpp
   src/tts/kokoro_tts.cpp
   src/tts/voicevox_tts.cpp
+  src/core/aii_block.cpp
   src/core/app_bus.cpp
   src/core/app_strings.cpp
   src/core/button_registry.cpp
@@ -136,6 +137,20 @@ if(AII_BUILD_TESTS)
   target_compile_definitions(cwd_policy_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   if(MSVC)
     target_compile_options(cwd_policy_test PRIVATE /utf-8 /W4)
+  endif()
+
+  # ---- aii_block_test: what the assistant is allowed to ask this app to do ----
+  # M15.1. The reason this target can exist at all is that `aii_block.cpp` was
+  # split out of `worker_pool.cpp`, which owns a ClaudeCodeClient and so drags
+  # the whole process-spawning half of the app behind it; `schedule_test.cpp`
+  # says in as many words that this is why the parser had no test. It now needs
+  # text_util.cpp and nothing else.
+  add_executable(aii_block_test tests/aii_block_test.cpp src/core/aii_block.cpp
+                                src/core/text_util.cpp)
+  target_include_directories(aii_block_test PRIVATE src)
+  target_compile_definitions(aii_block_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(aii_block_test PRIVATE /utf-8 /W4)
   endif()
 
   # ---- memory_store_test: the file the user's "remember this" lands in ----

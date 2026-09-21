@@ -3503,7 +3503,13 @@ void VoiceSession::run_commands(const std::string& reply_text) {
   // per reply rather than per command, because a block may hold several spawns
   // and they are all answering the same turn.
   const std::string evidence = folder_evidence();
-  for (const Command& c : parse_commands(reply_text)) {
+  // M15.1. A block the model did not finish writing is refused rather than run,
+  // and the only place that is visible is here: the parser has no logger, so it
+  // hands back what it dropped and this is the caller that owes the log a line.
+  std::vector<std::string> problems;
+  const std::vector<Command> commands = parse_commands(reply_text, &problems);
+  for (const std::string& p : problems) log("[aii] " + p);
+  for (const Command& c : commands) {
     if (c.verb == "cancel") {
       // The id comes from the list this app gave the model a moment ago, so a
       // value it cannot read is the model inventing one. Logged, not spoken:
