@@ -25,7 +25,9 @@ class MicIn {
   MicIn(const MicIn&) = delete;
   MicIn& operator=(const MicIn&) = delete;
 
-  bool open(int sample_rate);   // opens the default capture device (stopped)
+  // Opens the capture device, stopped. The Windows default unless `id` names
+  // one (M18.4, `audio/device_pick.h`).
+  bool open(int sample_rate, const ma_device_id* id = nullptr);
   bool start();                 // begin delivering samples
   void stop();                  // stop delivering samples (device stays open)
   void close();

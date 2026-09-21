@@ -5,6 +5,20 @@ assistant inside it. The assistant reads this when asked what is new, so entries
 plain and free of file paths; the technical record with measurements is `docs/MILESTONES.md`.
 Every milestone that merges adds an entry here in the same commit.
 
+## 2026-09-22
+
+### Changed
+- **Choosing a microphone and a speaker.** The app can now be told which microphone and
+  which output to use by name, with two environment variables, instead of always taking the
+  Windows defaults. If the name matches nothing it says so and lists what it found. Useful when
+  the default microphone is a headset that hears nothing.
+- **Talking over the assistant, measured on loudspeakers.** With the reply coming out of
+  loudspeakers near the microphone, the assistant's own voice is loud enough at the microphone
+  that the safety margin which stops it interrupting itself also stops a person at ordinary
+  volume from interrupting it, at least for the English voice. It will not cut itself off, but
+  you may have to speak up. The debug line now says how close you came. Proper echo
+  cancellation is the fix and is not done.
+
 ## 2026-09-21
 
 ### Added

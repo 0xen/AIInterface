@@ -13,6 +13,7 @@
 
 #include "settings.h"
 
+#include "audio/device_pick.h"
 #include "core/app_bus.h"
 #include "core/app_strings.h"
 #include "core/cwd_policy.h"
@@ -453,12 +454,44 @@ void VoiceSession::load() {
     if (!build_voicevox(cfg_, eng_, logger, &err)) return fail(err);
   }
 
+  // M18.4. `AII_SPEAKER` and `AII_MIC` name an endpoint by a substring of its
+  // name; unset, both are the Windows default, as they always were. They exist
+  // because the machine this is tuned on has a dead microphone as its default
+  // input and the loudspeakers are not its default output, and a tuning run
+  // has to be able to say "the webcam, and the loudspeakers" without touching
+  // Windows sound settings in between. A name that matches nothing is a hard
+  // failure with the list of what was there: silently falling back to the
+  // default would make a mistyped name look like a microphone that hears
+  // nothing, which is exactly the fault this is for telling apart.
+  auto pick = [&](bool playback, const char* var, ma_device_id* id, std::string* err) {
+    const char* want = std::getenv(var);
+    if (!want || !*want) return false;
+    std::string name;
+    if (find_audio_device(playback, want, id, &name)) {
+      rend::log::info("[audio] {}={} picked {}", var, want, name);
+      return true;
+    }
+    std::string list;
+    for (const auto& d : list_audio_devices(playback))
+      list += "\n    " + std::string(d.is_default ? "* " : "  ") + d.name;
+    *err = std::string("no ") + (playback ? "playback" : "capture") + " device contains \"" +
+           want + "\" (" + var + "); available:" + list;
+    return false;
+  };
+  ma_device_id speaker_id{};
+  ma_device_id mic_id{};
+  std::string pick_err;
   enter(4);
+  const bool named_speaker = pick(true, "AII_SPEAKER", &speaker_id, &pick_err);
+  if (!pick_err.empty()) return fail(pick_err);
   speaker_ = std::make_unique<AudioOut>();
-  if (!speaker_->start(eng_.kokoro->sample_rate())) return fail("no playback device");
+  if (!speaker_->start(eng_.kokoro->sample_rate(), named_speaker ? &speaker_id : nullptr))
+    return fail("no playback device");
   enter(5);
+  const bool named_mic = pick(false, "AII_MIC", &mic_id, &pick_err);
+  if (!pick_err.empty()) return fail(pick_err);
   mic_ = std::make_unique<MicIn>();
-  if (!mic_->open(kMicRate)) return fail("no capture device");
+  if (!mic_->open(kMicRate, named_mic ? &mic_id : nullptr)) return fail("no capture device");
   finish_stages();
   // `eng_.voicevox` is null when Japanese is off; SpeechQueue takes that and
   // set_japanese() is how the on-demand load hands it one later.
@@ -1678,15 +1711,37 @@ void VoiceSession::end_barge_watch(bool handing_over) {
   // was measured to produce, the bar that leak set, and whether anybody
   // cleared it. This is the harness for M18.4's tuning and it is the only way
   // to tell "it did not fire" from "it never armed".
+  //
+  // M18.4 added the second half of the line: the loudest thing the armed rule
+  // saw, the longest run over the bar and when it began, and how many runs got
+  // past kBargeNoticeSec. "Did not fire" then reads one of three ways -- nothing
+  // reached the bar (peak below threshold), something reached it and was
+  // refused by the onset (longest run under 0.30 s), or the bar was raised
+  // above the person by the leak (threshold well over the gate) -- and each of
+  // those is a different knob.
   if (std::getenv("AII_BARGE_DEBUG")) {
     const float gate = std::max(barge_floor_ * kGateOverFloor, kGateAbsMin);
+    std::string verdict;
+    if (barge_.learning()) {
+      verdict = "never armed (less than a second of audible reply)";
+    } else {
+      char buf[256];
+      std::snprintf(buf, sizeof(buf),
+                    "%s; armed peak %.5f, longest run %.2f s beginning at %.1f s, %d run%s over "
+                    "%.2f s; at the gate alone the longest run would have been %.2f s",
+                    barge_fired_at_ >= 0.0f
+                        ? ("FIRED at " + std::to_string(barge_fired_at_) + " s").c_str()
+                        : "did not fire",
+                    barge_.armed_peak(), barge_.longest_run_sec(),
+                    barge_.longest_run_at_sec() < 0.0f ? 0.0f : barge_.longest_run_at_sec(),
+                    barge_.runs_noticed(), barge_.runs_noticed() == 1 ? "" : "s",
+                    kBargeNoticeSec, barge_.gate_longest_run_sec());
+      verdict = buf;
+    }
     rend::log::info(
         "[barge-debug] reply watched {:.1f} s: learned leak {:.5f}, gate {:.5f}, threshold "
-        "{:.5f}, {}{}",
-        barge_.elapsed_sec(), barge_.leak_p99(), gate, barge_.threshold(gate),
-        barge_.learning() ? "never armed (less than a second of audible reply)"
-                          : (barge_fired_at_ >= 0.0f ? "FIRED" : "did not fire"),
-        barge_fired_at_ >= 0.0f ? " at " + std::to_string(barge_fired_at_) + " s" : "");
+        "{:.5f}, {}",
+        barge_.elapsed_sec(), barge_.leak_p99(), gate, barge_.threshold(gate), verdict);
   }
   barge_preroll_.clear();
 }
@@ -1739,7 +1794,21 @@ void VoiceSession::tick_barge() {
   // a block of audio is how much audio is in it. It also makes the rule's
   // behaviour identical whether the app is running at 60 fps or at 6.
   const float dt = float(chunk_.size()) / float(kMicRate);
-  if (barge_.frame(level, gate, spk, dt) != BargeVerdict::Fire) return;
+  const BargeVerdict verdict = barge_.frame(level, gate, spk, dt);
+  // M18.4. Each run that got past kBargeNoticeSec and was refused, as it
+  // ends, with the bar it cleared and the peak it reached: a person who was
+  // told "no" and a keypress that nearly was not look the same in the summary
+  // line, and this is where they are told apart. Debug-only and never a word
+  // of what was heard.
+  if (verdict != BargeVerdict::Fire && barge_.run_just_ended_sec() > 0.0f &&
+      std::getenv("AII_BARGE_DEBUG")) {
+    rend::log::info(
+        "[barge-debug] {:.2f} s over the bar at {:.1f} s and refused (bar {:.5f}, onset "
+        "needs {:.2f} s; speaker {:.4f})",
+        barge_.run_just_ended_sec(), barge_.elapsed_sec() - barge_.run_just_ended_sec(),
+        barge_.threshold(gate), kBargeOnsetSec, spk);
+  }
+  if (verdict != BargeVerdict::Fire) return;
 
   barge_fired_at_ = barge_.elapsed_sec();
   const float run = barge_.voiced_run_sec();

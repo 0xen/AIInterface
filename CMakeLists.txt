@@ -26,6 +26,7 @@ add_library(aii_core STATIC
   src/audio/audio_out.cpp
   src/audio/resample.cpp
   src/audio/mic_in.cpp
+  src/audio/device_pick.cpp
   src/stt/confidence.cpp
   src/stt/recognizer.cpp
   src/llm/claude_client.cpp

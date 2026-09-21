@@ -17,7 +17,7 @@ constexpr int kPushWaitMs = 20000;
 
 AudioOut::~AudioOut() { stop(); }
 
-bool AudioOut::start(int sample_rate) {
+bool AudioOut::start(int sample_rate, const ma_device_id* id) {
   if (started_) return true;
   // Allocated before the device exists, so nothing is ever allocated with a
   // callback running.
@@ -25,6 +25,7 @@ bool AudioOut::start(int sample_rate) {
   ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
   cfg.playback.format = ma_format_f32;
   cfg.playback.channels = 1;
+  cfg.playback.pDeviceID = id;  // null is the default device
   cfg.sampleRate = sample_rate;  // miniaudio resamples to the device's native rate
   cfg.dataCallback = &AudioOut::callback;
   cfg.pUserData = this;

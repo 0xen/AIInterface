@@ -133,7 +133,11 @@ when you want the reply to stop altogether. Nothing heard while Claude is speaki
 decoded or sent — it is watched for loudness and for nothing else — and if you say something
 and finish it, that utterance supersedes the reply you talked over. `AII_BARGE_DEBUG=1` logs
 one line per reply saying how much of Claude's own voice reached the microphone, what bar
-that set, and whether anything cleared it.
+that set, whether anything cleared it, and how close the loudest thing came; each run over the
+bar that was refused for being too short gets a line of its own. One measured caveat: with the
+reply coming out of loudspeakers near the microphone, Claude's own voice raises that bar above
+a person's ordinary speaking level, so it will not interrupt itself but you will have to speak
+up to interrupt it. Headphones do not have the problem.
 
 Flags: `--say "text"` sends one turn as soon as the engines are up, `--seconds N` quits after N
 seconds, `--no-voice` shows the window without loading any engine, `--opaque` gives a normal
@@ -318,6 +322,8 @@ build\Release\voiceloop.exe --speak "Text to speak. 日本語も。"    # synthe
 | `AII_MODEL` | backend default | model override (e.g. `opus`, `sonnet`, or a full model id) |
 | `AII_EFFORT` | `low` | reasoning effort; `low` keeps replies snappy |
 | `AII_STT_LANG` | `auto` | `auto`, `en` or `ja` for the recogniser |
+| `AII_MIC` | Windows default | capture device, by any part of its name (e.g. `C920`); a name that matches nothing fails the start and lists the devices |
+| `AII_SPEAKER` | Windows default | playback device, the same way (e.g. `Digital Output`) |
 | `AII_KOKORO_SID` | `3` | English voice (3 = af_heart, 2 = af_bella) |
 | `AII_VOICEVOX_STYLE` | `2` | Japanese voice style (2 = 四国めたん ノーマル; 3 = ずんだもん, 8 = 春日部つむぎ, 10 = 雨晴はう) |
 | `AII_VOICES_EN` | `26,17` | the English voices `[v2]`, `[v3]`… select, as Kokoro speaker ids; empty switches them off |

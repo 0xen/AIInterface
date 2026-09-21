@@ -294,6 +294,75 @@ int main() {
           "room, and the measurements have the recogniser making words out of exactly that");
   }
 
+  std::printf("M18.4: what the armed rule saw, for the tuning line\n");
+  {
+    Reply r;  // the English transient, refused
+    learn_quiet(r);
+    r.feed(2.0f, 0.00036f);
+    const float at = r.t;
+    r.feed(0.18f, 0.0205f);
+    float ended = 0.0f;
+    {
+      // The frame that drops under the bar reports the run that just ended,
+      // and only that frame.
+      const aii::BargeVerdict v = r.p.frame(0.00036f, kGate, kSpk, kFrame);
+      r.t += kFrame;
+      check(v == aii::BargeVerdict::Holding, "the refused run leaves the rule holding");
+      ended = r.p.run_just_ended_sec();
+    }
+    check(near(ended, 0.18f, 0.025f), "**the 0.18 s run is reported on the frame it ends**");
+    r.feed(1.0f, 0.00036f);
+    check(r.p.run_just_ended_sec() == 0.0f, "and on no later frame");
+    check(near(r.p.longest_run_sec(), 0.18f, 0.025f), "it is the longest run seen");
+    check(near(r.p.longest_run_at_sec(), at, 0.025f), "and it began where it began");
+    check(near(r.p.armed_peak(), 0.0205f, 1e-6f), "the armed peak is the transient's level");
+    check(r.p.runs_noticed() == 1, "one run got past kBargeNoticeSec");
+    check(!r.fired(), "and none of that fired it");
+  }
+  {
+    Reply r;  // a keypress: over the bar, under the notice line, not reported
+    learn_quiet(r);
+    r.feed(2.0f, 0.00036f);
+    r.feed(0.06f, 0.05f);
+    r.p.frame(0.00036f, kGate, kSpk, kFrame);
+    check(r.p.run_just_ended_sec() == 0.0f,
+          "a 0.06 s click is under kBargeNoticeSec and not reported as a run");
+    check(r.p.runs_noticed() == 0, "nor counted");
+    check(near(r.p.longest_run_sec(), 0.06f, 0.025f), "though it is still the longest run");
+    check(near(r.p.armed_peak(), 0.05f, 1e-6f), "and the peak");
+  }
+  {
+    Reply r;  // the person, fired: the run is the one that fired and counts once
+    learn_quiet(r);
+    r.feed(3.5f, 0.0001f);
+    const float onset = r.t;
+    r.feed(0.72f, 0.0269f);
+    check(r.fired(), "the person fires");
+    check(near(r.p.longest_run_at_sec(), onset, 0.025f),
+          "**the longest run began at their first syllable**, which is the number the "
+          "tuning line reports against the fire time");
+    check(r.p.runs_noticed() == 1, "one run counted, fired or not");
+    check(r.p.run_just_ended_sec() == 0.0f, "a run that fires never 'ends'");
+  }
+  {
+    Reply r;  // the learning window's leak is not in the armed statistics
+    r.feed(1.2f, 0.0060f);  // a loudspeaker-sized leak learned
+    r.feed(2.0f, 0.0060f);  // and the same leak, now under the raised bar
+    check(r.p.armed_peak() == 0.0060f, "the armed peak is the leak, seen after arming");
+    check(r.p.longest_run_sec() == 0.0f, "nothing under the raised bar is a run");
+    check(r.p.runs_noticed() == 0, "and nothing is counted");
+    // 2.2 s, not 2.0: the rule armed at 1.0 s and the last 0.2 s of the first
+    // feed were already over the gate.
+    check(near(r.p.gate_longest_run_sec(), 2.2f, 0.05f),
+          "**but at the gate alone the leak is one unbroken run** -- the shadow number "
+          "that says the clamp is what kept this reply from silencing itself");
+    r.p.reset();
+    check(r.p.armed_peak() == 0.0f && r.p.longest_run_sec() == 0.0f &&
+              r.p.runs_noticed() == 0 && r.p.longest_run_at_sec() < 0.0f &&
+              r.p.gate_longest_run_sec() == 0.0f,
+          "reset clears all five");
+  }
+
   std::printf("\n%s\n", failures == 0 ? "all cases pass" : "FAILURES");
   return failures == 0 ? 0 : 1;
 }

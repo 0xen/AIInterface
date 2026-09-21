@@ -26,7 +26,9 @@ class AudioOut {
   AudioOut(const AudioOut&) = delete;
   AudioOut& operator=(const AudioOut&) = delete;
 
-  bool start(int sample_rate);
+  // The Windows default playback device unless `id` names one (M18.4,
+  // `audio/device_pick.h`).
+  bool start(int sample_rate, const ma_device_id* id = nullptr);
   void stop();
 
   // Called from the speech thread. The ring holds kBufferSeconds of audio; a

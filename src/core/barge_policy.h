@@ -135,6 +135,12 @@ inline constexpr float kBargeLearnSec = 1.00f;
 // median of 0.039-0.043, so this is three orders of magnitude clear of both.
 inline constexpr float kBargeSpeakerActive = 1e-5f;
 
+// M18.4. A run over the bar that lasts this long is worth a line in the tuning
+// log even though it did not fire: it is longer than a keypress and shorter
+// than the onset, which is the band where a person who was refused, and a
+// transient that nearly was not, both live. A third of the onset.
+inline constexpr float kBargeNoticeSec = 0.10f;
+
 // The leak estimate is a p99 of the learning frames, not a maximum, so that one
 // door slam during the first second cannot arm a threshold no voice will clear.
 // At 20 ms a second is only 50 frames, and a nearest-rank p99 of 50 samples *is*
@@ -164,6 +170,13 @@ class BargePolicy {
     leak_p99_ = 0.0f;
     learning_ = true;
     fired_ = false;
+    armed_peak_ = 0.0f;
+    longest_run_ = 0.0f;
+    longest_run_at_ = -1.0f;
+    runs_noticed_ = 0;
+    run_ended_ = 0.0f;
+    gate_run_ = 0.0f;
+    gate_longest_ = 0.0f;
   }
 
   // One captured frame.
@@ -209,7 +222,7 @@ class BargePolicy {
       return BargeVerdict::Holding;
     }
 
-    accumulate(mic_rms, threshold(gate), dt_sec);
+    accumulate(mic_rms, threshold(gate), gate, dt_sec);
     if (voiced_run_ >= kBargeOnsetSec) {
       fired_ = true;
       return BargeVerdict::Fire;
@@ -229,13 +242,57 @@ class BargePolicy {
   float voiced_run_sec() const { return voiced_run_; }
   float elapsed_sec() const { return elapsed_; }
 
+  // M18.4. What the armed rule saw, for the tuning line and for nothing else.
+  // "Did not fire" on its own cannot be acted on: the person tuning has to
+  // know whether nothing cleared the bar at all, or something cleared it for
+  // 0.2 s and was refused by the onset, or the bar itself sat above their
+  // voice. These four numbers are that distinction. They are collected only
+  // once the rule is armed, so the learning window's own leak is not in them.
+  //
+  //   armed_peak         the loudest frame since arming
+  //   longest_run_sec    the longest continuous run over the bar, fired or not
+  //   longest_run_at_sec reply time at which that run *began*
+  //   runs_noticed       runs that reached kBargeNoticeSec; a run that fires
+  //                      counts once, like any other
+  float armed_peak() const { return armed_peak_; }
+  float longest_run_sec() const { return longest_run_; }
+  float longest_run_at_sec() const { return longest_run_at_; }
+  int runs_noticed() const { return runs_noticed_; }
+  // Non-zero on exactly the frame a run of at least kBargeNoticeSec ended
+  // under the bar, and then its length; the caller's chance to log it. A run
+  // that fires never "ends" this way, because Fire latches.
+  float run_just_ended_sec() const { return run_ended_; }
+  // The longest continuous run over the *plain gate* since arming, ignoring
+  // the learned margin. Above kBargeOnsetSec means the reply's own voice would
+  // fire the rule without the clamp, so the clamp is what is keeping it quiet.
+  float gate_longest_run_sec() const { return gate_longest_; }
+
  private:
   // Continuous, so one frame under the line is the whole run gone. That is the
   // property being relied on: a transient is loud, but it is loud in bursts.
-  void accumulate(float mic_rms, float at, float dt_sec) {
-    if (mic_rms > at) {
-      voiced_run_ += dt_sec;
+  void accumulate(float mic_rms, float at, float gate, float dt_sec) {
+    run_ended_ = 0.0f;
+    if (mic_rms > armed_peak_) armed_peak_ = mic_rms;
+    // The shadow run: what the onset would have seen at the plain gate, with
+    // no learned margin at all. Never fires anything; it is the number that
+    // says whether the clamp is load-bearing on this configuration.
+    if (mic_rms > gate) {
+      gate_run_ += dt_sec;
+      if (gate_run_ > gate_longest_) gate_longest_ = gate_run_;
     } else {
+      gate_run_ = 0.0f;
+    }
+    if (mic_rms > at) {
+      if (voiced_run_ <= 0.0f) run_began_ = elapsed_ - dt_sec;
+      voiced_run_ += dt_sec;
+      if (voiced_run_ > longest_run_) {
+        longest_run_ = voiced_run_;
+        longest_run_at_ = run_began_;
+      }
+      if (voiced_run_ >= kBargeNoticeSec && voiced_run_ - dt_sec < kBargeNoticeSec)
+        ++runs_noticed_;
+    } else {
+      if (voiced_run_ >= kBargeNoticeSec) run_ended_ = voiced_run_;
       voiced_run_ = 0.0f;
     }
   }
@@ -261,6 +318,14 @@ class BargePolicy {
   float leak_p99_ = 0.0f;
   bool learning_ = true;
   bool fired_ = false;
+  float armed_peak_ = 0.0f;
+  float longest_run_ = 0.0f;
+  float longest_run_at_ = -1.0f;
+  float run_began_ = 0.0f;
+  int runs_noticed_ = 0;
+  float run_ended_ = 0.0f;
+  float gate_run_ = 0.0f;
+  float gate_longest_ = 0.0f;
 };
 
 // M18.3. How much of the watch's kept-back audio the fresh recogniser stream

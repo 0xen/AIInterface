@@ -6,7 +6,7 @@ namespace aii {
 
 MicIn::~MicIn() { close(); }
 
-bool MicIn::open(int sample_rate) {
+bool MicIn::open(int sample_rate, const ma_device_id* id) {
   if (open_) return true;
   // Allocated before the device exists, so nothing is allocated under a
   // running callback.
@@ -14,6 +14,7 @@ bool MicIn::open(int sample_rate) {
   ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
   cfg.capture.format = ma_format_f32;
   cfg.capture.channels = 1;
+  cfg.capture.pDeviceID = id;  // null is the default device
   cfg.sampleRate = sample_rate;
   cfg.dataCallback = &MicIn::callback;
   cfg.pUserData = this;
