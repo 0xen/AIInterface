@@ -8,6 +8,10 @@ Every milestone that merges adds an entry here in the same commit.
 ## 2026-09-21
 
 ### Added
+- **Ask what is new.** Say "what's new", "what changed", "新機能" or anything like them and
+  the assistant reads this file and tells you, then offers to go through any of it. It only
+  reads it on a turn that asks, and only once in a conversation, so it costs nothing the rest
+  of the time.
 - **Memory.** You can say "remember that ..." and the assistant keeps it between conversations,
   including after the reset button and after restarts. "Forget that" removes one. The list is a
   plain text file in the app's data folder, editable by hand, and it holds a few dozen lines;

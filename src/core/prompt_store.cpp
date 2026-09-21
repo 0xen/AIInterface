@@ -524,7 +524,12 @@ void PromptInjector::reset(const PromptStore& store) {
       z.id = n.id;
       z.title = n.title.empty() ? n.id : n.title;
       z.kind = n.kind == PromptKind::Project ? "project" : "skill";
-      z.body = trim_end(n.body);
+      // `body_text`, not `trim_end`: these bodies carry the same `<!-- … -->`
+      // headers the composed ones do -- the format marker among them -- and
+      // nothing stripped them here, so a lazy prompt used to arrive with its
+      // own explanation of itself attached. Composition has stripped them
+      // since M16.2; this path had been missed.
+      z.body = body_text(n.body);
       if (z.body.empty()) continue;  // nothing to inject
       add_trigger(&z.match, n.id);
       add_trigger(&z.match, n.title);
@@ -595,7 +600,11 @@ std::string PromptInjector::decorate(const std::string& user_text) {
   std::string out;
   for (const Lazy* z : take) {
     out += "<context name=\"" + xml_attr(z->title) + "\" kind=\"" + xml_attr(z->kind) + "\">\n";
-    out += z->body;
+    // M27. Substituted here rather than in `reset()`, so a slot holds what is
+    // true on the turn the prompt is pulled in and not what was true when the
+    // store was read -- several minutes earlier, on another thread, before the
+    // user had changed a setting.
+    out += trim_end(substitute_slots(z->body));
     out += "\n</context>\n\n";
     loaded_.push_back(z->id);
   }
@@ -835,6 +844,144 @@ void set_voices_digest(std::string text) { g_voices_digest = std::move(text); }
 void set_memory_digest(std::string text) { g_memory_digest = std::move(text); }
 void set_scripts_dir(std::string path) { g_scripts_dir = std::move(path); }
 
+// ------------------------------------------------- M27: the changelog
+
+fs::path changelog_path() {
+  // The override exists for the tests, which must be able to point at a
+  // fixture without a build tree beside them, and for anyone running the
+  // executable out of a folder the build did not write to.
+  if (const std::string over = env_or("AII_CHANGELOG", ""); !over.empty()) return fs::path(over);
+  return exe_dir() / "CHANGELOG.md";
+}
+
+namespace {
+
+// The sentence a missing file gets. See the header: not the empty string.
+const char kNoChangelog[] =
+    "There is no changelog file beside this app, so the list of recent changes is not available; "
+    "say so rather than describing changes you cannot see.";
+
+const char kChangelogTrimmed[] =
+    "(Only the most recent entries are shown here; older ones are in the app's changelog file.)";
+
+// Offsets of every line that begins a chunk. At section level that is a `## `
+// heading -- one release. At entry level it is a `### ` heading (Added, Fixed)
+// or a top-level `- ` bullet -- one change. Cutting anywhere else would cut a
+// sentence in half.
+std::vector<std::size_t> chunk_starts(const std::string& text, bool sections) {
+  std::vector<std::size_t> out;
+  std::size_t i = 0;
+  while (i <= text.size()) {
+    const bool sec = text.compare(i, 3, "## ") == 0;   // "### " does not match this
+    const bool sub = text.compare(i, 4, "### ") == 0;
+    const bool item = text.compare(i, 2, "- ") == 0;
+    if (sections ? sec : (sec || sub || item)) out.push_back(i);
+    const std::size_t nl = text.find('\n', i);
+    if (nl == std::string::npos) break;
+    i = nl + 1;
+  }
+  return out;
+}
+
+// Whole chunks from the first one, while they fit. `*dropped` says whether
+// anything after them was left behind, which the caller has to tell the model.
+std::string take_chunks(const std::string& text, const std::vector<std::size_t>& starts,
+                        std::size_t cap, bool* dropped) {
+  if (starts.empty()) return {};
+  const std::size_t from = starts.front();
+  std::size_t end = from;  // nothing taken yet
+  for (std::size_t k = 0; k < starts.size(); ++k) {
+    const std::size_t stop = k + 1 < starts.size() ? starts[k + 1] : text.size();
+    if (stop - from > cap) break;
+    end = stop;
+  }
+  *dropped = end < text.size();
+  return text.substr(from, end - from);
+}
+
+}  // namespace
+
+std::string changelog_digest(std::size_t cap) {
+  std::string text;
+  if (!read_file(changelog_path(), &text)) return kNoChangelog;
+
+  const std::vector<std::size_t> sections = chunk_starts(text, true);
+  if (sections.empty()) {
+    // No release headings at all. Either the file is empty, or somebody has
+    // rewritten it in a shape this does not know -- in which case the honest
+    // answer is the top of it, cut at an entry, rather than nothing.
+    const std::string whole = trim_end(text);
+    if (whole.empty()) return kNoChangelog;
+    bool dropped = false;
+    std::string out = take_chunks(whole, chunk_starts(whole, false), cap, &dropped);
+    if (out.empty()) {
+      out = whole.substr(0, std::min(cap, whole.size()));
+      dropped = out.size() < whole.size();
+    }
+    out = trim_end(std::move(out));
+    if (dropped) out += "\n\n" + std::string(kChangelogTrimmed);
+    return out;
+  }
+
+  bool dropped = false;
+  std::string out = take_chunks(text, sections, cap, &dropped);
+  if (out.empty()) {
+    // The newest release on its own is over the cap, so take whole entries
+    // from inside it. Whatever comes back is short of the whole file, so the
+    // note is unconditional here.
+    const std::size_t stop = sections.size() > 1 ? sections[1] : text.size();
+    const std::string first = text.substr(sections[0], stop - sections[0]);
+    out = take_chunks(first, chunk_starts(first, false), cap, &dropped);
+    if (out.empty()) out = first.substr(0, std::min(cap, first.size()));  // one huge entry
+    dropped = true;
+  }
+  out = trim_end(std::move(out));
+  if (dropped) out += "\n\n" + std::string(kChangelogTrimmed);
+  return out;
+}
+
+std::string substitute_slots(std::string text) {
+  // M3.14. Substituted before the conditionals are resolved, so the two never
+  // interact: `expand_tool_sections` looks for `{{#` and `{{^` and none of
+  // these is either, and by the time it runs there is no slot left for a
+  // future change to that parser to trip over. A store whose `settings.md` has
+  // been deleted or emptied simply has no slot and loses nothing.
+  //
+  // `trim_end` on every digest so that one ending in a newline does not leave
+  // a blank line the collapse pass would then have to reason about.
+  if (const size_t at = text.find("{{settings}}"); at != std::string::npos)
+    text.replace(at, std::strlen("{{settings}}"), trim_end(g_settings_digest));
+  // M10.5. Same rule, same place, same reason: a list of what exists on this
+  // machine cannot be written in the Markdown, and the prose around it stays
+  // in the Markdown where the user can edit it.
+  if (const size_t at = text.find("{{scripts}}"); at != std::string::npos)
+    text.replace(at, std::strlen("{{scripts}}"), trim_end(g_actions_digest));
+  // M13.3. Same rule once more, with one difference that is the whole point:
+  // this digest is usually empty, and an empty one leaves `voices.md` as a file
+  // containing nothing. The blank-run collapse removes the gap, so a user with
+  // no secondary voices pays nothing for a feature they have not set up.
+  if (const size_t at = text.find("{{voices}}"); at != std::string::npos)
+    text.replace(at, std::strlen("{{voices}}"), trim_end(g_voices_digest));
+  // M14. Unlike `{{voices}}` this digest is never empty -- `MemoryStore::digest()`
+  // returns a "nothing yet" sentence -- so the prose around it in `memory.md`
+  // always has a list to point at.
+  if (const size_t at = text.find("{{memories}}"); at != std::string::npos)
+    text.replace(at, std::strlen("{{memories}}"), trim_end(g_memory_digest));
+  // M27. Read from the file rather than from a digest set at launch, because
+  // unlike the four above it cannot change while the app runs: it ships with
+  // the binary. The read happens on the one turn that pulls the prompt in.
+  if (const size_t at = text.find("{{changelog}}"); at != std::string::npos)
+    text.replace(at, std::strlen("{{changelog}}"), trim_end(changelog_digest()));
+  // A path, not a digest, and the fallback is prose rather than nothing: an
+  // unset one still has to read as a sentence, because a human may be reading
+  // this file too.
+  if (const size_t at = text.find("{{scripts_dir}}"); at != std::string::npos)
+    text.replace(at, std::strlen("{{scripts_dir}}"),
+                 g_scripts_dir.empty() ? std::string("%APPDATA%\\AIInterface\\scripts")
+                                       : g_scripts_dir);
+  return text;
+}
+
 const std::string& system_prompt(const ToolPolicy& policy) {
   // Keyed on the policy rather than computed once and for all — see the
   // header. One process normally asks for one policy and gets the cached
@@ -870,44 +1017,10 @@ const std::string& system_prompt(const ToolPolicy& policy) {
   // because the policy is the *caller's*: the store knows the prose and this
   // function knows the app.
   std::vector<std::string> section_problems;
-  // M3.14. Substituted before the conditionals are resolved, so the two never
-  // interact: `expand_tool_sections` looks for `{{#` and `{{^` and this is
-  // neither, and by the time it runs there is no `{{settings}}` left for a
-  // future change to that parser to trip over. A store whose `settings.md`
-  // has been deleted or emptied simply has no slot and loses nothing.
-  std::string text = store.compose("system");
-  if (const size_t at = text.find("{{settings}}"); at != std::string::npos) {
-    // `trim_end` so a digest ending in a newline does not leave a blank line
-    // the collapse pass would then have to reason about.
-    text.replace(at, std::strlen("{{settings}}"), trim_end(g_settings_digest));
-  }
-  // M10.5. Same rule, same place, same reason: a list of what exists on this
-  // machine cannot be written in the Markdown, and the prose around it stays
-  // in the Markdown where the user can edit it.
-  if (const size_t at = text.find("{{scripts}}"); at != std::string::npos) {
-    text.replace(at, std::strlen("{{scripts}}"), trim_end(g_actions_digest));
-  }
-  // M13.3. Same rule once more, with one difference that is the whole point:
-  // this digest is usually empty, and an empty one leaves `voices.md` as a file
-  // containing nothing. The blank-run collapse below removes the gap, so a user
-  // with no secondary voices pays nothing for a feature they have not set up.
-  if (const size_t at = text.find("{{voices}}"); at != std::string::npos) {
-    text.replace(at, std::strlen("{{voices}}"), trim_end(g_voices_digest));
-  }
-  // M14. Same rule a fourth time. Unlike `{{voices}}` this digest is never
-  // empty -- `MemoryStore::digest()` returns a "nothing yet" sentence -- so
-  // the prose around it in `memory.md` always has a list to point at.
-  if (const size_t at = text.find("{{memories}}"); at != std::string::npos) {
-    text.replace(at, std::strlen("{{memories}}"), trim_end(g_memory_digest));
-  }
-  // A path, not a digest, and the fallback is prose rather than nothing: an
-  // unset one still has to read as a sentence, because a human may be reading
-  // this file too.
-  if (const size_t at = text.find("{{scripts_dir}}"); at != std::string::npos) {
-    text.replace(at, std::strlen("{{scripts_dir}}"),
-                 g_scripts_dir.empty() ? std::string("%APPDATA%\\AIInterface\\scripts")
-                                       : g_scripts_dir);
-  }
+  // The slots first and the conditionals second, which is the rule they were
+  // written under and which is now in one place for both paths that need it:
+  // see `substitute_slots`.
+  const std::string text = substitute_slots(store.compose("system"));
   std::string composed = expand_tool_sections(text, policy, &section_problems);
   for (const std::string& p : section_problems) std::fprintf(stderr, "[prompts] %s\n", p.c_str());
   // Appended, never substituted, and last so that it has the final word. Not

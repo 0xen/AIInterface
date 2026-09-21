@@ -98,7 +98,15 @@ struct PromptNode {
 // without re-heading the shipped files makes every shipped prompt fall back to
 // itself and log about it at every launch; re-heading the files without
 // bumping it here is the incident again, exactly.
-constexpr int kPromptFormat = 1;
+//
+// **2 (M27)** adds `{{changelog}}`, and adds slot substitution to the lazily
+// injected bodies, which until now were sent exactly as written. Both are
+// things a binary has to *do* rather than things it has to parse, and that is
+// precisely the case the number exists for: a format-1 binary handed
+// `project/changelog.md` would prepend a `<context>` block containing the
+// literal characters `{{changelog}}` and tell the user that was the list of
+// recent changes.
+constexpr int kPromptFormat = 2;
 
 // What a body declares, or -1 when it declares nothing. `<!-- aii-prompt-format: 2 -->`
 // is 2; a marker with no number after it, or one outside any comment, is -1,
@@ -374,6 +382,69 @@ void set_memory_digest(std::string text);
 // decorative. Left unset, the substitution falls back to the `%APPDATA%` form,
 // which is still the right answer for a human reading the prose.
 void set_scripts_dir(std::string path);
+
+// ------------------------------------------------- M27: what changed in this app
+//
+// `CHANGELOG.md`, in the directory holding the running executable, beside
+// `pre-prompt.md`. The user asked for "a changelog that the agent itself can
+// read"; this is the read side of it.
+//
+// **Beside the exe and not in `%APPDATA%`, and never seeded there.** Every
+// other prose file this app owns is copied into the user's folder because it
+// is theirs to edit. This one is not: it is a statement about *this binary*,
+// and a copy of it in a per-user folder is a copy that can describe a version
+// the user is not running. The exe's folder is the per-install root
+// (`user_paths.h` says so) and the build puts the file there, so the file and
+// the binary travel together and cannot disagree.
+//
+// **Lazy, not composed.** It is a few thousand characters that matter on the
+// handful of turns where somebody asks what is new, so it rides M3.3's project
+// injection: a `project` node named `changelog` whose body carries the
+// `{{changelog}}` slot, pulled in by the turn that mentions it and never sent
+// again for the life of the session. Composing it into the system prompt would
+// have cost every turn of every session about 750 tokens to answer a question
+// most sessions never ask.
+std::filesystem::path changelog_path();
+
+// About 3,000 characters — roughly 750 tokens, one turn, once per session.
+//
+// The number is chosen from the file rather than from a round figure: a
+// release section of this changelog runs 2,000-3,500 characters, so 3,000
+// takes the newest one whole in the ordinary case and is the point past which
+// a second section would usually not fit anyway. Larger buys older news that
+// nobody asked for; much smaller starts cutting the newest release in half,
+// and a list of changes that stops in the middle is worse than a shorter one
+// that says it is short.
+constexpr std::size_t kChangelogCap = 3000;
+
+// The most recent section or sections of that file, whole, within `cap`.
+//
+// **It cuts at a heading or an entry, never mid-sentence.** Sections are `## `
+// headings and entries are `### ` headings and top-level `- ` bullets; the
+// digest takes whole sections while they fit, and if even the newest section
+// does not, whole entries from inside it. Anything dropped is said so in one
+// line, because a list that silently stops is a list the model will summarise
+// as if it were complete.
+//
+// A missing or empty file yields one sentence saying there is no changelog
+// here, and not the empty string: the body around this slot tells the model it
+// is looking at the list of recent changes, and an empty slot under that
+// sentence invites it to invent the list.
+std::string changelog_digest(std::size_t cap = kChangelogCap);
+
+// Every `{{...}}` slot this app substitutes, in one pass: `{{settings}}`,
+// `{{scripts}}`, `{{voices}}`, `{{memories}}`, `{{scripts_dir}}` and
+// `{{changelog}}`.
+//
+// **One implementation because there are two paths now.** Until M27 the only
+// text with slots in it was the composed system prompt, and `system_prompt()`
+// did the substitutions inline. Lazily injected bodies went to the model
+// exactly as written, so the first prompt body to carry a slot would have sent
+// the model the slot. Both paths call this, and both call it *before*
+// `expand_tool_sections` can see the text, which is the rule the settings slot
+// was written under: this produces no `{{#` or `{{^`, and by the time the
+// section parser runs there is no slot left for a change to it to trip over.
+std::string substitute_slots(std::string text);
 
 // The composed system prompt for this process, computed once on first use:
 // the `system` graph, its conditional sections resolved against `policy`, then
