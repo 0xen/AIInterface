@@ -2316,12 +2316,24 @@ void VoiceSession::start_injected_turn(std::string sent, std::string fallback) {
 
 void VoiceSession::run_turn(std::string text, bool is_injected, std::string fallback,
                             std::vector<PendingTurn> rider) {
-  // Everything that goes *into* a turn is evidence that a folder was named;
-  // nothing that comes out of one ever is. `text` here is either what the user
-  // said or what the app composed on their behalf (a worker's own report, a
-  // pending list) -- never Claude's reply, which is where an invented folder
-  // would otherwise get to corroborate itself. See folder_evidence_.
-  note_folder_evidence(text);
+  // **Only what the user said is evidence that a folder was named** (M15.4,
+  // review finding 9). The comment that used to stand here said the opposite
+  // and was wrong: it argued that everything going *into* a turn is evidence
+  // because `text` is either what the user said or what the app composed on
+  // their behalf. The second half of that is the mistake. What the app composes
+  // for an injected turn is a worker's report, and a worker's report *contains
+  // the worker's own closing sentence* -- prose written by a Claude instance,
+  // wrapped by this app and handed back to the conversational instance. Passing
+  // it to note_folder_evidence let one model corroborate another's invented
+  // folder, and then its own on the next turn, which is precisely the loop
+  // `core/cwd_policy.h` says must not exist: model output is never evidence.
+  //
+  // The cost of getting this right is small and in the right direction. A
+  // worker that mentions a folder no longer lends that folder authority, so a
+  // spawn the model asks for off the back of a report lands in the app's own
+  // directory instead -- which is the safe answer this policy gives whenever it
+  // is unsure, and the user can still name the folder out loud.
+  if (!is_injected) note_folder_evidence(text);
   speech_->mark_new_reply();
   // The one place a reply becomes sound, and therefore the only place mute can
   // honestly be applied. Clearing the queue alone (what silence() used to do)
@@ -3503,7 +3515,13 @@ void VoiceSession::run_commands(const std::string& reply_text) {
   // per reply rather than per command, because a block may hold several spawns
   // and they are all answering the same turn.
   const std::string evidence = folder_evidence();
-  for (const Command& c : parse_commands(reply_text)) {
+  // M15.1. A block the model did not finish writing is refused rather than run,
+  // and the only place that is visible is here: the parser has no logger, so it
+  // hands back what it dropped and this is the caller that owes the log a line.
+  std::vector<std::string> problems;
+  const std::vector<Command> commands = parse_commands(reply_text, &problems);
+  for (const std::string& p : problems) log("[aii] " + p);
+  for (const Command& c : commands) {
     if (c.verb == "cancel") {
       // The id comes from the list this app gave the model a moment ago, so a
       // value it cannot read is the model inventing one. Logged, not spoken:

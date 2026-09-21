@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "json.hpp"
+#include "llm/json_shape.h"
 
 using json = nlohmann::json;
 
@@ -185,114 +186,145 @@ void ClaudeCodeClient::handle_line(const std::string& line) {
   } catch (...) {
     return;
   }
-  const std::string type = j.value("type", "");
-  std::lock_guard<std::mutex> lock(mutex_);
+  // **This runs on the reader thread, where an escaped exception is the end of
+  // the app** (M15.2, review finding 1). Only the parse above used to be
+  // guarded; every read after it was a `value()` or an `operator[]` that throws
+  // `type_error` on a top-level array, or on a field the CLI renamed, or on one
+  // whose type changed between versions -- and there is no handler above this
+  // frame, so `std::terminate` followed and the window vanished mid-sentence.
+  //
+  // Two layers, on purpose. The reads below now go through `member()` and
+  // `field()` (llm/json_shape.h), which make a missing or wrongly-typed field a
+  // fallback value instead of a throw; the try here is the backstop for the
+  // next edit that forgets. A line this reader cannot make sense of is one
+  // line of telemetry, so it is dropped and noted rather than being allowed to
+  // take the conversation with it.
+  try {
+    const std::string type = field<std::string>(j, "type", "");
+    std::lock_guard<std::mutex> lock(mutex_);
 
-  if (type == "system") {
-    if (j.value("subtype", "") == "init") {
-      session_id_ = j.value("session_id", "");
-      model_ = j.value("model", "");
-      // "claude-opus-5[1m]" -> "claude-opus-5": message_start reports the
-      // canonical id, while modelUsage is keyed by the decorated one.
-      canonical_model_ = model_;
-      if (const auto b = canonical_model_.find('['); b != std::string::npos)
-        canonical_model_.erase(b);
-      // Until a result event reports the real size, assume the documented
-      // default (the "[1m]" suffix is the CLI's own long-context marker).
-      if (ctx_window_ == 0)
-        ctx_window_ = model_.find("[1m]") != std::string::npos ? 1000000 : 200000;
-      cv_.notify_all();
-    }
-  } else if (type == "rate_limit_event") {
-    const auto& info = j["rate_limit_info"];
-    if (info.contains("unifiedWindows")) {
-      const auto& w = info["unifiedWindows"];
-      if (w.contains("five_hour")) {
-        util_5h_ = w["five_hour"].value("utilization", -1.0);
-        reset_5h_ = to_unix_seconds(w["five_hour"].value("resetsAt", 0LL));
+    if (type == "system") {
+      if (field<std::string>(j, "subtype", "") == "init") {
+        session_id_ = field<std::string>(j, "session_id", "");
+        model_ = field<std::string>(j, "model", "");
+        // "claude-opus-5[1m]" -> "claude-opus-5": message_start reports the
+        // canonical id, while modelUsage is keyed by the decorated one.
+        canonical_model_ = model_;
+        if (const auto b = canonical_model_.find('['); b != std::string::npos)
+          canonical_model_.erase(b);
+        // Until a result event reports the real size, assume the documented
+        // default (the "[1m]" suffix is the CLI's own long-context marker).
+        if (ctx_window_ == 0)
+          ctx_window_ = model_.find("[1m]") != std::string::npos ? 1000000 : 200000;
+        cv_.notify_all();
       }
-      if (w.contains("seven_day")) {
-        util_7d_ = w["seven_day"].value("utilization", -1.0);
-        reset_7d_ = to_unix_seconds(w["seven_day"].value("resetsAt", 0LL));
+    } else if (type == "rate_limit_event") {
+      const json& w = member(member(j, "rate_limit_info"), "unifiedWindows");
+      const json& h5 = member(w, "five_hour");
+      if (!h5.is_null()) {
+        util_5h_ = field<double>(h5, "utilization", -1.0);
+        reset_5h_ = to_unix_seconds(field<long long>(h5, "resetsAt", 0LL));
       }
-    }
-  } else if (type == "stream_event") {
-    const auto& ev = j["event"];
-    const std::string et = ev.value("type", "");
-    if (et == "content_block_delta") {
-      const auto& d = ev["delta"];
-      if (d.value("type", "") == "text_delta") {
-        std::string t = d.value("text", "");
-        if (turn_active_ && !turn_done_) {
-          current_.text += t;
+      const json& d7 = member(w, "seven_day");
+      if (!d7.is_null()) {
+        util_7d_ = field<double>(d7, "utilization", -1.0);
+        reset_7d_ = to_unix_seconds(field<long long>(d7, "resetsAt", 0LL));
+      }
+    } else if (type == "stream_event") {
+      const json& ev = member(j, "event");
+      const std::string et = field<std::string>(ev, "type", "");
+      if (et == "content_block_delta") {
+        const json& d = member(ev, "delta");
+        if (field<std::string>(d, "type", "") == "text_delta") {
+          std::string t = field<std::string>(d, "text", "");
+          if (turn_active_ && !turn_done_) {
+            current_.text += t;
+            if (on_delta_) on_delta_(t);
+          }
+        }
+      } else if (et == "content_block_start") {
+        // A tool call starting: report what the instance is about to do.
+        const json& b = member(ev, "content_block");
+        if (field<std::string>(b, "type", "") == "tool_use" && on_activity_) {
+          on_activity_(field<std::string>(b, "name", "tool"));
+        }
+      } else if (et == "message_start") {
+        const json& msg = member(ev, "message");
+        const json& u = member(msg, "usage");
+        if (!u.is_null()) {
+          current_.input_tokens = field<int>(u, "input_tokens", 0);
+          current_.cache_read_tokens = field<int>(u, "cache_read_input_tokens", 0);
+          // Everything handed to the model this request IS the context in use.
+          // Only the main model counts: the CLI also drives a small background
+          // model whose own message_start events pass through here.
+          const std::string mm = field<std::string>(msg, "model", "");
+          if (canonical_model_.empty() || mm == canonical_model_ || mm == model_) {
+            ctx_tokens_ = field<long long>(u, "input_tokens", 0LL) +
+                          field<long long>(u, "cache_read_input_tokens", 0LL) +
+                          field<long long>(u, "cache_creation_input_tokens", 0LL);
+          }
+        }
+      } else if (et == "message_delta") {
+        const json& d = member(ev, "delta");
+        if (member(d, "stop_reason").is_string())
+          current_.stop_reason = field<std::string>(d, "stop_reason", "");
+        const json& u = member(ev, "usage");
+        if (!u.is_null()) current_.output_tokens = field<int>(u, "output_tokens", 0);
+      }
+    } else if (type == "result") {
+      const bool is_error = field<bool>(j, "is_error", false);
+      // `result` is a string on every shape this app has seen, and reading it
+      // with `get<std::string>()` on the strength of that is what finding 1
+      // is about. It is still guarded by `is_string()` here, as it always was,
+      // and `field()` would have caught it anyway.
+      const json& res = member(j, "result");
+      if (current_.text.empty() && res.is_string()) {
+        // No partial deltas arrived (e.g. tools disabled and short reply): use the final text.
+        const std::string t = res.get<std::string>();
+        if (!is_error) {
+          current_.text = t;
           if (on_delta_) on_delta_(t);
         }
       }
-    } else if (et == "content_block_start") {
-      // A tool call starting: report what the instance is about to do.
-      const auto& b = ev.contains("content_block") ? ev["content_block"] : json::object();
-      if (b.value("type", "") == "tool_use" && on_activity_) {
-        on_activity_(b.value("name", "tool"));
+      if (is_error) {
+        current_.error = res.is_string() ? res.get<std::string>()
+                                         : field<std::string>(j, "subtype", "error");
+        last_error_ = current_.error;
       }
-    } else if (et == "message_start") {
-      if (ev.contains("message") && ev["message"].contains("usage")) {
-        const auto& u = ev["message"]["usage"];
-        current_.input_tokens = u.value("input_tokens", 0);
-        current_.cache_read_tokens = u.value("cache_read_input_tokens", 0);
-        // Everything handed to the model this request IS the context in use.
-        // Only the main model counts: the CLI also drives a small background
-        // model whose own message_start events pass through here.
-        const std::string mm = ev["message"].value("model", "");
-        if (canonical_model_.empty() || mm == canonical_model_ || mm == model_) {
-          ctx_tokens_ = u.value("input_tokens", 0) +
-                        u.value("cache_read_input_tokens", 0) +
-                        u.value("cache_creation_input_tokens", 0);
+      if (member(j, "total_cost_usd").is_number())
+        current_.cost_usd = field<double>(j, "total_cost_usd", -1.0);
+      // The CLI states the real context size per model it used; take the main
+      // model's so the guess made at init stops being used.
+      const json& usage_by_model = member(j, "modelUsage");
+      if (usage_by_model.is_object()) {
+        for (const auto& entry : usage_by_model.items()) {
+          const auto& mu = entry.value();
+          if (!mu.is_object()) continue;
+          if (entry.key() != model_ &&
+              field<std::string>(mu, "canonicalModel", std::string()) != canonical_model_)
+            continue;
+          const long long win = field<long long>(mu, "contextWindow", 0LL);
+          if (win > 0) ctx_window_ = win;
+          break;
         }
       }
-    } else if (et == "message_delta") {
-      if (ev.contains("delta") && ev["delta"].contains("stop_reason") && !ev["delta"]["stop_reason"].is_null())
-        current_.stop_reason = ev["delta"]["stop_reason"].get<std::string>();
-      if (ev.contains("usage")) current_.output_tokens = ev["usage"].value("output_tokens", 0);
-    }
-  } else if (type == "result") {
-    bool is_error = j.value("is_error", false);
-    if (current_.text.empty() && j.contains("result") && j["result"].is_string()) {
-      // No partial deltas arrived (e.g. tools disabled and short reply): use the final text.
-      std::string t = j["result"].get<std::string>();
-      if (!is_error) {
-        current_.text = t;
-        if (on_delta_) on_delta_(t);
+      if (current_.stop_reason.empty())
+        current_.stop_reason = field<std::string>(j, "stop_reason", std::string(""));
+      const json& u = member(j, "usage");
+      if (!u.is_null()) {
+        if (current_.output_tokens == 0) current_.output_tokens = field<int>(u, "output_tokens", 0);
+        if (current_.cache_read_tokens == 0)
+          current_.cache_read_tokens = field<int>(u, "cache_read_input_tokens", 0);
       }
+      current_.ok = !is_error;
+      turn_done_ = true;
+      cv_.notify_all();
     }
-    if (is_error) {
-      current_.error = j.contains("result") && j["result"].is_string() ? j["result"].get<std::string>()
-                                                                        : j.value("subtype", "error");
-      last_error_ = current_.error;
-    }
-    if (j.contains("total_cost_usd")) current_.cost_usd = j.value("total_cost_usd", -1.0);
-    // The CLI states the real context size per model it used; take the main
-    // model's so the guess made at init stops being used.
-    if (j.contains("modelUsage") && j["modelUsage"].is_object()) {
-      for (const auto& entry : j["modelUsage"].items()) {
-        const auto& mu = entry.value();
-        if (!mu.is_object()) continue;
-        if (entry.key() != model_ &&
-            mu.value("canonicalModel", std::string()) != canonical_model_)
-          continue;
-        const long long win = mu.value("contextWindow", 0LL);
-        if (win > 0) ctx_window_ = win;
-        break;
-      }
-    }
-    if (current_.stop_reason.empty()) current_.stop_reason = j.value("stop_reason", std::string(""));
-    if (j.contains("usage")) {
-      const auto& u = j["usage"];
-      if (current_.output_tokens == 0) current_.output_tokens = u.value("output_tokens", 0);
-      if (current_.cache_read_tokens == 0) current_.cache_read_tokens = u.value("cache_read_input_tokens", 0);
-    }
-    current_.ok = !is_error;
-    turn_done_ = true;
-    cv_.notify_all();
+  } catch (const std::exception& e) {
+    // Nowhere better to put this: the client has no logger, and `last_error_`
+    // is the text spoken when the child dies, which a malformed telemetry line
+    // has no business rewriting. stderr is where the CLI's own diagnostics go.
+    std::fprintf(stderr, "[claude] skipped a line of unexpected shape: %s\n", e.what());
   }
 }
 

@@ -20,10 +20,17 @@
 // **The crux: a supplied `cwd` cannot be trusted on its face.** "The user named
 // this folder" and "I made this folder up" look identical in a command line, so
 // honouring every supplied path would leave the hole exactly where it was. What
-// the app *can* check is whether the folder was ever actually said: the user's
-// own turns, and the app-authored text handed to the model (worker reports,
-// context blocks), are kept as evidence, and a supplied `cwd` is honoured only
-// when its path components appear there. `C:\Users\johng\Documents` off the back
+// the app *can* check is whether the folder was ever actually said: **the
+// user's own turns are the evidence, and nothing else is** (narrowed in M15.4,
+// review finding 9). It used to say "and the app-authored text handed to the
+// model (worker reports, context blocks)" as well, and that was a hole with a
+// respectable name on it: a worker report is app-authored only on the outside,
+// and the sentence inside it was written by another Claude instance. A worker
+// that invented a folder could corroborate it for the instance that spawned it,
+// which is the self-corroboration this policy exists to prevent, one process
+// further round. `VoiceSession::run_turn` now records evidence for
+// non-injected turns only. A supplied `cwd` is honoured only when its path
+// components appear there. `C:\Users\johng\Documents` off the back
 // of "look into the RX 7700 XT drivers" corroborates nothing and falls back to
 // the app's folder; `C:\github\Renderer` after the user said "the Renderer
 // checkout on github" corroborates and is honoured. The model's *own* replies

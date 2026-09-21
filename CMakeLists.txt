@@ -30,6 +30,7 @@ add_library(aii_core STATIC
   src/llm/claude_code_client.cpp
   src/tts/kokoro_tts.cpp
   src/tts/voicevox_tts.cpp
+  src/core/aii_block.cpp
   src/core/app_bus.cpp
   src/core/app_strings.cpp
   src/core/button_registry.cpp
@@ -137,6 +138,31 @@ if(AII_BUILD_TESTS)
   if(MSVC)
     target_compile_options(cwd_policy_test PRIVATE /utf-8 /W4)
   endif()
+
+  # ---- aii_block_test: what the assistant is allowed to ask this app to do ----
+  # M15.1. The reason this target can exist at all is that `aii_block.cpp` was
+  # split out of `worker_pool.cpp`, which owns a ClaudeCodeClient and so drags
+  # the whole process-spawning half of the app behind it; `schedule_test.cpp`
+  # says in as many words that this is why the parser had no test. It now needs
+  # text_util.cpp and nothing else.
+  add_executable(aii_block_test tests/aii_block_test.cpp src/core/aii_block.cpp
+                                src/core/text_util.cpp)
+  target_include_directories(aii_block_test PRIVATE src)
+  target_compile_definitions(aii_block_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(aii_block_test PRIVATE /utf-8 /W4)
+  endif()
+
+  # ---- json_shape_test: a line from the CLI that is not the shape expected --
+  # M15.2. Links aii_core because it drives a real ClaudeCodeClient -- one that
+  # is constructed and never started, so no `claude` process and no engine is
+  # loaded; the DLLs beside it are there only because aii_core imports them.
+  add_executable(json_shape_test tests/json_shape_test.cpp)
+  target_link_libraries(json_shape_test PRIVATE aii_core)
+  if(MSVC)
+    target_compile_options(json_shape_test PRIVATE /utf-8 /W4)
+  endif()
+  aii_copy_runtime_dlls(json_shape_test)
 
   # ---- memory_store_test: the file the user's "remember this" lands in ----
   # Same rule as cwd_policy_test: memory_store.cpp is standard-library-only, so

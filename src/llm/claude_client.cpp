@@ -7,6 +7,7 @@
 #include <string>
 
 #include "json.hpp"
+#include "llm/json_shape.h"
 
 using json = nlohmann::json;
 
@@ -58,33 +59,41 @@ void ClaudeClient::handle_event(const std::string& event, const std::string& dat
   } catch (...) {
     return;
   }
-  if (event == "content_block_delta") {
-    const auto& d = j["delta"];
-    if (d.value("type", "") == "text_delta") {
-      std::string t = d.value("text", "");
-      result.text += t;
-      if (on_delta) on_delta(t);
-    }
-  } else if (event == "message_start") {
-    if (j.contains("message") && j["message"].contains("usage")) {
-      const auto& u = j["message"]["usage"];
-      result.input_tokens = u.value("input_tokens", 0);
-      result.cache_read_tokens = u.value("cache_read_input_tokens", 0);
-    }
-  } else if (event == "message_delta") {
-    if (j.contains("delta")) {
-      const auto& d = j["delta"];
-      if (d.contains("stop_reason") && !d["stop_reason"].is_null())
-        result.stop_reason = d["stop_reason"].get<std::string>();
-      if (d.contains("stop_details") && !d["stop_details"].is_null()) {
-        const auto& sd = d["stop_details"];
-        result.error = "refusal: " + sd.value("category", std::string("?")) + " - " +
-                       sd.value("explanation", std::string(""));
+  // The same guard as `ClaudeCodeClient::handle_line` (M15.2, review finding
+  // 1), for the same reason: every read below used to throw `type_error` on an
+  // event of an unexpected shape, and this one runs on whichever thread called
+  // `stream()`. The reads now go through `member()` and `field()`; the try is
+  // the backstop. One dropped SSE event costs a number in a status line.
+  try {
+    if (event == "content_block_delta") {
+      const json& d = member(j, "delta");
+      if (field<std::string>(d, "type", "") == "text_delta") {
+        std::string t = field<std::string>(d, "text", "");
+        result.text += t;
+        if (on_delta) on_delta(t);
       }
+    } else if (event == "message_start") {
+      const json& u = member(member(j, "message"), "usage");
+      if (!u.is_null()) {
+        result.input_tokens = field<int>(u, "input_tokens", 0);
+        result.cache_read_tokens = field<int>(u, "cache_read_input_tokens", 0);
+      }
+    } else if (event == "message_delta") {
+      const json& d = member(j, "delta");
+      if (member(d, "stop_reason").is_string())
+        result.stop_reason = field<std::string>(d, "stop_reason", "");
+      const json& sd = member(d, "stop_details");
+      if (!sd.is_null()) {
+        result.error = "refusal: " + field<std::string>(sd, "category", std::string("?")) + " - " +
+                       field<std::string>(sd, "explanation", std::string(""));
+      }
+      const json& u = member(j, "usage");
+      if (!u.is_null()) result.output_tokens = field<int>(u, "output_tokens", 0);
+    } else if (event == "error") {
+      result.error = field<std::string>(member(j, "error"), "message", "unknown error");
     }
-    if (j.contains("usage")) result.output_tokens = j["usage"].value("output_tokens", 0);
-  } else if (event == "error") {
-    result.error = j.contains("error") ? j["error"].value("message", "unknown error") : "unknown error";
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "[claude-api] skipped an event of unexpected shape: %s\n", e.what());
   }
 }
 

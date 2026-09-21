@@ -102,17 +102,28 @@ CwdDecision resolve_worker_cwd(const std::string& asked, const std::string& evid
     d.why = "no cwd given, so the app's own folder";
     return d;
   }
-  // The app's own folder is always allowed, whoever wrote it down: it is the
-  // answer this policy would have given anyway.
-  if (normalize_for_match(asked) == normalize_for_match(app_dir())) {
-    d.dir = asked;
-    d.honoured = true;
-    d.why = "cwd is the app's own folder";
-    return d;
-  }
+  // The absolute check comes first, and it has to (M15.3, review finding 10).
+  // The shortcut below matches on `normalize_for_match`, which strips every
+  // separator and every case distinction -- that is exactly what makes it able
+  // to recognise a dictated path, and it also makes `C:\github\AI\Interface`
+  // and a drive-relative `C:github\AIInterface` match the app's own folder. It
+  // used to hand those back verbatim, so a string that is not a directory at
+  // all, or one that names a different directory, became a child's working
+  // directory because it happened to normalise the same.
   if (!std::filesystem::path(asked).is_absolute()) {
     d.dir = app_dir();
     d.why = "cwd=\"" + asked + "\" is not an absolute path, so the app's own folder";
+    return d;
+  }
+  // The app's own folder is always allowed, whoever wrote it down: it is the
+  // answer this policy would have given anyway. And it is `app_dir()` that is
+  // returned, not the spelling that was asked for -- the match is a loose one,
+  // so the two are not the same string, and this function's job is to name a
+  // directory rather than to repeat what the model wrote.
+  if (normalize_for_match(asked) == normalize_for_match(app_dir())) {
+    d.dir = app_dir();
+    d.honoured = true;
+    d.why = "cwd is the app's own folder";
     return d;
   }
   if (!cwd_was_named(asked, evidence)) {
