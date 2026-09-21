@@ -1,6 +1,7 @@
 #include "avatar_def.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <array>
 #include <cmath>
 #include <fstream>
@@ -970,11 +971,17 @@ fs::path avatar_user_root() {
 
 fs::path seed_avatar_definition(const std::string& name) {
   const fs::path dest = avatar_user_root() / name;
-  // The `recursive | update_existing` rule, and the story of the one-way door
-  // it replaced (636f24e), both moved to `core/user_paths.h` when M3's prompt
-  // store needed exactly the same thing from aii_core. A second copy of a rule
-  // this project has already got wrong once was the thing to avoid.
-  seed_tree(fs::path(AII_ASSETS_DIR) / "avatars" / name, dest);
+  // The seeding rule, and the story of the two ways this project has already
+  // got it wrong (636f24e's one-way door, then the mtime rule that overwrote
+  // hand edits), both live in `core/user_paths.h`; they moved there when M3's
+  // prompt store needed exactly the same thing from aii_core. A second copy of
+  // that rule was the thing to avoid. What is left here is saying out loud when
+  // it declined to overwrite a frame the user redrew.
+  std::string seed_err;
+  std::vector<std::string> seed_notes;
+  if (!seed_tree(fs::path(AII_ASSETS_DIR) / "avatars" / name, dest, &seed_err, &seed_notes))
+    std::fprintf(stderr, "[avatar] %s\n", seed_err.c_str());
+  for (const std::string& note : seed_notes) std::fprintf(stderr, "[avatar] %s\n", note.c_str());
   return dest;  // a missing source is the loader's miss to report, not ours
 }
 

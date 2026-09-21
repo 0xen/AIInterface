@@ -166,10 +166,12 @@ class PromptStore {
 // *user* wants. Emptying `pre-prompt.md` opts out cleanly; deleting it re-seeds
 // it on the next launch.
 //
-// **Seeded when missing, and only when missing** — unlike `seed_tree`'s
-// refresh-if-newer rule. That rule is right for assets the app reads and the
-// user rarely touches; this is a file the user is being invited to rewrite, and
-// a rebuild must never overwrite what they wrote. The cost of the strict rule
+// **Seeded when missing, and only when missing** — simpler than `seed_tree`,
+// which compares bytes against its manifest and offers a changed shipped file
+// as `<name>.new`. That is right for assets the app reads and the user rarely
+// touches; this is a file the user is being invited to rewrite, so it is not
+// even offered a newer version, and a rebuild must never overwrite what they
+// wrote. The cost of the strict rule
 // (a shipped edit not reaching an existing install) is the 636f24e trap, but it
 // does not bite here: the exe directory is created fresh by every install, and
 // the shipped text is a starting point rather than something the app depends on.

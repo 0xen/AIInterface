@@ -103,12 +103,18 @@ bool PromptStore::load(std::string* error) {
   problems_.clear();
   const fs::path dir = root();
   // Seeded every start, not only when the directory is absent — see
-  // `seed_tree`, and commit 636f24e for what the other rule cost.
+  // `seed_tree`, and commit 636f24e for what the other rule cost. Since M16 it
+  // decides from the bytes, so a prompt the user has rewritten survives a pull
+  // and the shipped replacement turns up beside it as `<name>.new`; that is
+  // what `seed_notes` carries, and it belongs in `problems()` where the rest of
+  // the store's complaints are already shown and logged.
   std::string seed_err;
-  if (!seed_tree(fs::path(AII_ASSETS_DIR) / "prompts", dir, &seed_err)) {
+  std::vector<std::string> seed_notes;
+  if (!seed_tree(fs::path(AII_ASSETS_DIR) / "prompts", dir, &seed_err, &seed_notes)) {
     problems_.push_back(seed_err);  // not fatal: an existing store still loads
     if (error) *error = seed_err;
   }
+  for (const std::string& note : seed_notes) problems_.push_back(note);
 
   std::string text;
   if (!read_file(dir / "graph.json", &text)) {

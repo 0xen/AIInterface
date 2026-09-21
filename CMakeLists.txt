@@ -149,6 +149,19 @@ if(AII_BUILD_TESTS)
     target_compile_options(memory_store_test PRIVATE /utf-8 /W4)
   endif()
 
+  # ---- seed_tree_test: what happens to a file the user has edited ----
+  # user_paths.cpp is standard-library-plus-Win32, so the seeding rule is
+  # checked against real directories under %TEMP% with no engine, no window
+  # and -- the point of a test about %APPDATA% -- no %APPDATA%. The one symbol
+  # it borrows, `env_or`, the test supplies itself rather than dragging in
+  # config.cpp, which pulls the language table and the tool policy behind it.
+  add_executable(seed_tree_test tests/seed_tree_test.cpp src/core/user_paths.cpp)
+  target_include_directories(seed_tree_test PRIVATE src)
+  target_compile_definitions(seed_tree_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(seed_tree_test PRIVATE /utf-8 /W4)
+  endif()
+
   # ---- handoff_policy_test: when the session hands over to itself ----
   # Header-only, so there is no source but the test: `core/handoff_policy.h` is
   # M3.15's whole firing rule, lifted out of VoiceSession for exactly this --

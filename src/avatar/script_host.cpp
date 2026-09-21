@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <system_error>
@@ -52,17 +53,23 @@ ScriptHost::ScriptHost() = default;
 ScriptHost::~ScriptHost() { stop(); }
 
 std::vector<std::string> ScriptHost::discover(const std::vector<std::string>& extra) {
-  // The seed runs on every start, scripting or not, and refreshes only files
-  // the shipped copy is newer than. That is the installer rule this project
-  // already got wrong once: an "only if the directory is missing" seed is a
-  // one-way door, and a better example authored later would never reach a
-  // machine that had run the app before (636f24e). The example lands in
+  // The seed runs on every start, scripting or not, and refreshes a file only
+  // when the shipped bytes changed and the installed ones are still the bytes
+  // this app put there. That is the installer rule this project already got
+  // wrong twice: an "only if the directory is missing" seed is a one-way door
+  // and a better example authored later would never reach a machine that had
+  // run the app before (636f24e), while the mtime rule that replaced it would
+  // overwrite an example the user had edited (M16). The example lands in
   // `scripts\examples\`, which is *not* scanned, so seeding it does not turn
   // Python on for anybody.
   const fs::path root = scripts_root();
   std::error_code ec;
   fs::create_directories(root, ec);
-  seed_tree(fs::path(AII_ASSETS_DIR) / "scripts", root, nullptr);
+  std::string seed_err;
+  std::vector<std::string> seed_notes;
+  if (!seed_tree(fs::path(AII_ASSETS_DIR) / "scripts", root, &seed_err, &seed_notes))
+    std::fprintf(stderr, "[scripts] %s\n", seed_err.c_str());
+  for (const std::string& note : seed_notes) std::fprintf(stderr, "[scripts] %s\n", note.c_str());
 
   std::vector<std::string> out;
   for (const std::string& p : extra) {
