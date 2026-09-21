@@ -70,6 +70,14 @@ Every milestone that merges adds an entry here in the same commit.
 - Duplicate code: one colour parser instead of three, one text decoder instead of three, one
   shared base under the six extra windows.
 
+- **The recogniser now reports how sure it was** of each utterance, from the decoder's own
+  scores. Not yet used to decide anything; the measurements say it catches two thirds of the
+  cases where a Japanese word came out as invented English, and never fires on ordinary English.
+- **A pinned-language mode** for the recogniser that notices when you switched to the other
+  language and goes back for it. Built and measured, not switched on: for a Japanese word
+  inside an English sentence it is slightly worse than what ships today, and a pin without the
+  recovery is the worst setting measured, so the app keeps automatic detection for now.
+
 ### Investigated
 - **The recogniser's own language tag** was recovered by patching sherpa-onnx and measured. It
   is useless: it never appears on the utterances where it would matter. The pinned build stays.
