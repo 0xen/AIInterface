@@ -2203,6 +2203,22 @@ int main(int /*argc*/, char** /*argv*/) {
         // is reported once, the same way a failed avatar reload is.
         settings.tick(dt);
         if (settings.take_status_change()) log::warn("{}", settings.status());
+        // M20.3. The digest the system prompt carries, recomposed on every
+        // save that landed — the same rule `set_actions_digest` follows below
+        // when a script file changes, and for the same reason. It was composed
+        // once at launch, so every setting changed after that reached the next
+        // child as the value it used to have: the assistant would be told the
+        // wake phrase was empty, or the timeout sixty seconds, by a prompt
+        // built after the user had changed both.
+        //
+        // Only the composed-at-launch copy, again like the actions digest: a
+        // system prompt is a launch argument and the running child's cannot be
+        // rewritten. What this fixes is the *restart*, which is what finding
+        // 18 was about.
+        if (settings.take_saved()) {
+            aii::set_settings_digest(aii::settings_digest(settings));
+            log::info("[settings] saved; the digest a new instance is given is recomposed");
+        }
         // A toolbar button the agent asked for and did not get. Refusals happen
         // on the turn thread and are deliberately never spoken (config.cpp), so
         // this line is the only record that one was turned away.

@@ -222,6 +222,12 @@ bool Settings::take_status_change() {
   return was;
 }
 
+bool Settings::take_saved() {
+  const bool was = saved_;
+  saved_ = false;
+  return was;
+}
+
 void Settings::note(std::string line, bool ok) {
   // M20.1. Saying the same thing again is not news. This is what lets a
   // failed save be retried on a backoff without the retry turning into a log
@@ -303,6 +309,7 @@ void Settings::save() {
 
   // M20.1. The only path that owes the file nothing.
   dirty_ = false;
+  saved_ = true;
   // A recovery is said out loud, because the failure was: the panel has been
   // showing an amber line for however long the directory was unwritable, and
   // it has to be able to go back to being quiet. A run that never failed

@@ -316,6 +316,13 @@ class Settings {
   // user should see and it is not a warning.
   bool save_failed() const { return !status_ok_ && dirty_; }
 
+  // M20.3. True once per save that actually reached the disk. The frame loop
+  // recomposes the settings digest on it, the same way it recomposes the
+  // actions digest when `ActionStore::tick` reports a change — so a restart
+  // hands the new child the values the file has now and not the ones it had
+  // at launch.
+  bool take_saved();
+
   // M3.14. What is actually on disk under `section`/`key`, rendered the way
   // the file spells it, or an empty string when the file does not name it.
   //
@@ -344,6 +351,8 @@ class Settings {
   // M20.1. Zero while nothing has failed, which is also how `tick()` tells
   // the debounce from the backoff.
   float retry_wait_ = 0.0f;
+  // M20.3. Set by a save that reached the disk, cleared by take_saved().
+  bool saved_ = false;
   std::string status_;
   bool status_ok_ = false;
   bool status_new_ = false;
