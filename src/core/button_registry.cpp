@@ -42,16 +42,6 @@ bool valid_id(const std::string& id) {
   });
 }
 
-// Windows wants UTF-16 and the registry holds UTF-8. Shared by the shell call
-// only, so it stays here rather than growing a header.
-std::wstring widen(const std::string& s) {
-  if (s.empty()) return {};
-  const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-  std::wstring w(static_cast<size_t>(n), L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), w.data(), n);
-  return w;
-}
-
 }  // namespace
 
 ButtonRegistry& ButtonRegistry::instance() {

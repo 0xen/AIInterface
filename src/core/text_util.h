@@ -70,6 +70,21 @@ bool has_speakable_content(const std::string& utf8);
 std::string strip_markdown(const std::string& utf8);
 std::string trim(const std::string& s);
 
+// M26.3, finding 35. UTF-8 to UTF-16, for the Windows API calls that will not
+// take anything else: a command line, a path, a shell verb. This app holds
+// every string as UTF-8 and Windows holds none of them that way, so the
+// conversion happens at the edge, and until now it happened at three edges
+// with three copies of the same six lines -- `claude_code_client.cpp`,
+// `claude_client.cpp` and `button_registry.cpp`. A project that has already
+// paid once for a byte-level UTF-8 bug should have one of these.
+//
+// Empty in, empty out. Invalid UTF-8 is passed to `MultiByteToWideChar`
+// without `MB_ERR_INVALID_CHARS`, so a bad byte becomes U+FFFD rather than
+// failing the call: these strings are paths and labels on their way to the
+// OS, and a conversion that returned nothing would turn a mangled path into
+// no path at all, which is the harder fault to read.
+std::wstring widen(const std::string& utf8);
+
 // Bound a string to `max_bytes` **bytes** without ever leaving a half-written
 // UTF-8 sequence behind. The cap is a byte cap on purpose: it is what protects
 // the fixed buffers and the wire format downstream, and a character cap would

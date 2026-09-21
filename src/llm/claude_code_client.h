@@ -116,17 +116,34 @@ class ClaudeCodeClient final : public LlmClient {
 
  private:
   void reader_loop();
+  // M26.1, finding 17. The child's stderr, on its own thread. Everything the
+  // CLI has to say that is not stream-json arrives here -- "not signed in",
+  // an unknown `--model`, a node crash -- and before this it was handed
+  // `GetStdHandle(STD_ERROR_HANDLE)` and forgotten about, so a child that died
+  // on any of them surfaced as "claude process exited: " with nothing after
+  // the colon. A second thread rather than overlapped reads on the one reader:
+  // the reader is blocked in `ReadFile` on stdout for minutes at a time, which
+  // is exactly when stderr most needs draining, and a full stderr pipe would
+  // block the child rather than merely delay a diagnostic.
+  void stderr_loop();
   bool write_line(const std::string& line);
+  // What to say about a child that has gone. Call with `mutex_` held: it reads
+  // `stderr_tail_`. Returns "exit code 3: not signed in", or just the code, or
+  // an empty string if neither is known yet.
+  std::string exit_detail() const;
 
   Options opt_;
   HANDLE process_ = nullptr;
   HANDLE stdin_w_ = nullptr;
   HANDLE stdout_r_ = nullptr;
+  HANDLE stderr_r_ = nullptr;
   std::thread reader_;
+  std::thread err_reader_;
 
   mutable std::mutex mutex_;
   std::condition_variable cv_;
   bool exited_ = false;
+  bool err_done_ = false;  // M26.1: the stderr pipe has closed; the tail is all of it
   bool killed_ = false;  // M17.3: kill() has been here; the child is not coming back
   bool turn_done_ = false;
   bool turn_active_ = false;
@@ -135,6 +152,12 @@ class ClaudeCodeClient final : public LlmClient {
 
   ActivityFn on_activity_;
   std::string session_id_, model_, last_error_;
+  // M26.1: the last few kilobytes the child wrote to stderr. Bounded because a
+  // CLI that has decided to be noisy can write for as long as it likes and
+  // this is diagnostic text held for the length of a session; the tail is the
+  // useful end of it anyway, since what killed the child is the last thing it
+  // said.
+  std::string stderr_tail_;
   double util_5h_ = -1, util_7d_ = -1;
   long long reset_5h_ = 0, reset_7d_ = 0;
   // Context-window fill: the newest message_start from the MAIN model (the

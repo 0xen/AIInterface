@@ -60,6 +60,21 @@ aii::ClaudeCodeClient::Options stand_in() {
   return o;
 }
 
+// M26.1. The other stand-in: built beside this test (see CMakeLists.txt), it
+// writes a sign-in failure on stderr and exits 3.
+std::string stderr_stand_in_exe() {
+  char buf[MAX_PATH] = {0};
+  const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+  std::string self(buf, n);
+  const size_t slash = self.find_last_of("\\/");
+  return (slash == std::string::npos ? std::string() : self.substr(0, slash + 1)) +
+         "stderr_stand_in.exe";
+}
+
+bool contains(const std::string& haystack, const std::string& needle) {
+  return haystack.find(needle) != std::string::npos;
+}
+
 double seconds_since(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
@@ -193,6 +208,66 @@ int main() {
     check(reported == aii::WorkerPool::State::Paused,
           std::string("and it reports as stopped, not failed (") +
               aii::worker_state_name(reported) + ")");
+  }
+
+  // ---- 4. a child that dies saying why ----------------------------------
+  //
+  // M26.1, finding 17. `start()` used to report "claude exited during startup:"
+  // and stop there, because the child's stderr was handed to a console handle
+  // the windowed app does not own and nothing in this class ever read it. The
+  // stand-in prints a banner, then the reason, then exits 3; both the code and
+  // the reason have to reach the string the caller is given, and the banner
+  // must not crowd them out.
+  std::printf("\nstart() on a child that fails the way a signed-out CLI fails\n");
+  {
+    aii::ClaudeCodeClient::Options o = stand_in();
+    o.exe = stderr_stand_in_exe();
+    aii::ClaudeCodeClient client(o);
+    std::string err;
+    const bool started = client.start(&err);
+    check(!started, "start() fails, as it did before");
+    std::printf("       the error string is: \"%s\"\n", err.c_str());
+    check(contains(err, "not signed in: run `claude /login`"),
+          "and it now carries what the child said on stderr");
+    check(contains(err, "exit code 3"), "and the exit code");
+    check(!err.empty() && err.back() != ':' && err.back() != ' ',
+          "and does not trail off after a colon, which was the finding");
+  }
+
+  // ---- 5. the command line, and what a failure to start is allowed to say --
+  //
+  // M26.2, findings 20 and 21. Nothing here starts a child: both cases fail
+  // before `CreateProcessW` or in it.
+  std::printf("\nstart() failures say the exe and the size, not the prompt\n");
+  {
+    // A system prompt past Windows' 32,767-character command-line ceiling.
+    // Before this the call reached CreateProcessW and came back "the parameter
+    // is incorrect", which names neither the cause nor the cure.
+    aii::ClaudeCodeClient::Options o = stand_in();
+    o.system_prompt = std::string(40000, 'x');
+    aii::ClaudeCodeClient client(o);
+    std::string err;
+    check(!client.start(&err), "a system prompt over the ceiling fails to start");
+    std::printf("       the error string is: \"%s\"\n", err.c_str());
+    check(contains(err, "32767"), "and says what the limit is");
+    check(err.find(o.system_prompt) == std::string::npos,
+          "without quoting the prompt back at the user");
+    check(err.size() < 300, "in a sentence that fits a status line (" +
+                                std::to_string(err.size()) + " characters)");
+  }
+  {
+    // Finding 20 proper: the exe does not exist, so CreateProcessW fails, and
+    // the message used to append the entire command line -- prompt included --
+    // to the status line and the log.
+    aii::ClaudeCodeClient::Options o = stand_in();
+    o.exe = "C:\\no\\such\\claude.exe";
+    o.system_prompt = "SECRET-PROMPT-MARKER and twenty kilobytes more";
+    aii::ClaudeCodeClient client(o);
+    std::string err;
+    check(!client.start(&err), "a missing exe fails to start");
+    std::printf("       the error string is: \"%s\"\n", err.c_str());
+    check(contains(err, o.exe), "the error names the exe");
+    check(!contains(err, "SECRET-PROMPT-MARKER"), "and does not carry the system prompt");
   }
 
   std::printf(failures ? "\nFAILED: %d\n" : "\nall passed\n", failures);

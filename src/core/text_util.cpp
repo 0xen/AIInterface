@@ -1,5 +1,12 @@
 #include "core/text_util.h"
 
+// The one thing in this file that is not standard library, and the reason is
+// that `widen()` is a Windows conversion and there is no portable spelling of
+// it. It costs the standalone tests that compile this file nothing: every one
+// of them is an MSVC target already and `MultiByteToWideChar` lives in
+// kernel32, which links by default.
+#include <windows.h>
+
 #include <cctype>
 
 namespace aii {
@@ -140,6 +147,16 @@ std::string trim(const std::string& s) {
   while (a < b && (unsigned char)s[a] <= ' ') ++a;
   while (b > a && (unsigned char)s[b - 1] <= ' ') --b;
   return s.substr(a, b - a);
+}
+
+std::wstring widen(const std::string& utf8) {
+  if (utf8.empty()) return {};
+  const int n = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()),
+                                    nullptr, 0);
+  if (n <= 0) return {};
+  std::wstring w(static_cast<std::size_t>(n), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), w.data(), n);
+  return w;
 }
 
 std::string clip_utf8(std::string s, std::size_t max_bytes) {
