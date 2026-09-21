@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include "stt/confidence.h"
+
 struct SherpaOnnxOnlineRecognizer;
 struct SherpaOnnxOnlineStream;
 
@@ -62,6 +64,12 @@ class Recognizer {
   };
   const RedecodeInfo& last_redecode() const { return redecode_info_; }
 
+  // M23.1. How sure the decoder was about the utterance it just returned,
+  // read out of the `ys_probs` field of the result's JSON. `stt/confidence.h`
+  // holds the struct, the parse and the arithmetic, and says what the numbers
+  // mean and what a caller may not do with them.
+  const Confidence& last_confidence() const { return confidence_; }
+
  private:
   void create_stream();
   void destroy_stream();
@@ -84,6 +92,7 @@ class Recognizer {
   bool audio_usable_ = true;
   bool redecode_ = true;
   RedecodeInfo redecode_info_;
+  Confidence confidence_;
 };
 
 }  // namespace aii

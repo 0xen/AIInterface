@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "sherpa-onnx/c-api/c-api.h"
+#include "stt/confidence.h"
 
 namespace aii {
 namespace {
@@ -180,6 +181,7 @@ void Recognizer::begin() {
   audio_.clear();
   audio_usable_ = true;
   redecode_info_ = RedecodeInfo{};
+  confidence_ = Confidence{};
 }
 
 void Recognizer::feed(const float* samples, int n, int rate) {
@@ -229,6 +231,7 @@ std::string Recognizer::finish() {
   std::string text;
   std::vector<std::string> tokens;
   std::vector<float> times;
+  std::vector<float> probs;
   const SherpaOnnxOnlineRecognizerResult* r = SherpaOnnxGetOnlineStreamResult(recognizer_, stream_);
   if (r) {
     text = r->text ? r->text : "";
@@ -238,9 +241,12 @@ std::string Recognizer::finish() {
         times.push_back(r->timestamps[i]);
       }
     }
+    probs = ys_probs_from_json(r->json);
   }
   SherpaOnnxDestroyOnlineRecognizerResult(r);
   destroy_stream();
+
+  confidence_ = confidence_from_probs(probs);  // M23.1, see stt/confidence.h
 
   redecode_info_ = RedecodeInfo{};
   // Only with both languages on. Pinned to one language the deletion does not
