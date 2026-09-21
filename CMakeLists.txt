@@ -266,6 +266,44 @@ if(AII_BUILD_TESTS)
     target_compile_options(app_strings_test PRIVATE /utf-8 /W4)
   endif()
 
+  # ---- sentence_splitter_test: what the speech queue is handed, and when ----
+  # M22.1, finding 26. Same rule as clip_utf8_test: sentence_splitter.cpp and
+  # text_util.cpp are standard-library-only, so the early-chunk rule, the fence
+  # handling and -- the case the probe behind commit 20676d5 never left behind
+  # -- `break_now`'s promise to keep the stream state are all checked with no
+  # engine, no window and no CLI.
+  add_executable(sentence_splitter_test tests/sentence_splitter_test.cpp
+                                        src/core/sentence_splitter.cpp
+                                        src/core/text_util.cpp)
+  target_include_directories(sentence_splitter_test PRIVATE src)
+  target_compile_definitions(sentence_splitter_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(sentence_splitter_test PRIVATE /utf-8 /W4)
+  endif()
+
+  # ---- text_util_test: which voice says what --------------------------------
+  # M22.1, finding 26. `split_by_script` is one of the four places that decide
+  # "is this Japanese?" (docs/HANDOFF-2026-09-21.md) and the only one with no
+  # test; `clip_utf8` keeps its own target above and is not repeated there.
+  add_executable(text_util_test tests/text_util_test.cpp src/core/text_util.cpp)
+  target_include_directories(text_util_test PRIVATE src)
+  target_compile_definitions(text_util_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(text_util_test PRIVATE /utf-8 /W4)
+  endif()
+
+  # ---- app_bus_test: the bounds on a channel whose input is hostile ---------
+  # M22.1, finding 26. app_bus.cpp needs json.hpp and text_util.cpp and nothing
+  # else, so every cap, the inbox's drop-the-newest rule and the promise that
+  # `post` is never fatal are checked without the script host anywhere near it.
+  add_executable(app_bus_test tests/app_bus_test.cpp src/core/app_bus.cpp
+                              src/core/text_util.cpp)
+  target_include_directories(app_bus_test PRIVATE src third_party)
+  target_compile_definitions(app_bus_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(app_bus_test PRIVATE /utf-8 /W4)
+  endif()
+
   # ---- worker_report_test: what a finished worker hands to the speech path ----
   # Links aii_core because it drives a real WorkerPool and a real Claude Code
   # child; no engines are loaded, so the DLLs beside it are only there because
