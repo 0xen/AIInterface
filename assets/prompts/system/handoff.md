@@ -1,3 +1,4 @@
+<!-- aii-prompt-format: 1 -->
 <!--
 M3.15. The note the outgoing session writes to the one that replaces it.
 
