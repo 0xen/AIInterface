@@ -296,6 +296,13 @@ void BusBindings::on_script(const BusMessage& m, std::string* error) {
       switch (why) {
         case ActionRefusal::NoSuchAction: reason = "no such action"; break;
         case ActionRefusal::NotArmed: reason = "not armed by the user yet"; break;
+        // M19.1. The name was armed; these bytes were not. Said as its own
+        // reason rather than folded into "not armed", because the two ask the
+        // user for different things: one is a first yes, the other is a second
+        // look at a file that changed behind the first one.
+        case ActionRefusal::Changed:
+          reason = "the file changed since it was armed; it must be confirmed again";
+          break;
         case ActionRefusal::AuthoringOff: reason = "scripts.authoring is off"; break;
         case ActionRefusal::PastCap: reason = "past the action limit"; break;
         default: break;

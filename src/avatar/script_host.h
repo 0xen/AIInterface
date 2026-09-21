@@ -40,14 +40,29 @@
 // stops draining coalesces to a fixed handful of queued events, and a script
 // that floods `post()` is dropped at `kBusInboxMax` with a counted refusal.
 //
-// **It cannot take the app down.** Each user script runs inside the generated
-// bootstrap's `try`, on its own thread; a syntax error, a missing import or a
-// throw on the first event is caught, its last line goes to the Scripts
-// section of the settings surface through `script.status`, and the other
-// scripts carry on. If the whole host refuses to start, that is a line there
-// too, and the app runs exactly as it does today — the built-in policy is
-// what runs when nothing is scripting, and the app is fully expressive with
-// scripting switched off.
+// **A script that fails does not take the app down; a script that means to,
+// can.** Those are two different claims and only the first one is enforced.
+// Each user script runs inside the generated bootstrap's `try`, on its own
+// thread; a syntax error, a missing import or a throw on the first event is
+// caught, its last line goes to the Scripts section of the settings surface
+// through `script.status`, and the other scripts carry on. If the whole host
+// refuses to start, that is a line there too, and the app runs exactly as it
+// does today — the built-in policy is what runs when nothing is scripting, and
+// the app is fully expressive with scripting switched off.
+//
+// What is *not* true, and was written here until M19.2, is that a script
+// cannot end the process. This is a full CPython in this process's address
+// space: `os._exit()` ends it immediately, `ctypes` reaches any address the
+// app can, and no interpreter flag in reach would change that. **The boundary
+// is the bus vocabulary, not the interpreter** — what `aii` exposes is a fixed
+// set of verbs with no `run a command` and no `register a command button`, and
+// that is what bounds what a script is *offered*. It bounds nothing about what
+// a script that goes outside the module can reach.
+//
+// Which is why M19.2 put a consent gate in front of the directory
+// (`action_store.h`, finding 12): the honest containment for "this file can do
+// anything this app can do" is the user having said yes to that file, not a
+// promise about what Python will refuse.
 //
 // **It cannot hold the avatar.** Every script request is a lease with a
 // ceiling (`AvatarController::kScriptLeaseMax`), and the user taking the

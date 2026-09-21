@@ -56,6 +56,7 @@
 // its own actions**: `remove()` has exactly one caller and it is a button.
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -83,6 +84,22 @@ struct Action {
   // it: the whole hazard of a thing that is quietly not there is that nobody
   // can say how it went missing.
   bool in_digest = true;
+  // M19.1. The bytes as they are on disk *now* — FNV-1a of the whole file, in
+  // hex. Consent is recorded against this value at arm time, so "armed" means
+  // "armed, with these bytes", not "armed, this filename". Empty when the file
+  // could not be read, and that counts as a difference rather than a match: an
+  // action whose body cannot be seen is not one to run.
+  //
+  // It is a change detector and cannot be anything more: whatever can rewrite
+  // the action can rewrite `_armed.json` beside it. What it closes is the
+  // honest-mistake shape of finding 11 — a worker at bypass, a seed on
+  // upgrade, or the assistant rewriting the body behind a yes the user gave to
+  // different code.
+  std::string fingerprint;
+  // M19.2. True for a policy script (a `.py` directly in `scripts\`), which is
+  // announced and gated through the same queue but is **not callable by
+  // name**. Never true for a row in `all()`.
+  bool policy = false;
 };
 
 // Why a call was refused, so the caller can say the right sentence. Every one
@@ -92,6 +109,7 @@ enum class ActionRefusal {
   None,
   NoSuchAction,   // the model made the name up
   NotArmed,       // exists, found, listed — the user has not said yes yet
+  Changed,        // armed once, but these are not the bytes that were armed
   AuthoringOff,   // `scripts.authoring` is off, so nothing here loads
   PastCap,        // discovered, but past kActionDigestMax
   HostUnavailable // Python could not be started
@@ -168,14 +186,69 @@ class ActionStore {
 
   static std::filesystem::path actions_root();
 
+  // ---- policy scripts (M19.2) -----------------------------------------
+  //
+  // A `.py` directly in `scripts\` is a *policy*: `ScriptHost` hands it to the
+  // interpreter at launch and it runs for the life of the app. Until M19.2
+  // that happened with no consent of any kind — finding 12 — while an action,
+  // which is far smaller in what it can do, needed a click.
+  //
+  // It is gated here rather than in a second registry of its own because the
+  // machinery an announcement needs already exists in this class and nowhere
+  // else: one persisted seen/armed record, one queue, and one window that
+  // draws the queue. A policy therefore appears in `awaiting()` like anything
+  // else, is armed by the same button, and is bound to its bytes by the same
+  // fingerprint. What it never gets is a row in `all()` or `digest()`, so
+  // nothing the model can say resolves to one.
+  //
+  // **Answered once, and re-asked when the bytes change.** There is no Scripts
+  // row for a policy to be armed from later, so an editor saving the file is
+  // the way back into the queue after a dismissal — which is also exactly the
+  // event that should re-ask.
+  //
+  // The key `policy:<stem>` is what the consent record and the queue carry, so
+  // an action and a policy of the same filename are two separate decisions.
+  static std::string policy_key(const std::string& name);
+  // True when this exact file, by name and by bytes, has been armed. Static
+  // and read-only: `ScriptHost::discover()` runs before any store exists and
+  // needs the answer without one. It reads the same `_armed.json` this class
+  // writes, and it is the only other reader.
+  static bool policy_allowed(const std::filesystem::path& file);
+
  private:
   void rescan();
   void write_armed() const;
   void read_armed();
 
+  // Only ever resolves a row in `actions_`. `find()` also answers for a policy
+  // so that the approval window can draw one; `check()` must not, or a name in
+  // an ```aii``` block could reach a file that was never meant to be callable.
+  const Action* find_action(const std::string& name) const;
+  void rescan_policies();
+  // Is this row armed, given what is recorded and what is on disk right now?
+  // Not a query: a record whose fingerprint no longer matches is *revoked*
+  // here — written back, put into the queue and said out loud — because the
+  // scan is the only place that has both halves of the comparison.
+  bool resolve_armed(Action* a);
+  void note_changed(const Action& a);
+
   std::vector<Action> actions_;
+  // M19.2. The policy scripts sitting directly in `scripts\`, which run for
+  // the whole life of the app from the next launch. They are held apart from
+  // `actions_` on purpose: they share the consent queue and nothing else. They
+  // are not in `all()`, not in `digest()`, and `check()` cannot resolve one.
+  std::vector<Action> policies_;
   std::vector<std::string> awaiting_;
-  std::vector<std::string> armed_names_;  // the persisted set, by name
+  // The persisted consent set: key -> the fingerprint that was armed. An
+  // action's key is its name; a policy's is `policy:<name>`, so the two can
+  // never be confused for one another in a file that outlives both.
+  //
+  // A value may be empty, which is what a record written before M19.1 looks
+  // like. The first scan that sees one adopts the file's current bytes and
+  // says so in the log: an upgrade cannot invent an arm-time it never had, and
+  // re-asking about every action the user already answered tells them nothing
+  // they could act on.
+  std::map<std::string, std::string> armed_;
   // Every action the user has answered about, armed or not. Persisted beside
   // the armed set and in the same file, because "have I been asked" and "did I
   // say yes" are two different facts and only one of them is consent.
