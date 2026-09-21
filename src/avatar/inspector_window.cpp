@@ -21,6 +21,7 @@
 
 #include "imgui_layer.h"
 #include "inspector_list.h"
+#include "tool_window_core.h"
 
 using namespace rend;
 
@@ -159,22 +160,17 @@ LRESULT CALLBACK inspectorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_P
 
 }  // namespace
 
-struct InspectorWindow::Impl {
-  std::unique_ptr<platform::PresentationTarget> target;
-  std::unique_ptr<gpu::Swapchain> swapchain;
-  std::unique_ptr<gpu::FrameRenderer> renderer;
-  std::unique_ptr<ImGuiLayer> ui;
+// M24.3. The target, swapchain, renderer, ImGui layer, HWND, client size and
+// subclass flag are ToolWindowCore's, along with the order they are created
+// and destroyed in. Everything below is this window's own, and `s.renderer`,
+// `s.hwnd`, `s.w` and `s.h` still mean what they meant.
+struct InspectorWindow::Impl : ToolWindowCore {
   std::unique_ptr<InspectorInput> input;
-  HWND hwnd = nullptr;
-  // The live client size, which the swapchain follows.
-  unsigned w = 0;
-  unsigned h = 0;
   // What the caller should remember. Updated from the OS every frame the
   // window is in its ordinary state - never while it is minimised or
   // maximised, so that a restored window comes back where the user last
   // actually placed it rather than at the work area's full size.
   InspectorGeometry remembered;
-  bool subclassed = false;
 };
 
 std::unique_ptr<InspectorWindow> InspectorWindow::create(platform::IPlatformBackend& backend,
@@ -192,65 +188,42 @@ std::unique_ptr<InspectorWindow> InspectorWindow::create(platform::IPlatformBack
   self->p_ = std::make_unique<Impl>();
   Impl& s = *self->p_;
   s.remembered = wanted;
-  s.w = wanted.w;
-  s.h = wanted.h;
 
   // Decorated: a frame to drag, a corner to pull and a close box, all of which
-  // the OS draws and none of which this app has to. The size handed over is
-  // the *client* size, which is what the swapchain is about to be made at.
-  auto t = backend.createTarget({
-      .style = platform::WindowStyle::Decorated,
-      .size = {s.w, s.h},
-      .title = "AIInterface - prompt inspector",
-      .vulkan = false,
-  });
-  if (!t) return fail("createTarget: " + t.error().message);
-  s.target = std::move(t).value();
-  s.hwnd = static_cast<HWND>(backend.nativeWindowHandle(*s.target));
-  if (!s.hwnd) return fail("no HWND for the inspector");
-
-  // Position through Win32 - allowed, and only the *size* is not (see the
-  // header). SWP_NOSIZE for exactly that reason: the size the backend holds is
-  // the one it just created the window at, and this call must not touch it.
-  // Not topmost, and not forced to the foreground either: createTarget's own
-  // SDL_ShowWindow has already brought it up, which is what a window the user
-  // just asked for should do, and is the opposite of the strip's rule.
-  SetWindowPos(s.hwnd, HWND_TOP, s.remembered.x, s.remembered.y, 0, 0,
-               SWP_NOSIZE | SWP_NOOWNERZORDER);
-
-  auto sc = gpu::Swapchain::create(instance, device,
-                                   {
-                                       .nativeSurface = s.hwnd,
-                                       .width = s.w,
-                                       .height = s.h,
-                                       .transparent = false,  // a page of text needs no alpha
-                                       .vsync = false,  // vsynced chains on one thread divide fps
-                                   });
-  if (!sc) return fail("swapchain: " + sc.error().message);
-  s.swapchain = std::move(sc).value();
-
-  auto fr = gpu::FrameRenderer::create(device, *s.swapchain);
-  if (!fr) return fail("frame renderer: " + fr.error().message);
-  s.renderer = std::move(fr).value();
+  // the OS draws and none of which this app has to.
+  //
+  // Position, not NoActivate: this window is not topmost and is not held back
+  // from the foreground either. createTarget's own SDL_ShowWindow has already
+  // brought it up, which is what a window the user just asked for should do,
+  // and is the opposite of the strip's rule.
+  //
   // The panel's own background, so the third window reads as part of the same
   // application. Linearised: the swapchain view is sRGB and the hardware
   // encodes whatever is written, clear values included.
-  {
-    const ImVec4 bg = ui_color(0.086f, 0.094f, 0.118f, 1.0f);
-    s.renderer->setClearColor(bg.x, bg.y, bg.z, bg.w);
+  const ImVec4 bg = ui_color(0.086f, 0.094f, 0.118f, 1.0f);
+  std::string err;
+  if (!s.open(backend, instance, device, font_px,
+              {
+                  .style = platform::WindowStyle::Decorated,
+                  .title = "AIInterface - prompt inspector",
+                  .w = wanted.w,
+                  .h = wanted.h,
+                  .transparent = false,  // a page of text needs no alpha
+                  .placement = ToolWindowPlacement::Position,
+                  .x = wanted.x,
+                  .y = wanted.y,
+                  .clear_r = bg.x,
+                  .clear_g = bg.y,
+                  .clear_b = bg.z,
+                  .clear_a = bg.w,
+                  .noun = "inspector",
+              },
+              &err)) {
+    return fail(err);
   }
 
-  std::string err;
-  s.ui = ImGuiLayer::create(device, s.swapchain->imageFormat(), font_px, &err);
-  if (!s.ui) return fail("imgui: " + err);
-  ImGuiLayer* layer = s.ui.get();
-  s.renderer->setOverlayRecorder([layer](gpu::CommandContext& cmd) { layer->end_frame(cmd); });
-
   s.input = std::make_unique<InspectorInput>();
-  s.subclassed =
-      SetWindowSubclass(s.hwnd, inspectorProc, 1, reinterpret_cast<DWORD_PTR>(s.input.get())) !=
-      FALSE;
-  if (!s.subclassed) {
+  if (!s.subclass(inspectorProc, s.input.get())) {
     // Not survivable, unlike the strip's: without the subclass the close box
     // reaches SDL, which reports an identityless CloseRequested, which quits
     // the whole application. A window whose X button kills the app is worse
@@ -264,22 +237,13 @@ std::unique_ptr<InspectorWindow> InspectorWindow::create(platform::IPlatformBack
 
 InspectorWindow::~InspectorWindow() {
   if (!p_) return;
-  Impl& s = *p_;
-  // The strip's order, and for the strip's reasons: the subclass comes off the
-  // HWND before the InspectorInput it points at is freed, the GPU is waited on,
-  // and the renderer's callbacks are dropped before the objects they capture.
-  // This runs on every close, not only at exit, so it is what decides whether
-  // opening and closing the window fifty times leaks fifty ImGui contexts.
-  if (s.hwnd && s.subclassed) RemoveWindowSubclass(s.hwnd, inspectorProc, 1);
-  if (s.renderer) {
-    s.renderer->waitIdle();
-    s.renderer->setOverlayRecorder(nullptr);
-    s.renderer->setFramePasses({});
-  }
-  s.ui.reset();
-  s.renderer.reset();
-  s.swapchain.reset();
-  s.target.reset();
+  // The strip's order, and for the strip's reasons — now ToolWindowCore's, and
+  // stated there. Called explicitly rather than left to ~Impl so that the line
+  // below is logged after the window is actually gone, which is what a run
+  // reads to see that it went. This runs on every close, not only at exit, so
+  // it is what decides whether opening and closing the window fifty times
+  // leaks fifty ImGui contexts.
+  p_->shutdown();
   log::info("inspector: window torn down");
 }
 

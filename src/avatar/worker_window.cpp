@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "imgui_layer.h"
+#include "tool_window_core.h"
 #include "pixel_icons.h"
 
 using namespace rend;
@@ -167,18 +168,13 @@ std::string age_text(float seconds) {
 
 }  // namespace
 
-struct WorkerWindow::Impl {
-  std::unique_ptr<platform::PresentationTarget> target;
-  std::unique_ptr<gpu::Swapchain> swapchain;
-  std::unique_ptr<gpu::FrameRenderer> renderer;
-  std::unique_ptr<ImGuiLayer> ui;
+// M24.3. The shell — target, swapchain, renderer, ImGui layer, HWND, client
+// size, subclass — and the order it is created and destroyed in belong to
+// ToolWindowCore. Everything below is this window's own.
+struct WorkerWindow::Impl : ToolWindowCore {
   std::unique_ptr<WorkerInput> input;
-  HWND hwnd = nullptr;
   std::string worker;
-  unsigned w = 0;
-  unsigned h = 0;
   WorkerGeometry remembered;
-  bool subclassed = false;
   // The last row the pool gave us, kept so the window can go on saying
   // something true after the worker has been removed from the pool.
   WorkerPool::Snapshot last;
@@ -206,64 +202,41 @@ std::unique_ptr<WorkerWindow> WorkerWindow::create(platform::IPlatformBackend& b
   Impl& s = *self->p_;
   s.worker = worker;
   s.remembered = wanted;
-  s.w = wanted.w;
-  s.h = wanted.h;
   s.last.name = worker;
 
   // Decorated: a frame to drag, a corner to pull and a close box, all of which
-  // the OS draws. The size handed over is the *client* size, which is what the
-  // swapchain is about to be made at.
-  auto t = backend.createTarget({
-      .style = platform::WindowStyle::Decorated,
-      .size = {s.w, s.h},
-      .title = "AIInterface - worker: " + worker,
-      .vulkan = false,
-  });
-  if (!t) return fail("createTarget: " + t.error().message);
-  s.target = std::move(t).value();
-  s.hwnd = static_cast<HWND>(backend.nativeWindowHandle(*s.target));
-  if (!s.hwnd) return fail("no HWND for the worker window");
-
-  // Position through Win32 — allowed, and only the *size* is not. SWP_NOSIZE
-  // for exactly that reason: the size the backend holds is the one it just
-  // created the window at, and this call must not touch it. A window rect that
-  // grows while the client rect stays put is how this project clipped three
-  // approved fixes in a row.
-  SetWindowPos(s.hwnd, HWND_TOP, s.remembered.x, s.remembered.y, 0, 0,
-               SWP_NOSIZE | SWP_NOOWNERZORDER);
-
-  auto sc = gpu::Swapchain::create(instance, device,
-                                   {
-                                       .nativeSurface = s.hwnd,
-                                       .width = s.w,
-                                       .height = s.h,
-                                       .transparent = false,  // a page of text needs no alpha
-                                       .vsync = false,  // vsynced chains on one thread divide fps
-                                   });
-  if (!sc) return fail("swapchain: " + sc.error().message);
-  s.swapchain = std::move(sc).value();
-
-  auto fr = gpu::FrameRenderer::create(device, *s.swapchain);
-  if (!fr) return fail("frame renderer: " + fr.error().message);
-  s.renderer = std::move(fr).value();
-  {
-    // The panel's own background, so this reads as part of the same
-    // application. Linearised: the swapchain view is sRGB and the hardware
-    // encodes whatever is written, clear values included.
-    const ImVec4 bg = ui_color(0.086f, 0.094f, 0.118f, 1.0f);
-    s.renderer->setClearColor(bg.x, bg.y, bg.z, bg.w);
+  // the OS draws. Position rather than NoActivate: this is the restore path,
+  // and SWP_NOSIZE inside the core is not optional — a window rect that grows
+  // while the client rect stays put is how this project clipped three approved
+  // fixes in a row.
+  //
+  // The panel's own background, so this reads as part of the same application.
+  // Linearised: the swapchain view is sRGB and the hardware encodes whatever
+  // is written, clear values included.
+  const ImVec4 bg = ui_color(0.086f, 0.094f, 0.118f, 1.0f);
+  std::string err;
+  if (!s.open(backend, instance, device, font_px,
+              {
+                  .style = platform::WindowStyle::Decorated,
+                  .title = "AIInterface - worker: " + worker,
+                  .w = wanted.w,
+                  .h = wanted.h,
+                  .transparent = false,  // a page of text needs no alpha
+                  .placement = ToolWindowPlacement::Position,
+                  .x = wanted.x,
+                  .y = wanted.y,
+                  .clear_r = bg.x,
+                  .clear_g = bg.y,
+                  .clear_b = bg.z,
+                  .clear_a = bg.w,
+                  .noun = "worker window",
+              },
+              &err)) {
+    return fail(err);
   }
 
-  std::string err;
-  s.ui = ImGuiLayer::create(device, s.swapchain->imageFormat(), font_px, &err);
-  if (!s.ui) return fail("imgui: " + err);
-  ImGuiLayer* layer = s.ui.get();
-  s.renderer->setOverlayRecorder([layer](gpu::CommandContext& cmd) { layer->end_frame(cmd); });
-
   s.input = std::make_unique<WorkerInput>();
-  s.subclassed =
-      SetWindowSubclass(s.hwnd, workerProc, 1, reinterpret_cast<DWORD_PTR>(s.input.get())) != FALSE;
-  if (!s.subclassed) {
+  if (!s.subclass(workerProc, s.input.get())) {
     // Not survivable: without the subclass the close box reaches SDL, which
     // reports an identityless CloseRequested, which quits the whole
     // application. A window whose X kills the app is worse than no window.
@@ -277,21 +250,11 @@ std::unique_ptr<WorkerWindow> WorkerWindow::create(platform::IPlatformBackend& b
 WorkerWindow::~WorkerWindow() {
   if (!p_) return;
   Impl& s = *p_;
-  // The strip's order, for the strip's reasons: the subclass comes off the HWND
-  // before the WorkerInput it points at is freed, the GPU is waited on, and the
-  // renderer's callbacks are dropped before the objects they capture. This runs
-  // on every close, not only at exit, and with N of these windows it is what
-  // decides whether opening and closing them leaks an ImGui context each time.
-  if (s.hwnd && s.subclassed) RemoveWindowSubclass(s.hwnd, workerProc, 1);
-  if (s.renderer) {
-    s.renderer->waitIdle();
-    s.renderer->setOverlayRecorder(nullptr);
-    s.renderer->setFramePasses({});
-  }
-  s.ui.reset();
-  s.renderer.reset();
-  s.swapchain.reset();
-  s.target.reset();
+  // The strip's order, for the strip's reasons — ToolWindowCore's now, and
+  // stated there. This runs on every close, not only at exit, and with N of
+  // these windows it is what decides whether opening and closing them leaks an
+  // ImGui context each time.
+  s.shutdown();
   log::info("worker window: {} torn down", s.worker);
 }
 

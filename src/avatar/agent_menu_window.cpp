@@ -22,6 +22,7 @@
 
 #include "core/text_util.h"
 #include "imgui_layer.h"
+#include "tool_window_core.h"
 
 using namespace rend;
 
@@ -140,21 +141,14 @@ LRESULT CALLBACK agentMenuProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_P
 
 }  // namespace
 
-struct AgentMenuWindow::Impl {
-  std::unique_ptr<platform::PresentationTarget> target;
-  std::unique_ptr<gpu::Swapchain> swapchain;
-  std::unique_ptr<gpu::FrameRenderer> renderer;
-  std::unique_ptr<ImGuiLayer> ui;
+// M24.3. The shell is ToolWindowCore's; everything below is this menu's own.
+struct AgentMenuWindow::Impl : ToolWindowCore {
   std::unique_ptr<AgentMenuInput> input;
-  HWND hwnd = nullptr;
   HWND prev_foreground = nullptr;
-  unsigned w = kWinW;
-  unsigned h = kMinH;
   int x = 0, y = 0;
   int anchor_x = 0;
   int anchor_y = 0;
   bool shown = false;
-  bool subclassed = false;
 };
 
 std::unique_ptr<AgentMenuWindow> AgentMenuWindow::create(platform::IPlatformBackend& backend,
@@ -178,55 +172,34 @@ std::unique_ptr<AgentMenuWindow> AgentMenuWindow::create(platform::IPlatformBack
   // Borderless: see the header. A title bar is a title-bar drag and a
   // title-bar drag is a Windows modal loop on the thread that pumps this app's
   // frames.
-  auto t = backend.createTarget({
-      .style = platform::WindowStyle::Borderless,
-      .size = {s.w, s.h},
-      .title = "AIInterface - finished agents",
-      .vulkan = false,
-  });
-  if (!t) return fail("createTarget: " + t.error().message);
-  s.target = std::move(t).value();
-  s.hwnd = static_cast<HWND>(backend.nativeWindowHandle(*s.target));
-  if (!s.hwnd) return fail("no HWND for the agent menu");
-
-  // createTarget ends in SDL_ShowWindow, which *activates*. A style added
-  // afterwards cannot undo an activation that already happened, so it is
-  // hidden, restyled, and shown again with SW_SHOWNOACTIVATE from draw() once
-  // it is where it belongs — the sidebar's sequence, for the sidebar's
-  // measured reason.
-  ShowWindow(s.hwnd, SW_HIDE);
-  const LONG_PTR ex = GetWindowLongPtrW(s.hwnd, GWL_EXSTYLE);
-  SetWindowLongPtrW(s.hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
-
-  auto sc = gpu::Swapchain::create(instance, device,
-                                   {
-                                       .nativeSurface = s.hwnd,
-                                       .width = s.w,
-                                       .height = s.h,
-                                       .transparent = false,
-                                       .vsync = false,
-                                   });
-  if (!sc) return fail("swapchain: " + sc.error().message);
-  s.swapchain = std::move(sc).value();
-
-  auto fr = gpu::FrameRenderer::create(device, *s.swapchain);
-  if (!fr) return fail("frame renderer: " + fr.error().message);
-  s.renderer = std::move(fr).value();
-  {
-    const ImVec4 bg = ui_color(0.086f, 0.094f, 0.118f, 1.0f);
-    s.renderer->setClearColor(bg.x, bg.y, bg.z, bg.w);
+  //
+  // NoActivate: createTarget ends in SDL_ShowWindow, which *activates*, and a
+  // style added afterwards cannot undo an activation that already happened, so
+  // the window is hidden, restyled, and shown again with SW_SHOWNOACTIVATE
+  // from draw() once it is where it belongs — the sidebar's sequence, for the
+  // sidebar's measured reason.
+  const ImVec4 bg = ui_color(0.086f, 0.094f, 0.118f, 1.0f);
+  std::string err;
+  if (!s.open(backend, instance, device, font_px,
+              {
+                  .style = platform::WindowStyle::Borderless,
+                  .title = "AIInterface - finished agents",
+                  .w = kWinW,
+                  .h = kMinH,
+                  .transparent = false,
+                  .placement = ToolWindowPlacement::NoActivate,
+                  .clear_r = bg.x,
+                  .clear_g = bg.y,
+                  .clear_b = bg.z,
+                  .clear_a = bg.w,
+                  .noun = "agent menu",
+              },
+              &err)) {
+    return fail(err);
   }
 
-  std::string err;
-  s.ui = ImGuiLayer::create(device, s.swapchain->imageFormat(), font_px, &err);
-  if (!s.ui) return fail("imgui: " + err);
-  ImGuiLayer* layer = s.ui.get();
-  s.renderer->setOverlayRecorder([layer](gpu::CommandContext& cmd) { layer->end_frame(cmd); });
-
   s.input = std::make_unique<AgentMenuInput>();
-  s.subclassed = SetWindowSubclass(s.hwnd, agentMenuProc, 1,
-                                   reinterpret_cast<DWORD_PTR>(s.input.get())) != FALSE;
-  if (!s.subclassed) {
+  if (!s.subclass(agentMenuProc, s.input.get())) {
     // Fatal for the reason it is fatal in every other window here: without the
     // subclass a close reaches SDL, and SDL's close is identityless and quits
     // the application. A menu that can kill the app is worse than no menu.
@@ -239,16 +212,8 @@ std::unique_ptr<AgentMenuWindow> AgentMenuWindow::create(platform::IPlatformBack
 AgentMenuWindow::~AgentMenuWindow() {
   if (!p_) return;
   Impl& s = *p_;
-  if (s.hwnd && s.subclassed) RemoveWindowSubclass(s.hwnd, agentMenuProc, 1);
-  if (s.renderer) {
-    s.renderer->waitIdle();
-    s.renderer->setOverlayRecorder(nullptr);
-    s.renderer->setFramePasses({});
-  }
-  s.ui.reset();
-  s.renderer.reset();
-  s.swapchain.reset();
-  s.target.reset();
+  // The sidebar's order, stated in ToolWindowCore.
+  s.shutdown();
   log::info("agent menu: torn down");
 }
 

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "imgui_layer.h"
+#include "tool_window_core.h"
 #include "pixel_icons.h"
 
 using namespace rend;
@@ -113,20 +114,16 @@ LRESULT CALLBACK sidebarProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR
 
 }  // namespace
 
-struct SidebarWindow::Impl {
-  std::unique_ptr<platform::PresentationTarget> target;
-  std::unique_ptr<gpu::Swapchain> swapchain;
-  std::unique_ptr<gpu::FrameRenderer> renderer;
-  std::unique_ptr<ImGuiLayer> ui;
+// M24.3. This is the window the other five were copied from, and what was
+// copied is now ToolWindowCore: the target, the swapchain, the renderer, the
+// ImGui layer, the HWND, the client size and the subclass, with the order they
+// are created and destroyed in. Everything below is the sidebar's own.
+struct SidebarWindow::Impl : ToolWindowCore {
   std::unique_ptr<SidebarInput> input;
-  HWND hwnd = nullptr;
   // Whoever had the foreground before this window existed. See dock().
   HWND prev_foreground = nullptr;
-  unsigned w = kStripW;
-  unsigned h = 0;
   int x = 0, y = 0;
   bool shown = false;
-  bool subclassed = false;
   // What the pointer is over this frame, for the widget to letter.
   std::string tooltip;
   float tooltip_y = 0.0f;  // screen space
@@ -145,56 +142,40 @@ std::unique_ptr<SidebarWindow> SidebarWindow::create(platform::IPlatformBackend&
   // Before the window exists, because it is about to take the foreground away
   // from whoever has it — see dock().
   s.prev_foreground = GetForegroundWindow();
-  s.h = strip_height(ButtonRegistry::instance().snapshot_for(ButtonSurface::Sidebar).size());
 
-  auto t = backend.createTarget({
-      .style = platform::WindowStyle::BorderlessTransparent,
-      .size = {s.w, s.h},
-      .title = "AIInterface sidebar",
-      .vulkan = false,
-  });
-  if (!t) return fail("createTarget: " + t.error().message);
-  s.target = std::move(t).value();
-  s.hwnd = static_cast<HWND>(backend.nativeWindowHandle(*s.target));
-  if (!s.hwnd) return fail("no HWND for the sidebar");
-
+  // NoActivate, and this is the measurement the other five inherited:
   // createTarget ends in SDL_ShowWindow, which *activates* the window — the
   // spike measured the second window as the foreground window before any click
   // had been sent to it, and a strip that steals focus from whatever the user
   // is typing in is the first failure mode this window has to not have. A
   // style added afterwards cannot undo an activation that already happened, so
   // it is hidden, restyled, and shown again with SW_SHOWNOACTIVATE — by dock(),
-  // which is also the first thing that knows where it belongs. Showing it here
-  // would put it wherever SDL happened to place it for a frame.
-  ShowWindow(s.hwnd, SW_HIDE);
-  const LONG_PTR ex = GetWindowLongPtrW(s.hwnd, GWL_EXSTYLE);
-  SetWindowLongPtrW(s.hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
-
-  auto sc = gpu::Swapchain::create(instance, device, {
-      .nativeSurface = s.hwnd,
-      .width = s.w,
-      .height = s.h,
-      .transparent = true,
-      .vsync = false,  // two vsynced swapchains on one thread halve the frame rate
-  });
-  if (!sc) return fail("swapchain: " + sc.error().message);
-  s.swapchain = std::move(sc).value();
-
-  auto fr = gpu::FrameRenderer::create(device, *s.swapchain);
-  if (!fr) return fail("frame renderer: " + fr.error().message);
-  s.renderer = std::move(fr).value();
-  s.renderer->setClearColor(0.0f, 0.0f, 0.0f, 0.0f);  // premultiplied: desktop shows through
-
+  // which is also the first thing that knows where it belongs. Showing it in
+  // create() would put it wherever SDL happened to place it for a frame.
+  //
+  // The clear is all zero and the swapchain transparent: premultiplied, so the
+  // desktop shows through.
   std::string err;
-  s.ui = ImGuiLayer::create(device, s.swapchain->imageFormat(), font_px, &err);
-  if (!s.ui) return fail("imgui: " + err);
-  ImGuiLayer* layer = s.ui.get();
-  s.renderer->setOverlayRecorder([layer](gpu::CommandContext& cmd) { layer->end_frame(cmd); });
+  if (!s.open(backend, instance, device, font_px,
+              {
+                  .style = platform::WindowStyle::BorderlessTransparent,
+                  .title = "AIInterface sidebar",
+                  .w = kStripW,
+                  .h = strip_height(
+                      ButtonRegistry::instance().snapshot_for(ButtonSurface::Sidebar).size()),
+                  .transparent = true,
+                  .placement = ToolWindowPlacement::NoActivate,
+                  .noun = "sidebar",
+              },
+              &err)) {
+    return fail(err);
+  }
 
   s.input = std::make_unique<SidebarInput>();
-  s.subclassed = SetWindowSubclass(s.hwnd, sidebarProc, 1,
-                                   reinterpret_cast<DWORD_PTR>(s.input.get())) != FALSE;
-  if (!s.subclassed) log::warn("sidebar: could not subclass the strip for input");
+  // Survivable here, unlike in the five windows copied from it: this strip has
+  // no close box, so a lost subclass costs its input and not the application.
+  if (!s.subclass(sidebarProc, s.input.get()))
+    log::warn("sidebar: could not subclass the strip for input");
   log::info("sidebar: strip up, hwnd {:p}, {}x{}", static_cast<void*>(s.hwnd), s.w, s.h);
   return self;
 }
@@ -202,19 +183,11 @@ std::unique_ptr<SidebarWindow> SidebarWindow::create(platform::IPlatformBackend&
 SidebarWindow::~SidebarWindow() {
   if (!p_) return;
   Impl& s = *p_;
-  // The order the spike found and recommended: the subclass comes off the HWND
-  // before anything it points at is freed, the GPU is waited on, and the
-  // renderer's callbacks are dropped before the objects they capture.
-  if (s.hwnd && s.subclassed) RemoveWindowSubclass(s.hwnd, sidebarProc, 1);
-  if (s.renderer) {
-    s.renderer->waitIdle();
-    s.renderer->setOverlayRecorder(nullptr);
-    s.renderer->setFramePasses({});
-  }
-  s.ui.reset();
-  s.renderer.reset();
-  s.swapchain.reset();
-  s.target.reset();
+  // The order the spike found and recommended, now ToolWindowCore's and stated
+  // there: the subclass comes off the HWND before anything it points at is
+  // freed, the GPU is waited on, and the renderer's callbacks are dropped
+  // before the objects they capture.
+  s.shutdown();
   log::info("sidebar: strip torn down");
 }
 

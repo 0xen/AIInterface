@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "imgui_layer.h"
+#include "tool_window_core.h"
 #include "pixel_icons.h"
 
 using namespace rend;
@@ -124,19 +125,12 @@ LRESULT CALLBACK workerStripProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT
 
 }  // namespace
 
-struct WorkerStripWindow::Impl {
-  std::unique_ptr<platform::PresentationTarget> target;
-  std::unique_ptr<gpu::Swapchain> swapchain;
-  std::unique_ptr<gpu::FrameRenderer> renderer;
-  std::unique_ptr<ImGuiLayer> ui;
+// M24.3. The shell is ToolWindowCore's; everything below is this strip's own.
+struct WorkerStripWindow::Impl : ToolWindowCore {
   std::unique_ptr<WorkerStripInput> input;
-  HWND hwnd = nullptr;
   HWND prev_foreground = nullptr;
-  unsigned w = kStripW;
-  unsigned h = 0;
   int x = 0, y = 0;
   bool shown = false;
-  bool subclassed = false;
   std::vector<WorkerStripRow> rows;
   std::size_t finished = 0;   // M11.1: agents in the menu
   bool menu_open = false;
@@ -159,54 +153,30 @@ std::unique_ptr<WorkerStripWindow> WorkerStripWindow::create(platform::IPlatform
   // from whoever has it — the same measured behaviour the primary strip hands
   // it back for.
   s.prev_foreground = GetForegroundWindow();
-  s.h = strip_height(0);
 
-  auto t = backend.createTarget({
-      .style = platform::WindowStyle::BorderlessTransparent,
-      .size = {s.w, s.h},
-      .title = "AIInterface workers",
-      .vulkan = false,
-  });
-  if (!t) return fail("createTarget: " + t.error().message);
-  s.target = std::move(t).value();
-  s.hwnd = static_cast<HWND>(backend.nativeWindowHandle(*s.target));
-  if (!s.hwnd) return fail("no HWND for the worker strip");
-
-  // Hidden, restyled, and shown again by dock() with SW_SHOWNOACTIVATE, for the
-  // primary strip's reason: createTarget ends in SDL_ShowWindow, which
-  // *activates*, and a style added afterwards cannot undo an activation that
-  // already happened. Showing it here would also put it wherever SDL happened
-  // to place it for a frame.
-  ShowWindow(s.hwnd, SW_HIDE);
-  const LONG_PTR ex = GetWindowLongPtrW(s.hwnd, GWL_EXSTYLE);
-  SetWindowLongPtrW(s.hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
-
-  auto sc = gpu::Swapchain::create(instance, device,
-                                   {
-                                       .nativeSurface = s.hwnd,
-                                       .width = s.w,
-                                       .height = s.h,
-                                       .transparent = true,
-                                       .vsync = false,  // vsynced chains on one thread divide fps
-                                   });
-  if (!sc) return fail("swapchain: " + sc.error().message);
-  s.swapchain = std::move(sc).value();
-
-  auto fr = gpu::FrameRenderer::create(device, *s.swapchain);
-  if (!fr) return fail("frame renderer: " + fr.error().message);
-  s.renderer = std::move(fr).value();
-  s.renderer->setClearColor(0.0f, 0.0f, 0.0f, 0.0f);  // premultiplied: desktop shows through
-
+  // NoActivate: hidden, restyled, and shown again by dock() with
+  // SW_SHOWNOACTIVATE, for the primary strip's reason — createTarget ends in
+  // SDL_ShowWindow, which *activates*, and a style added afterwards cannot
+  // undo an activation that already happened. Showing it in create() would
+  // also put it wherever SDL happened to place it for a frame. Transparent,
+  // and cleared to premultiplied zero so the desktop shows through.
   std::string err;
-  s.ui = ImGuiLayer::create(device, s.swapchain->imageFormat(), font_px, &err);
-  if (!s.ui) return fail("imgui: " + err);
-  ImGuiLayer* layer = s.ui.get();
-  s.renderer->setOverlayRecorder([layer](gpu::CommandContext& cmd) { layer->end_frame(cmd); });
+  if (!s.open(backend, instance, device, font_px,
+              {
+                  .style = platform::WindowStyle::BorderlessTransparent,
+                  .title = "AIInterface workers",
+                  .w = kStripW,
+                  .h = strip_height(0),
+                  .transparent = true,
+                  .placement = ToolWindowPlacement::NoActivate,
+                  .noun = "worker strip",
+              },
+              &err)) {
+    return fail(err);
+  }
 
   s.input = std::make_unique<WorkerStripInput>();
-  s.subclassed = SetWindowSubclass(s.hwnd, workerStripProc, 1,
-                                   reinterpret_cast<DWORD_PTR>(s.input.get())) != FALSE;
-  if (!s.subclassed) {
+  if (!s.subclass(workerStripProc, s.input.get())) {
     // Not survivable, and this is the inspector's rule rather than the primary
     // strip's: without the subclass a WM_CLOSE reaching SDL reports an
     // identityless CloseRequested, which quits the whole application. A window
@@ -220,22 +190,11 @@ std::unique_ptr<WorkerStripWindow> WorkerStripWindow::create(platform::IPlatform
 WorkerStripWindow::~WorkerStripWindow() {
   if (!p_) return;
   Impl& s = *p_;
-  // The primary strip's order, for the primary strip's reasons: the subclass
-  // comes off the HWND before the input it points at is freed, the GPU is
-  // waited on, and the renderer's callbacks are dropped before the objects they
-  // capture. This runs on every close, not only at exit, so it is what decides
-  // whether opening and closing the strip fifty times leaks fifty ImGui
-  // contexts.
-  if (s.hwnd && s.subclassed) RemoveWindowSubclass(s.hwnd, workerStripProc, 1);
-  if (s.renderer) {
-    s.renderer->waitIdle();
-    s.renderer->setOverlayRecorder(nullptr);
-    s.renderer->setFramePasses({});
-  }
-  s.ui.reset();
-  s.renderer.reset();
-  s.swapchain.reset();
-  s.target.reset();
+  // The primary strip's order, for the primary strip's reasons — ToolWindowCore's
+  // now, and stated there. This runs on every close, not only at exit, so it is
+  // what decides whether opening and closing the strip fifty times leaks fifty
+  // ImGui contexts.
+  s.shutdown();
   log::info("workers: strip torn down");
 }
 
