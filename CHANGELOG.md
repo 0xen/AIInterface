@@ -28,6 +28,14 @@ Every milestone that merges adds an entry here in the same commit.
 - A test for every rule the assistant's command block follows, and tests for the sentence
   splitter, the script splitter that chooses the voice, the event bus, audio buffers, the
   resampler, and the process-kill path. Twenty-seven tests in all, up from thirteen.
+- **The recogniser now reports how sure it was** of each utterance, from the decoder's own
+  scores. Not yet used to decide anything; the measurements say it catches two thirds of the
+  cases where a Japanese word came out as invented English, and never fires on ordinary English.
+- **A pinned-language mode** for the recogniser that notices when you switched to the other
+  language and goes back for it. Built and measured, not switched on: for a Japanese word
+  inside an English sentence it is slightly worse than what ships today, and a pin without the
+  recovery is the worst setting measured, so the app keeps automatic detection for now.
+
 
 ### Fixed
 - **Your edits to prompts and avatar frames are no longer silently overwritten** after an
@@ -74,14 +82,6 @@ Every milestone that merges adds an entry here in the same commit.
 - Duplicate code: one colour parser instead of three, one text decoder instead of three, one
   shared base under the six extra windows.
 
-- **The recogniser now reports how sure it was** of each utterance, from the decoder's own
-  scores. Not yet used to decide anything; the measurements say it catches two thirds of the
-  cases where a Japanese word came out as invented English, and never fires on ordinary English.
-- **A pinned-language mode** for the recogniser that notices when you switched to the other
-  language and goes back for it. Built and measured, not switched on: for a Japanese word
-  inside an English sentence it is slightly worse than what ships today, and a pin without the
-  recovery is the worst setting measured, so the app keeps automatic detection for now.
-
 ### Investigated
 - **The recogniser's own language tag** was recovered by patching sherpa-onnx and measured. It
   is useless: it never appears on the utterances where it would matter. The pinned build stays.
@@ -90,10 +90,10 @@ Every milestone that merges adds an entry here in the same commit.
   Loudspeakers were not measured.
 
 ### Known
-- Language detection between English and Japanese still has no confidence gate. Work on that
-  is in progress: reading the decoder's confidence and pinning the recogniser to the
-  conversation's language.
-- The spoken end-to-end test of memory ("remember X", restart, ask, "forget that") has not
-  been run with a real model yet.
+- Language detection between English and Japanese still has no confidence gate. The decoder's
+  confidence is now available and measured; wiring it into a "say that again" is the next step.
+- The spoken memory flow has been used for real ("remember" and recall), but "forget that" and
+  the full-file case have not been tried by voice.
 - Stopping a worker that has already finished can still freeze the window for up to three
   seconds.
+- Talking over the assistant has not yet been tuned with a person in the room.
