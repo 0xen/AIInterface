@@ -1,6 +1,7 @@
 #include "action_store.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <system_error>
@@ -113,11 +114,16 @@ void ActionStore::load() {
   const fs::path root = actions_root();
   std::error_code ec;
   fs::create_directories(root, ec);
-  // The same seed rule the rest of the app uses: refresh a file only when the
-  // shipped one is newer, so a better example reaches a machine that has
-  // already run the app. The shipped example is an *action* and lands armed
-  // only if the user says so, exactly like one the AI wrote.
-  seed_tree(fs::path(AII_ASSETS_DIR) / "scripts" / "actions", root, nullptr);
+  // The same seed rule the rest of the app uses: refresh a file when the
+  // shipped bytes changed and nobody has touched the installed copy, so a
+  // better example reaches a machine that has already run the app without
+  // walking over an action the user rewrote. The shipped example is an *action*
+  // and lands armed only if the user says so, exactly like one the AI wrote.
+  std::string seed_err;
+  std::vector<std::string> seed_notes;
+  if (!seed_tree(fs::path(AII_ASSETS_DIR) / "scripts" / "actions", root, &seed_err, &seed_notes))
+    std::fprintf(stderr, "[actions] %s\n", seed_err.c_str());
+  for (const std::string& note : seed_notes) std::fprintf(stderr, "[actions] %s\n", note.c_str());
   read_armed();
   rescan();
   news_.clear();
