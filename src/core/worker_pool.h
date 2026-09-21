@@ -5,6 +5,7 @@
 // back. The conversational instance in VoiceSession is separate and never has
 // tools.
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -55,11 +56,38 @@ class WorkerPool {
   bool spawn(const std::string& name, const std::string& cwd, const std::string& task,
              std::string* error);
   // Interrupts the worker's current turn; it stays in the list as Paused.
+  //
+  // M17.3. Returns straight away, as it always did -- the interrupt is a line
+  // on the child's stdin and the worker thread is what notices it. What is new
+  // is what happens when it is *not* noticed: the moment the interrupt goes
+  // out a clock starts, and update() ends the child itself once it runs out.
+  // See `kInterruptGrace`.
   bool pause(const std::string& name);
-  // Interrupts every running worker.
+  // Interrupts every running worker. Same escalation as pause().
   void pause_all();
   // Removes a finished (or paused) worker and its process.
+  //
+  // **This one blocks**, because it joins the worker thread before it returns:
+  // the caller's next act is usually to say the work has stopped, and it must
+  // be true by then. Before M17.3 it blocked for as long as the child felt
+  // like taking, which for a child halfway through a Bash command that ignores
+  // the interrupt was forever -- and the frame loop, and with it the whole
+  // conversation, was gone with it. It now waits `kInterruptGrace` for the
+  // interrupt to land and then ends the process, so the worst case is a known
+  // number of seconds rather than the rest of the run.
   bool stop(const std::string& name);
+
+  // How long the polite interrupt is given before the child is simply ended.
+  //
+  // Three seconds, which is the number `~ClaudeCodeClient` has always waited
+  // for a child to exit after its stdin closed: that is the one figure in this
+  // app that has been through a shutdown on this machine several hundred times
+  // without anybody noticing it, so it is the honest answer to "how long is a
+  // child allowed to take over ending a turn". It is also the worst case a
+  // stop can now freeze the frame loop for, which puts it at the edge of what
+  // is tolerable -- a window that stops compositing for three seconds looks
+  // stuck, and one that never comes back *is* stuck.
+  static constexpr std::chrono::milliseconds kInterruptGrace{3000};
 
   std::vector<Snapshot> snapshot() const;
   size_t running() const;
@@ -73,6 +101,12 @@ class WorkerPool {
     std::thread thread;
     std::atomic<bool> cancel{false};
     std::atomic<bool> finished{false};
+    // M17.3. When the interrupt went out, and whether the child has since been
+    // ended for ignoring it. Both are written under `mutex_` by the frame loop
+    // (pause, pause_all, stop, update) and read there; the worker thread
+    // touches neither.
+    std::chrono::steady_clock::time_point cancel_at{};
+    bool killed = false;
     State state = State::Starting;
     std::string activity, result;
     std::deque<std::string> recent;
@@ -80,6 +114,13 @@ class WorkerPool {
   };
 
   void run(Worker* w);
+  // M17.3. Raise the interrupt and start its clock. Caller holds `mutex_`.
+  static void request_cancel(Worker* w);
+  // M17.3. Wait up to `kInterruptGrace` for `w` to finish on its own, and end
+  // its child if it does not. **Must be called with `mutex_` released**: the
+  // client's activity callback takes `mutex_` while holding the client's own
+  // lock, so killing under `mutex_` is that pair of locks in the other order.
+  static void wait_then_kill(Worker* w);
 
   std::string exe_;
   bool bypass_ = true;

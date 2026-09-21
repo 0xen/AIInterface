@@ -3749,9 +3749,19 @@ void VoiceSession::run_commands(const std::string& reply_text) {
       // stopped happened to be a schedule-started worker the model addressed by
       // name instead of by id.
       silence_worker(c.name);
-      if (!workers_->stop(c.name)) {
+      // M17.3. Timed, and the timing is logged, because this call is the one
+      // place in the app that can block the turn thread on another process
+      // ending. It is bounded now (WorkerPool::kInterruptGrace), and a bound
+      // nobody measures is a bound nobody knows held.
+      const auto stop_began = std::chrono::steady_clock::now();
+      const bool stopped = workers_->stop(c.name);
+      const double took = std::chrono::duration<double>(
+                              std::chrono::steady_clock::now() - stop_began).count();
+      if (!stopped) {
         take_silenced_worker(c.name);
         announce(app_text(Msg::NoWorker, c.name));
+      } else {
+        log("[worker] stopped " + c.name + " in " + std::to_string(took) + " s");
       }
     }
   }

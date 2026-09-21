@@ -1,6 +1,7 @@
 #include "core/worker_pool.h"
 
 #include <algorithm>
+#include <cstdio>
 
 #include "core/app_strings.h"
 #include "core/button_registry.h"
@@ -66,6 +67,35 @@ const char* worker_state_name(WorkerPool::State s) {
 WorkerPool::WorkerPool(std::string claude_exe, bool bypass_permissions)
     : exe_(std::move(claude_exe)), bypass_(bypass_permissions) {}
 
+void WorkerPool::request_cancel(Worker* w) {
+  if (w->cancel) return;  // the clock belongs to the first interrupt, not the third
+  w->cancel = true;
+  w->cancel_at = std::chrono::steady_clock::now();
+  w->activity = "pausing...";
+}
+
+void WorkerPool::wait_then_kill(Worker* w) {
+  // Nothing is ever killed that was not first asked politely. It is what makes
+  // `stop_reason == "interrupted"` true of everything this ends, and so what
+  // makes a killed worker report as stopped rather than as failed; it is also
+  // the guard for the one frame between a worker setting its own state and
+  // setting `finished`, where a destructor could otherwise terminate a child
+  // whose turn had already come back.
+  if (!w->cancel) return;
+  const auto deadline = w->cancel_at + kInterruptGrace;
+  while (!w->finished && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  if (w->finished || w->killed) return;
+  w->killed = true;
+  // No logger here, and deliberately no callback for it either: stderr is
+  // routed into the app's log file (see main.cpp, routeDiagnostics), which is
+  // where `claude_code_client.cpp` already writes the one other line this
+  // layer has to say for itself.
+  std::fprintf(stderr, "[worker] %s did not answer the interrupt within %lld ms; ending its process\n",
+               w->name.c_str(), (long long)kInterruptGrace.count());
+  if (w->client) w->client->kill();
+}
+
 WorkerPool::~WorkerPool() {
   pause_all();
   std::vector<std::unique_ptr<Worker>> taken;
@@ -73,6 +103,14 @@ WorkerPool::~WorkerPool() {
     std::lock_guard<std::mutex> l(mutex_);
     taken.swap(workers_);
   }
+  // M17.3. One grace period for all of them, not one each: they were all
+  // interrupted at the same moment above, and quitting is the one path where
+  // the cost of waiting is paid by somebody watching a window that will not
+  // close. Then whatever is left is ended outright.
+  //
+  // The `taken` vector keeps every Worker alive while its thread runs, so the
+  // activity callbacks still have something to write into.
+  for (auto& w : taken) wait_then_kill(w.get());
   for (auto& w : taken) {
     if (w->thread.joinable()) w->thread.join();
   }
@@ -142,12 +180,35 @@ void WorkerPool::run(Worker* w) {
   std::string shown, spoken;
   {
     std::lock_guard<std::mutex> l(mutex_);
-    if (w->cancel) {
+    // **`r.ok` is asked first** (M17.3, review finding 23). The cancel flag used
+    // to be, and it is the wrong question to ask first because it is raised
+    // from another thread at a moment nobody chose: a worker that finished its
+    // turn properly a millisecond before somebody pressed Stop was filed as
+    // Paused, and the panel showed an agent still holding work it had already
+    // handed back. A turn that came back `ok` came back; whatever happened
+    // afterwards happened to nothing.
+    //
+    // `r.stop_reason == "interrupted"` is not used for this, although turn()
+    // sets it on exactly this path: it is set *because* the cancel flag was
+    // seen, so it is the same question in different words and it answers 23 no
+    // better. What it does is arrive with the same meaning after a kill, which
+    // is why the order below is also what makes M17.3's escalation report as
+    // stopped: `kill()` finishes the turn with `ok == false`, the cancel flag
+    // is up because this app only ever kills what it has already interrupted,
+    // and so a worker the app ended reads as Paused and not as Failed.
+    if (r.ok) {
+      w->state = State::Done;
+      w->activity = "done";
+      w->result = trim(r.text);
+      const std::string what = first_sentence(r.text);
+      shown = app_text(Msg::WorkerFinishedShown, w->name, what);
+      spoken = app_text(Msg::FinishedSpoken, what);
+    } else if (w->cancel) {
       w->state = State::Paused;
       w->activity = "paused";
       shown = app_text(Msg::WorkerPausedShown, w->name);
       spoken = app_text(Msg::PausedSpoken);
-    } else if (!r.ok) {
+    } else {
       w->state = State::Failed;
       w->activity = "failed";
       w->result = r.error;
@@ -171,13 +232,6 @@ void WorkerPool::run(Worker* w) {
       // clip is for the eye, and classifying what is left of a truncated
       // string would lose the very word that identifies it.
       spoken = app_text(Msg::TaskFailedSpoken, app_text(failure_reason(r.error)));
-    } else {
-      w->state = State::Done;
-      w->activity = "done";
-      w->result = trim(r.text);
-      const std::string what = first_sentence(r.text);
-      shown = app_text(Msg::WorkerFinishedShown, w->name, what);
-      spoken = app_text(Msg::FinishedSpoken, what);
     }
     state = w->state;
   }
@@ -189,8 +243,7 @@ bool WorkerPool::pause(const std::string& name) {
   std::lock_guard<std::mutex> l(mutex_);
   for (auto& w : workers_) {
     if (w->name == name && (w->state == State::Working || w->state == State::Starting)) {
-      w->cancel = true;
-      w->activity = "pausing...";
+      request_cancel(w.get());
       return true;
     }
   }
@@ -200,21 +253,38 @@ bool WorkerPool::pause(const std::string& name) {
 void WorkerPool::pause_all() {
   std::lock_guard<std::mutex> l(mutex_);
   for (auto& w : workers_) {
-    if (w->state == State::Working || w->state == State::Starting) {
-      w->cancel = true;
-      w->activity = "pausing...";
-    }
+    if (w->state == State::Working || w->state == State::Starting) request_cancel(w.get());
   }
 }
 
 bool WorkerPool::stop(const std::string& name) {
-  std::unique_ptr<Worker> taken;
+  // M17.3, review finding 2. Three steps, and the middle one is the fix: raise
+  // the interrupt, wait a bounded time for it to be answered and end the child
+  // if it is not, and only then take the entry out and join.
+  //
+  // The wait cannot be done while holding `mutex_`. The worker thread takes it
+  // on its way out of run(), so a join -- or a sleep -- under the lock is a
+  // wait for a thread that is waiting for the lock.
+  Worker* target = nullptr;
   {
     std::lock_guard<std::mutex> l(mutex_);
     auto it = std::find_if(workers_.begin(), workers_.end(),
                            [&](const std::unique_ptr<Worker>& w) { return w->name == name; });
     if (it == workers_.end()) return false;
-    (*it)->cancel = true;
+    request_cancel(it->get());
+    target = it->get();
+  }
+  wait_then_kill(target);
+
+  std::unique_ptr<Worker> taken;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    // By pointer, not by name: the entry cannot have moved -- every caller of
+    // this and of update() is the frame loop -- but finding it again by the
+    // thing that identifies it costs nothing and does not depend on that.
+    auto it = std::find_if(workers_.begin(), workers_.end(),
+                           [&](const std::unique_ptr<Worker>& w) { return w.get() == target; });
+    if (it == workers_.end()) return true;
     taken = std::move(*it);
     workers_.erase(it);
   }
@@ -223,10 +293,22 @@ bool WorkerPool::stop(const std::string& name) {
 }
 
 void WorkerPool::update() {
-  std::lock_guard<std::mutex> l(mutex_);
-  for (auto& w : workers_) {
-    if (w->finished && w->thread.joinable()) w->thread.join();
+  // M17.3. The escalation for pause() and pause_all(), which return straight
+  // away and so have nowhere of their own to put a wait. Collected under the
+  // lock and acted on outside it: `kill()` takes the client's own lock, and the
+  // client's activity callback takes *this* lock while holding that one, so
+  // doing it the other way round is the two locks in both orders.
+  std::vector<Worker*> overdue;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    const auto now = std::chrono::steady_clock::now();
+    for (auto& w : workers_) {
+      if (w->finished && w->thread.joinable()) w->thread.join();
+      if (!w->finished && w->cancel && !w->killed && now - w->cancel_at >= kInterruptGrace)
+        overdue.push_back(w.get());
+    }
   }
+  for (Worker* w : overdue) wait_then_kill(w);
 }
 
 std::vector<WorkerPool::Snapshot> WorkerPool::snapshot() const {
