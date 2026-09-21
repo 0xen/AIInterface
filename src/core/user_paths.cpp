@@ -24,6 +24,8 @@ fs::path user_data_root() {
   return fs::path(appdata) / "AIInterface";
 }
 
+fs::path memories_path() { return user_data_root() / "memories.md"; }
+
 bool seed_tree(const fs::path& source, const fs::path& dest, std::string* error) {
   std::error_code ec;
   if (!fs::exists(source, ec)) return true;  // the caller decides what that means

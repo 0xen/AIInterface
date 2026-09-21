@@ -29,6 +29,14 @@
           "pos": [320, 240]
         },
         {
+          "id": "memory",
+          "title": "Memory",
+          "file": "system/memory.md",
+          "kind": "global",
+          "enabled": true,
+          "pos": [320, 320]
+        },
+        {
           "id": "scripts",
           "title": "Scripts",
           "file": "system/scripts.md",
@@ -49,8 +57,9 @@
         { "from": "start", "to": "voice", "order": 0, "enabled": true },
         { "from": "start", "to": "workers", "order": 1, "enabled": true },
         { "from": "start", "to": "settings", "order": 2, "enabled": true },
-        { "from": "start", "to": "scripts", "order": 3, "enabled": true },
-        { "from": "start", "to": "voices", "order": 4, "enabled": true }
+        { "from": "start", "to": "memory", "order": 3, "enabled": true },
+        { "from": "start", "to": "scripts", "order": 4, "enabled": true },
+        { "from": "start", "to": "voices", "order": 5, "enabled": true }
       ]
     },
     "project": {

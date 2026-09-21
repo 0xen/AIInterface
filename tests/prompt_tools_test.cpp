@@ -174,8 +174,13 @@ int main() {
     _putenv_s("AII_PRE_PROMPT", pre.string().c_str());
     const char* kSettingsMark = "SETTINGS-DIGEST-SENTINEL";
     const char* kScriptsMark = "SCRIPTS-DIGEST-SENTINEL";
+    // M14. A third slot, and the one this test's own comment predicted: the
+    // `{{` check alone passed with `{{memories}}` in the Markdown and nothing
+    // set, because an empty digest substitutes to nothing.
+    const char* kMemoryMark = "MEMORY-DIGEST-SENTINEL";
     set_settings_digest(std::string("model.name = ") + kSettingsMark + "\n");
     set_actions_digest(std::string("tidy_desktop  ") + kScriptsMark + "  NOT ARMED\n");
+    set_memory_digest(std::string("1. (2026-09-21) ") + kMemoryMark + "\n");
 
     for (int mask = 0; mask < combos; ++mask) {
       ToolPolicy p;
@@ -186,9 +191,11 @@ int main() {
             label + " nothing with `{{` in it reaches Claude");
       check(has(prompt, kSettingsMark), label + " the settings digest is really in there");
       check(has(prompt, kScriptsMark), label + " the actions digest is really in there");
+      check(has(prompt, kMemoryMark), label + " the memory digest is really in there");
     }
     set_settings_digest({});
     set_actions_digest({});
+    set_memory_digest({});
   }
 
   std::printf("\n-- the syntax itself --\n");

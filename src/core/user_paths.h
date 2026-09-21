@@ -33,6 +33,13 @@ std::filesystem::path exe_dir();
 // service context from writing to the filesystem root.
 std::filesystem::path user_data_root();
 
+// M14. `%APPDATA%\AIInterface\memories.md`: what the user has asked the
+// assistant to remember (`core/memory_store.h`). Here rather than in the store
+// so that the store stays standard-library-only and testable against a temp
+// file, while the two callers that need the real path (main.cpp at launch,
+// the session on `remember`) cannot derive it differently.
+std::filesystem::path memories_path();
+
 // Copy a shipped asset tree into the user's copy, refreshing a file only when
 // the shipped one is *newer*.
 //

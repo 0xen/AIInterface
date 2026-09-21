@@ -656,6 +656,9 @@ std::string g_actions_digest;
 // M13.3. The same shape again: the voice syntax line and the per-language
 // counts, empty unless secondary voices are configured.
 std::string g_voices_digest;
+// M14. The same shape once more: what the user has asked to be remembered,
+// re-set after every change so a restart composes the current list.
+std::string g_memory_digest;
 // The resolved scripts folder, so the reference sheet can be pointed at rather
 // than merely mentioned.
 std::string g_scripts_dir;
@@ -664,6 +667,7 @@ std::string g_scripts_dir;
 void set_settings_digest(std::string text) { g_settings_digest = std::move(text); }
 void set_actions_digest(std::string text) { g_actions_digest = std::move(text); }
 void set_voices_digest(std::string text) { g_voices_digest = std::move(text); }
+void set_memory_digest(std::string text) { g_memory_digest = std::move(text); }
 void set_scripts_dir(std::string path) { g_scripts_dir = std::move(path); }
 
 const std::string& system_prompt(const ToolPolicy& policy) {
@@ -681,10 +685,12 @@ const std::string& system_prompt(const ToolPolicy& policy) {
   static std::string cached_digest;
   static std::string cached_actions;
   static std::string cached_voices;
+  static std::string cached_memory;
   static std::string cached;
   static bool have = false;
   if (have && cached_for == policy && cached_digest == g_settings_digest &&
-      cached_actions == g_actions_digest && cached_voices == g_voices_digest)
+      cached_actions == g_actions_digest && cached_voices == g_voices_digest &&
+      cached_memory == g_memory_digest)
     return cached;
 
   PromptStore store;
@@ -723,6 +729,12 @@ const std::string& system_prompt(const ToolPolicy& policy) {
   if (const size_t at = text.find("{{voices}}"); at != std::string::npos) {
     text.replace(at, std::strlen("{{voices}}"), trim_end(g_voices_digest));
   }
+  // M14. Same rule a fourth time. Unlike `{{voices}}` this digest is never
+  // empty -- `MemoryStore::digest()` returns a "nothing yet" sentence -- so
+  // the prose around it in `memory.md` always has a list to point at.
+  if (const size_t at = text.find("{{memories}}"); at != std::string::npos) {
+    text.replace(at, std::strlen("{{memories}}"), trim_end(g_memory_digest));
+  }
   // A path, not a digest, and the fallback is prose rather than nothing: an
   // unset one still has to read as a sentence, because a human may be reading
   // this file too.
@@ -745,6 +757,7 @@ const std::string& system_prompt(const ToolPolicy& policy) {
   cached_digest = g_settings_digest;
   cached_actions = g_actions_digest;
   cached_voices = g_voices_digest;
+  cached_memory = g_memory_digest;
   have = true;
   return cached;
 }

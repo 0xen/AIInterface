@@ -127,6 +127,7 @@
 #include "core/config.h"
 #include "core/cwd_policy.h"
 #include "core/handoff_policy.h"
+#include "core/memory_store.h"
 #include "core/model_choice.h"
 #include "core/prompt_store.h"
 #include "core/schedule.h"
@@ -875,6 +876,18 @@ int main(int /*argc*/, char** /*argv*/) {
     // nothing has yet been mirrored back out of the panel — so it is the file
     // as the user left it, which is what they will read if they open it.
     aii::set_settings_digest(aii::settings_digest(settings));
+    // M14. What the user has asked the AI to remember, read from
+    // `memories.md` beside settings.json and handed over in the same breath.
+    // The session refreshes it after every remember/forget; this is the copy
+    // the first child is composed from.
+    {
+        aii::MemoryStore memories(aii::memories_path());
+        std::string err;
+        if (!memories.load(&err)) log::warn("[memory] {}", err);
+        aii::set_memory_digest(memories.digest());
+        log::info("[memory] {} remembered, {} of {} chars, in {}", memories.all().size(),
+                  memories.text_size(), aii::kMemoryTextCap, memories.path().string());
+    }
     // M10.2/M10.5. The actions the AI can call, discovered and handed to the
     // prompt store in the same breath and for the same reason: this is the
     // point at which the file has been read and nothing has been mirrored back

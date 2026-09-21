@@ -299,7 +299,7 @@ std::vector<Command> parse_commands(const std::string& text) {
           const size_t quote = rest.find('"', eq + 2);
           value = rest.substr(eq + 2, quote == std::string::npos ? std::string::npos : quote - eq - 2);
           rest = quote == std::string::npos ? "" : trim(rest.substr(quote + 1));
-        } else if (key == "task" || key == "path" || key == "say") {
+        } else if (key == "task" || key == "path" || key == "say" || key == "text") {
           value = trim(rest.substr(eq + 1));
           rest.clear();
         } else {
@@ -325,6 +325,7 @@ std::vector<Command> parse_commands(const std::string& text) {
         else if (key == "key") c.key = value;
         else if (key == "value") c.value = value;
         else if (key == "confirm") c.confirm = value;
+        else if (key == "text") c.text = value;
       }
       if (c.verb.empty()) continue;
       // App-owned verbs are applied here and dropped: see the header. A
@@ -349,7 +350,11 @@ std::vector<Command> parse_commands(const std::string& text) {
       // handler, because only that handler can say *why* — "there is no
       // setting called that" and "that key does not take that value" are
       // different sentences and the user hears both.
-      if (c.verb == "schedule" || c.verb == "cancel" || c.verb == "setting" || !c.name.empty())
+      // M14 adds `remember` and `forget`, which address a memory by text or by
+      // id and have no name. Same rule: their handler is the one that can say
+      // "that is full" or "there is no memory numbered that".
+      if (c.verb == "schedule" || c.verb == "cancel" || c.verb == "setting" ||
+          c.verb == "remember" || c.verb == "forget" || !c.name.empty())
         out.push_back(std::move(c));
     }
   }

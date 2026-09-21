@@ -23,6 +23,7 @@
 #include "core/schedule.h"
 #include "core/sentence_splitter.h"
 #include "core/text_util.h"
+#include "core/user_paths.h"
 
 namespace aii {
 
@@ -251,7 +252,7 @@ void apply_voice_lists(const Config& cfg, Engines& eng, SpeechQueue& speech,
 }
 }  // namespace
 
-VoiceSession::VoiceSession(Config cfg) : cfg_(std::move(cfg)) {
+VoiceSession::VoiceSession(Config cfg) : cfg_(std::move(cfg)), memory_(memories_path()) {
   langs_bits_ = pack_langs(cfg_.langs);
   // M1f.1. The configured default; M1f.2's control overwrites it as a level
   // once there is a settings surface to read one from.
@@ -3543,6 +3544,12 @@ void VoiceSession::run_commands(const std::string& reply_text) {
       apply_run(c);
       continue;
     }
+    // M14. Not a worker verb either: a memory is a line in a file, and the
+    // session owns the file.
+    if (c.verb == "remember" || c.verb == "forget") {
+      apply_memory(c);
+      continue;
+    }
     if (c.verb == "load") {
       if (injector_.request(c.name)) log("[prompts] queued " + c.name + " for the next turn");
       else log("[prompts] refused load name=" + c.name + " (no such prompt in the store)");
@@ -3734,6 +3741,50 @@ void VoiceSession::apply_run(const Command& c) {
     return;
   }
   log("[action] run name=" + c.name);
+}
+
+void VoiceSession::apply_memory(const Command& c) {
+  std::string why;
+  if (c.verb == "remember") {
+    std::uint64_t id = 0;
+    if (memory_.append(c.text, {}, &id, &why)) {
+      log("[memory] remembered id=" + std::to_string(id) + " (" + std::to_string(memory_.text_size()) +
+          "/" + std::to_string(kMemoryTextCap) + " chars): " + c.text);
+    } else {
+      // Which refusal is which: the log has the numbers, the user hears the
+      // shape. A full store is the one with a remedy, so it gets its own
+      // sentence; an empty or oversized line and a write failure are told
+      // apart the same way, because "say it shorter" and "check the disk"
+      // are different things to do next.
+      log("[memory] refused remember: " + why);
+      if (why.rfind("full", 0) == 0) announce(app_text(Msg::MemoryFull));
+      else if (why.rfind("nothing", 0) == 0 || why.rfind("too long", 0) == 0)
+        announce(app_text(Msg::MemoryNothingToSave));
+      else announce(app_text(Msg::MemoryNotSaved));
+    }
+  } else {
+    // The id comes from the list this app put in the prompt, so one that
+    // does not read as a number is the model inventing one -- and, unlike a
+    // `cancel`, it is said aloud: an unspoken failed forget is a memory the
+    // user believes is gone.
+    char* end = nullptr;
+    const unsigned long long n = std::strtoull(c.id.c_str(), &end, 10);
+    if (c.id.empty() || (end && *end != '\0') || n == 0) {
+      log("[memory] refused forget: could not read id=\"" + c.id + "\"");
+      announce(app_text(Msg::MemoryNoSuchId, c.id.empty() ? std::string("?") : c.id));
+      return;
+    }
+    if (memory_.remove(n, &why)) {
+      log("[memory] forgot id=" + c.id);
+    } else {
+      log("[memory] refused forget id=" + c.id + ": " + why);
+      announce(app_text(Msg::MemoryNoSuchId, c.id));
+    }
+  }
+  // Whatever happened, the prompt store's copy is the file as it now stands,
+  // so a restart -- reset, model change, handoff -- composes the current
+  // list. The same rule `set_actions_digest` follows after a script lands.
+  set_memory_digest(memory_.digest());
 }
 
 void VoiceSession::publish_inventory() {

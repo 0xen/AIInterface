@@ -157,6 +157,18 @@ const AppLine kLines[] = {
      "no longer want, under Scripts, would make room.",
      "{} は僕が覚えていられるスクリプトの数を超えちゃってるから動かせないんだ。Scriptsのところでいら"
      "ないものを消してもらえれば空くよ。"},
+    // --- Remembering ---------------------------------------------------------
+    // All four say what did not happen and, where there is one, the way out.
+    // "Full" names the remedy because the user asked for something to be kept
+    // and a flat no leaves them nowhere to go.
+    {"My memory is full, so I have not saved that. Asking me to forget something would make room.",
+     "覚えておける量がいっぱいで、それは保存できなかったんだ。何かを忘れていいって言ってもらえれば空くよ。"},
+    {"There is no memory numbered {}, so I have left the list alone.",
+     "{} 番の記憶はないから、リストはそのままにしたよ。"},
+    {"There was nothing I could save there, so I have not remembered anything.",
+     "保存できるものがなかったから、何も覚えてないよ。"},
+    {"I could not write that down, so it is not saved.",
+     "書き留められなかったから、保存できてないよ。"},
     // --- The context window filling up -------------------------------------
     // The English is the user's own sentence, kept word for word. The Japanese
     // is not a translation of it but the same move in Japanese: a warning that

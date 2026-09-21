@@ -189,6 +189,19 @@ enum class Msg {
   ScriptNoSuchAction,    // {name}
   ScriptPastCap,         // {name}
 
+  // --- Remembering (M14) -------------------------------------------------
+  //
+  // Only the refusals are the app's. A `remember` that lands is confirmed by
+  // the model in its own sentence -- the prompt asks it to -- and an app line
+  // on top would be the same news twice. What the model *cannot* know is why
+  // one was refused, and an unspoken refusal is a memory the user thinks they
+  // have: so the full store, an id that does not exist and an empty line are
+  // all said aloud, the way `SettingNoSuchKey` is.
+  MemoryFull,            // names nothing: the number is in the log
+  MemoryNoSuchId,        // {id}
+  MemoryNothingToSave,   // the text was empty or too long
+  MemoryNotSaved,        // the file could not be written
+
   // --- The context window filling up (M3.15) -----------------------------
   // **The user's own words**, and the one line in this table that is spoken
   // *before* the thing it describes rather than after it: the point of it is

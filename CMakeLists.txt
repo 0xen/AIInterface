@@ -38,6 +38,7 @@ add_library(aii_core STATIC
   src/core/directive_filter.cpp
   src/core/engines.cpp
   src/core/language.cpp
+  src/core/memory_store.cpp
   src/core/model_choice.cpp
   src/core/prompt_store.cpp
   src/core/schedule.cpp
@@ -135,6 +136,17 @@ if(AII_BUILD_TESTS)
   target_compile_definitions(cwd_policy_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   if(MSVC)
     target_compile_options(cwd_policy_test PRIVATE /utf-8 /W4)
+  endif()
+
+  # ---- memory_store_test: the file the user's "remember this" lands in ----
+  # Same rule as cwd_policy_test: memory_store.cpp is standard-library-only, so
+  # stable ids, the cap and the hand-edit rules are all checked against a temp
+  # file with no engine, no window and no CLI.
+  add_executable(memory_store_test tests/memory_store_test.cpp src/core/memory_store.cpp)
+  target_include_directories(memory_store_test PRIVATE src)
+  target_compile_definitions(memory_store_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(memory_store_test PRIVATE /utf-8 /W4)
   endif()
 
   # ---- handoff_policy_test: when the session hands over to itself ----

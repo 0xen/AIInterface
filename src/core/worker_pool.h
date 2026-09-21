@@ -144,6 +144,10 @@ struct Command {
   std::string key;
   std::string value;
   std::string confirm;
+  // The `remember` verb's field (M14). Prose, so like `task=` it runs to the
+  // end of the line when unquoted. `forget` addresses a memory by `id`, the
+  // same field `cancel` and `button` already use.
+  std::string text;
 };
 
 // Finds ```aii fenced blocks in `text` and parses their command lines.

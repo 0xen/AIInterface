@@ -291,6 +291,13 @@ void set_actions_digest(std::string text);
 // changed must not be told the old count.
 void set_voices_digest(std::string text);
 
+// M14. The `{{memories}}` slot in `system/memory.md`: what the user has asked
+// the assistant to remember, as `MemoryStore::digest()` renders it. Set at
+// launch from the file and again after every `remember`/`forget`, and part
+// of the cache key like the other three, for the same reason: a child
+// restarted after a memory was saved must be handed the list that has it.
+void set_memory_digest(std::string text);
+
 // The absolute path of the user's scripts folder, substituted for
 // `{{scripts_dir}}` in `system/scripts.md`.
 //

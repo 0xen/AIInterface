@@ -20,6 +20,7 @@
 #include "core/engines.h"
 #include "core/language.h"
 #include "core/listen_restore.h"
+#include "core/memory_store.h"
 #include "core/prompt_store.h"
 #include "core/schedule.h"
 #include "core/speech_queue.h"
@@ -674,6 +675,13 @@ class VoiceSession {
   // posts one inbound bus line — which `apply_pending()` applies on the frame
   // loop, where the authoritative store lives and the check is made again.
   void apply_run(const Command& c);
+  // M14. The `remember text=` and `forget id=` verbs. Applied here and now,
+  // on the turn thread, because the store is a few kilobytes of file and the
+  // write is cheaper than a bus round trip; then the prompt store's digest
+  // is refreshed so a restart composes the list that has the change in it.
+  // The running conversation needs nothing: the model wrote the line, so it
+  // already knows. Only refusals are spoken; success is the model's sentence.
+  void apply_memory(const Command& c);
   // Speak a line from the app itself (worker reports) and show it.
   void announce(const std::string& text);
   // Same, where what is shown and what is spoken differ: a worker report is
@@ -749,6 +757,11 @@ class VoiceSession {
   // from nowhere else, which is why neither is behind `mutex_`.
   PromptStore prompts_;
   PromptInjector injector_;
+  // M14. The file behind `remember`/`forget`, bound to `memories_path()`.
+  // Touched from the turn thread only (run_commands), like `injector_`, and
+  // it re-reads the file before every write, so it holds no state worth
+  // guarding.
+  MemoryStore memory_;
   // M5.2. The inspector's view of both, republished by whichever of those two
   // threads last changed them, and read by the frame loop under `mutex_`. It
   // exists because the alternative — the window reaching into `prompts_` and
