@@ -59,6 +59,25 @@ int main() {
   check(!cwd_was_named("C:\\", "anything at all"),
         "a bare drive root names no folder and is not waved through");
 
+  // M15.4, review finding 9. What a worker said is not evidence, because a
+  // worker is a Claude instance and `cwd_policy.h` says model output never is
+  // -- however many processes it has been wrapped in on the way back.
+  //
+  // **Only half of this is testable here**, and the half that is not is the
+  // half that was broken: the exclusion is a one-line `if (!is_injected)` in
+  // `VoiceSession::run_turn`, which cannot be reached without the window, the
+  // engines and a Claude child behind it. What this file can hold is the other
+  // side of the contract -- that with the worker's sentence kept out of the
+  // evidence, the folder it named corroborates nothing.
+  check(!cwd_was_named("C:\\Users\\johng\\Documents",
+                       "have a look at the driver situation"),
+        "a folder only a worker's report named is not corroborated by the turn that asked "
+        "for the work");
+  check(cwd_was_named("C:\\Users\\johng\\Documents",
+                      "I checked and wrote the notes into Users johng Documents"),
+        "**and the same sentence would have corroborated it if it had been evidence** -- "
+        "which is exactly why an injected turn must not record any");
+
   std::printf("the decision\n");
   check(resolve_worker_cwd("", "whatever was said").dir == kApp,
         "no cwd given: the folder the app was launched from");

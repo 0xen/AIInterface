@@ -723,6 +723,11 @@ class VoiceSession {
   std::string pending_context() const;
   // Records one turn's *input* text as evidence that a folder was named, and
   // returns the whole window joined up. See `folder_evidence_`.
+  //
+  // M15.4: called for turns the **user** started, and for no others. An
+  // injected turn's text is a worker report, and a worker report carries the
+  // worker's own closing sentence -- model output, which `core/cwd_policy.h`
+  // says is never evidence, however many processes it has been through.
   void note_folder_evidence(const std::string& text);
   std::string folder_evidence() const;
   // M2b.4. The text handed to Claude when a scheduled worker finishes.
