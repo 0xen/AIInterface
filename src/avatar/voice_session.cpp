@@ -896,8 +896,26 @@ void VoiceSession::update() {
     // microphone is shut — it is reopened on the line below, and taking the
     // frame here is what stops that happening. A user who is mid-sentence is
     // in Listening, which never reaches this branch at all.
-    if (!flush_announcements() && !flush_injected_turns() && !begin_handoff_if_due()) {
-      if (mic_open_) {
+    // M17.2 puts one more link in that chain, ahead of the reports and behind
+    // the announcements: a question the user asked during the last handover
+    // outranks a worker's aside — they are waiting for an answer to it — and
+    // still comes after a canned line, which is instant and already written.
+    // start_turn() will pick up any waiting live-worker report as a rider, so
+    // ordering it first costs the reports nothing.
+    if (!flush_announcements() && !flush_queued_user_turn() && !flush_injected_turns() &&
+        !begin_handoff_if_due()) {
+      // M17.2. **The microphone stays shut for the length of a handover.**
+      // Without this the latch reopened it the moment the housekeeping line
+      // finished, and everything said into it for the next several seconds
+      // went to a child that was about to be replaced. It is not lost — that
+      // is what the queue above is for — but the honest shape is not to invite
+      // a sentence the app cannot answer for five seconds. The latch itself is
+      // untouched: `relatch_after_reset_` is taken from it in begin_restart()
+      // and hands it straight back when the new child is up.
+      if (handing_off()) {
+        // Nothing. Neither the latch nor the wake watch may take the
+        // microphone while the session is being replaced.
+      } else if (mic_open_) {
         // Still unmuted after a reply finished: reopen the mic for the next
         // turn. It stays shut while Claude speaks, so the speakers are never
         // transcribed back in as the user.
@@ -1021,7 +1039,15 @@ void VoiceSession::talk_pressed() {
   // Barge-in on the press, not on the release: the same rule as unmuting
   // mid-answer, and waiting for the release would mean talking over the reply
   // for as long as the gesture lasted before it was cut off.
-  if (s == State::Thinking || s == State::Speaking) {
+  //
+  // M17.2. **Not the handover's summary turn.** That turn is Thinking like any
+  // other and is the one turn here that is not a reply to anybody: it is the
+  // outgoing session writing the note its replacement reads. Cancelling it
+  // costs the new session everything it was going to be told, and the user
+  // pressing Talk asked for the microphone, not for that. The gesture still
+  // opens the microphone below; what they then say is held by start_turn()
+  // for the new session.
+  if ((s == State::Thinking || s == State::Speaking) && !handing_off()) {
     cancel_ = true;
     speech_->clear();
   }
@@ -1577,7 +1603,11 @@ void VoiceSession::say(const std::string& text) {
   // are on it (the panel directly, the bus through apply_pending()).
   if (s == State::Listening) {
     discard_utterance();
-  } else if (s != State::Idle) {
+  } else if (s != State::Idle && !handing_off()) {
+    // M17.2, the same exception talk_pressed() makes: the handover's summary
+    // turn is not a reply being talked over, and cancelling it throws away the
+    // note the next session reads. The typed text is held for that session by
+    // start_turn() instead.
     cancel_ = true;
     speech_->clear();
   }
@@ -2043,10 +2073,22 @@ void VoiceSession::run_reset() {
 //     having promised out loud to do something about it.
 //
 //  5. **The user must not be left talking into a session being torn down.**
-//     They cannot be: arming happens with the microphone shut, and it stays
-//     shut until `relatch_after_reset_` gives the latch back on the far side.
-//     Somebody mid-utterance is in Listening, which never reaches the branch
-//     that arms.
+//     Arming happens with the microphone shut, and somebody mid-utterance is
+//     in Listening, which never reaches the branch that arms.
+//
+//     That was as far as it went until M17.1/M17.2, and the sentence above
+//     used to claim more than the code did. The microphone did *not* stay
+//     shut: the latch reopened it on the first Idle frame after the
+//     housekeeping line finished, several seconds before the restart, and
+//     anything said into it went to start_turn(), to a child about to be
+//     replaced, and was cancelled by begin_restart() with the transcript
+//     cleared behind it (review finding 4). Two changes, in the two places
+//     that lied: the Idle branch does not reopen the microphone while
+//     `handing_off()` is true, and a turn that arrives anyway — typed, from
+//     the bus, or from a Talk gesture that bypasses the latch — is held in
+//     `handoff_user_turns_` and sent to the new session as the user's own
+//     turn. The latch is untouched and comes back through
+//     `relatch_after_reset_` exactly as it always did.
 
 bool VoiceSession::handing_off() const {
   return handoff_stage_.load(std::memory_order_acquire) != HandoffStage::None;
@@ -2288,6 +2330,35 @@ std::string VoiceSession::carry_over_block(const std::string& note) {
 
 void VoiceSession::start_turn(std::string text) {
   if (text.empty()) return;
+  // M17.2, review finding 4. A handover is running: this child is about to be
+  // replaced, so sending to it would spend the turn on a session that ends
+  // before the reply does — and begin_restart() would cancel it a frame or two
+  // later and run_reset() would clear the transcript behind it, so the user
+  // would be answered by silence with nothing left on screen to show they had
+  // spoken. Held instead, and sent to the session that comes up, as their own
+  // turn: see `handoff_user_turns_`.
+  //
+  // Queued and not refused because refusing is the same loss with an apology
+  // on it. The alternative considered was a spoken "one moment, handing over";
+  // it costs the user their sentence and gains nothing, since the whole of the
+  // wait is a few seconds and the machinery to carry a turn across a restart
+  // was already here.
+  if (handing_off()) {
+    handoff_user_turns_.push_back(std::move(text));
+    log("[handoff] a turn arrived mid-handover; it is held for the new session (" +
+        std::to_string(handoff_user_turns_.size()) + " waiting)");
+    set_status("one moment - handing over; what you just said goes to the new session.");
+    return;
+  }
+  // **Ahead of the reset guard below, on purpose.** The last stage of a
+  // handover *is* a restart, so `resetting()` is true for the second it takes
+  // and this guard would otherwise drop the very turns the one above exists to
+  // keep. The two are deliberately different answers to a similar shape: a
+  // handover is the app replacing its own child, so the user's words are owed
+  // to the session that comes out of it, while a Reset is the user throwing
+  // the conversation away and a turn that arrives in the middle of it has no
+  // session left to belong to.
+  //
   // The reset thread is joining `turn_`; joining it from here as well is
   // undefined behaviour, and the turn would go to a child that is being torn
   // down anyway. This is the single choke point for a user turn — say() and
@@ -2882,6 +2953,25 @@ bool VoiceSession::flush_injected_turns() {
   speech_->clear();
   log("[report] reporting back through Claude");
   start_injected_turn(std::move(sent), std::move(fallback));
+  return true;
+}
+
+bool VoiceSession::flush_queued_user_turn() {
+  // The same gate flush_injected_turns() stands at, plus the two that say the
+  // handover is genuinely over: `handing_off()` is false only once run_reset()
+  // has put the stage back to None, which is the line before it clears
+  // `resetting_`.
+  if (turn_running_ || resetting() || handing_off()) return false;
+  if (handoff_user_turns_.empty()) return false;
+  std::string text = std::move(handoff_user_turns_.front());
+  handoff_user_turns_.erase(handoff_user_turns_.begin());
+  // No microphone handling here, unlike flush_injected_turns(). This is only
+  // ever reached from the Idle branch before the line that reopens the
+  // microphone, and the handover holds it shut for its whole length, so there
+  // is no open capture device to take away from anybody. start_turn() puts the
+  // user's line in the transcript and the reply is spoken the ordinary way.
+  log("[handoff] sending what the user said during the handover to the new session");
+  start_turn(std::move(text));
   return true;
 }
 

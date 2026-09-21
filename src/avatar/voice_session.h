@@ -741,6 +741,28 @@ class VoiceSession {
   // Frame loop only, and deliberately tried *after* flush_announcements(), so
   // a canned line already waiting is heard before a turn is spent.
   bool flush_injected_turns();
+  // M17.2, review finding 4. The user's own words, said or typed while a
+  // handover was under way, sent to the session that came up out of it.
+  //
+  // The queue exists because a handoff takes several seconds and the
+  // microphone can be open for part of them: the housekeeping line is spoken
+  // with the latch still on, and the latch reopens the microphone as soon as
+  // the line finishes. What the user says into it used to reach start_turn(),
+  // go to a child that was about to be replaced, and be cancelled by
+  // begin_restart() a frame or two later -- with the transcript cleared behind
+  // it. They were answered by silence and there was nothing left on screen to
+  // say they had spoken at all.
+  //
+  // Queued rather than refused, and it is queued as *the user's turn* rather
+  // than as an injected one: they are owed an answer in their own words, spoken
+  // back the ordinary way, with their line in the transcript above it. An
+  // injected turn has no user line by design (see start_injected_turn()) and
+  // would have put the words nowhere.
+  //
+  // Delivered from the Idle branch once the handover is over and the new child
+  // is up, which is the same gate everything else in that chain waits at.
+  // Frame loop only, like the rest of this chain.
+  bool flush_queued_user_turn();
   // M2b.4. Queue one report for the conversational instance. Any thread — a
   // worker thread is where a scheduled worker's report arrives.
   // M2c.1: `fallback` rides with it; see start_injected_turn().
@@ -1089,6 +1111,13 @@ class VoiceSession {
   // thread, and those two are ordered by `resetting_` — no turn starts while
   // it is set, and the write happens before it falls.
   std::string carry_over_;
+  // M17.2. What the user said or typed while the handover was running, waiting
+  // for the new child. Frame loop only -- start_turn() is the single choke
+  // point for a user turn and flush_queued_user_turn() is in the Idle chain,
+  // and both are on it -- so this needs no lock. A vector and not one joined
+  // string: two things said in one handover are two turns, because they were
+  // two turns, and merging them would answer both in one breath.
+  std::vector<std::string> handoff_user_turns_;
 
   std::atomic<bool> loaded_{false};
   std::atomic<bool> load_failed_{false};
