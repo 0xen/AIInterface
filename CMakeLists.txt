@@ -453,6 +453,18 @@ if(AII_BUILD_TESTS)
   endif()
   aii_copy_runtime_dlls(prompt_format_test)
 
+  # ---- changelog_test: what is new reaches the assistant ------------------
+  # Same shape as the prompt tests above, and for the same reason it links
+  # `aii_core`: half of what it checks is about the store the app actually
+  # ships -- the `changelog` node, its triggers, its slot -- and a fixture copy
+  # of those would pass while the shipped ones were wrong.
+  add_executable(changelog_test tests/changelog_test.cpp)
+  target_link_libraries(changelog_test PRIVATE aii_core)
+  if(MSVC)
+    target_compile_options(changelog_test PRIVATE /utf-8 /W4)
+  endif()
+  aii_copy_runtime_dlls(changelog_test)
+
   # ---- action_digest_test: an unarmed action is visible as unarmed --------
   # Compiles `src/avatar/action_store.cpp` directly rather than linking the
   # avatar target: the store is deliberately free of ImGui, the engine and the

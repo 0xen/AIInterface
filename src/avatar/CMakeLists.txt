@@ -116,6 +116,22 @@ rend_add_shaders(avatar_shaders
 set_target_properties(avatar_shaders PROPERTIES FOLDER "assets")
 add_dependencies(avatar avatar_shaders)
 
+# ---- M27: CHANGELOG.md beside the executable -------------------------------
+# The assistant reads this when the user asks what is new
+# (`src/core/prompt_store.h`, `changelog_path`). It is copied here rather than
+# seeded into `%APPDATA%` like the prompts, and copied by the *build* rather
+# than by the app on first run like `pre-prompt.md`, because of what it is: a
+# statement about this binary. A per-user copy, or a copy-if-missing rule,
+# would both let the file describe a version the user is not running -- and an
+# out-of-date changelog is worse than none, since the app would recite it with
+# every appearance of knowing. `copy_if_different` on every build, so it is
+# always the file in the checkout that built the exe.
+add_custom_command(TARGET avatar POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${CMAKE_SOURCE_DIR}/CHANGELOG.md" "$<TARGET_FILE_DIR:avatar>/CHANGELOG.md"
+  COMMENT "Copying CHANGELOG.md beside avatar.exe"
+  VERBATIM)
+
 # ---- latest/: the runnable application, in one folder ----------------------
 # `build\bin\<config>\` is a build tree, not a place to hand someone: it
 # accumulates (a shader whose .hlsl was deleted is still there; an executable
@@ -138,7 +154,8 @@ if(AII_STAGE_LATEST)
   set(_aii_bin "$<TARGET_FILE_DIR:avatar>")
   set(_aii_manifest_lines
     "copy|$<TARGET_FILE_NAME:avatar>|$<TARGET_FILE:avatar>"
-    "copy|$<TARGET_FILE_NAME:rend::engine>|$<TARGET_FILE:rend::engine>")
+    "copy|$<TARGET_FILE_NAME:rend::engine>|$<TARGET_FILE:rend::engine>"
+    "copy|CHANGELOG.md|${CMAKE_SOURCE_DIR}/CHANGELOG.md")
   if(AII_BUILD_SCRIPTS)
     # python*.dll is a glob because the engine's FetchPython.cmake picks the
     # CPython version; hard-coding python313.dll here would rot silently.

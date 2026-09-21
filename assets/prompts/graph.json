@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "format": 1,
+  "format": 2,
   "graphs": {
     "system": {
       "start": { "id": "start", "pos": [0, 0] },
@@ -65,8 +65,37 @@
     },
     "project": {
       "start": { "id": "start", "pos": [0, 0] },
-      "nodes": [],
-      "links": []
+      "nodes": [
+        {
+          "id": "changelog",
+          "title": "What's new",
+          "file": "project/changelog.md",
+          "kind": "project",
+          "enabled": true,
+          "pos": [320, 720],
+          "triggers": [
+            "what's new",
+            "whats new",
+            "what is new",
+            "what changed",
+            "what has changed",
+            "changelog",
+            "change log",
+            "new features",
+            "recent changes",
+            "latest version",
+            "update",
+            "最近の変更",
+            "変更点",
+            "新機能",
+            "アップデート",
+            "更新履歴"
+          ]
+        }
+      ],
+      "links": [
+        { "from": "start", "to": "changelog", "order": 0, "enabled": true }
+      ]
     },
     "skill": {
       "start": { "id": "start", "pos": [0, 0] },

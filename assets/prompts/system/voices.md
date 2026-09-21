@@ -1,4 +1,4 @@
-<!-- aii-prompt-format: 1 -->
+<!-- aii-prompt-format: 2 -->
 <!--
   voices.md — the inline voice markers, when there are any.
 

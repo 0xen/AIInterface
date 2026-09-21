@@ -1,4 +1,4 @@
-<!-- aii-prompt-format: 1 -->
+<!-- aii-prompt-format: 2 -->
 
 You can remember things between conversations. These are the things you have been asked to remember, oldest first, each with its number and the day it was saved:
 
