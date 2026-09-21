@@ -194,6 +194,22 @@ constexpr float kWakeOnsetSec = 0.12f;
 constexpr float kWakeTailSec = 0.8f;
 constexpr float kWakePrerollSec = 0.5f;
 
+// M18.2/M18.3. How much of the barge watch's audio is kept back, so that the
+// syllable which interrupted the reply is still there to hand to the fresh
+// recogniser stream when the rule fires.
+//
+// It is longer than `kBargeOnsetSec` (0.30 s) and for a different reason than
+// `kWakePrerollSec` is longer than `kWakeOnsetSec`: the wake pre-roll is sized
+// to cover the gate's late opening several times over, while this one is only
+// ever *trimmed back* to the onset run's start before it is used. The extra
+// 0.2 s is slack for a frame that arrives long, not audio anyone intends to
+// decode -- everything earlier than the run is the reply's own leakage and the
+// room, and `docs/bargein-measurements.md` shows the recogniser inventing
+// words ("Sorry") out of exactly that. So it is bounded here and trimmed
+// there, and the two together are why a barge cannot put the app's own voice
+// into the user's next turn.
+constexpr float kBargePrerollSec = 0.5f;
+
 float rms(const std::vector<float>& s) {
   if (s.empty()) return 0.0f;
   double sum = 0.0;
@@ -637,6 +653,10 @@ void VoiceSession::update() {
     // comes back on -- and if the latch is the one that comes back, tick_wake()
     // is not reached at all, which is correct.
     if (wake_open_) end_wake();
+    // M18.2. And the barge watch with it, for the same reason and with the
+    // same consequence: update() is the only thing that drains the capture
+    // device, and it is about to stop for the second the rebuild takes.
+    end_barge_watch();
     if (workers_) workers_->update();
     return;
   }
@@ -690,6 +710,13 @@ void VoiceSession::update() {
   // through here first.
   if (wake_open_ && (s != State::Idle || mic_open_ || hold_)) end_wake();
 
+  // M18.2. The barge watch's half of the same rule, and unconditional for the
+  // same reason: the watch belongs to Thinking and Speaking and to nothing
+  // else, and every other way out of them -- an error, a Stop, a reply that
+  // simply ended -- would otherwise leave a capture device running with
+  // nobody draining it. tick_barge() below is what opens it.
+  if (barge_watch_ && s != State::Thinking && s != State::Speaking) end_barge_watch();
+
   // M3.15. Before the state branches, because the stage that ends in a
   // restart is reached while the session is Thinking and Thinking has no
   // branch below. Arming, which is the half that must only happen when
@@ -703,6 +730,14 @@ void VoiceSession::update() {
   // branch below means the stamp is unconditional: there is no state, and no
   // early return past this point, in which the clock quietly keeps running.
   if (s != State::Listening) timeout_blocked_at_ = std::chrono::steady_clock::now();
+
+  // M18.2. The two states in which the app is doing the talking. Before the
+  // branches rather than inside them because Thinking has no branch below at
+  // all, and because a fire moves the state to Listening -- which the stale
+  // `s` read at the top of this function must not then be used to service.
+  // It is not: the Speaking branch below only ever drops the state to Idle,
+  // and it cannot, because the turn is still running.
+  if (s == State::Thinking || s == State::Speaking) tick_barge();
 
   if (s == State::Listening) {
     chunk_.clear();
@@ -933,12 +968,19 @@ void VoiceSession::update() {
   }
 }
 
-void VoiceSession::begin_listening() {
+void VoiceSession::begin_listening(std::vector<float> preroll) {
   // M12.2. The passive capture and this one are the same device and the same
   // recogniser, and they must never both be up. Here rather than only in
   // update() because talk_pressed() reaches this function directly -- a SPACE
   // hold never passes through the Idle branch at all.
   end_wake();
+  // M18.2. And the same for the barge watch, which is the third owner this
+  // device now has. `end_barge_watch()` stops it; the fire path in
+  // tick_barge() has already cleared the flag by the time it calls here, so a
+  // barge hands the device over without the stop-and-start a shut mic would
+  // cost -- `MicIn::start()` below is then a no-op and the capture never
+  // actually pauses.
+  end_barge_watch();
   speech_->clear();
   eng_.stt->begin();
   mic_->discard();
@@ -946,10 +988,25 @@ void VoiceSession::begin_listening() {
     set_status("mic failed to start");
     return;
   }
-  // The only place the capture device is ever started, so this line answers
-  // "did the microphone open while Claude was talking?" on its own. It is what
-  // the speakers-into-the-C920 defect is checked against; keep it.
+  // The only place the capture device is ever started for a turn, so this line
+  // answers "did the microphone open while Claude was talking?" on its own. It
+  // is what the speakers-into-the-C920 defect is checked against; keep it.
+  // M18.2 opens the same device for the barge watch, which has a line of its
+  // own saying so and which can never send a word -- so this one still means
+  // what it has always meant: the microphone is open *and what it hears goes
+  // to Claude*.
   rend::log::trace("mic: open (latch={})", mic_open_);
+  // M18.3. The onset run that fired the barge, handed to the stream that was
+  // just begun. Fed before anything else so it is the first audio the decoder
+  // sees, which is the whole point: without it the user's first syllable is
+  // the one the gate spent on deciding they were talking.
+  if (!preroll.empty()) {
+    eng_.stt->feed(preroll.data(), (int)preroll.size(), kMicRate);
+    // The length, never the audio and never the words. The same rule
+    // discard_utterance() writes its line under.
+    rend::log::trace("mic: {:.2f} s of barge pre-roll fed to the new stream",
+                     float(preroll.size()) / float(kMicRate));
+  }
   // Start the silence clock now: without this the first frame would look
   // like a pause that had already run long enough to send.
   listen_began_ = std::chrono::steady_clock::now();
@@ -968,16 +1025,27 @@ void VoiceSession::begin_listening() {
   }
 }
 
-std::string VoiceSession::finish_utterance() {
-  mic_->stop();
+std::string VoiceSession::finish_utterance(bool may_watch) {
+  // M18.2. The microphone is not stopped when a reply is about to be spoken
+  // into a room the user may talk over: the device stays up and the barge
+  // watch takes it. The *decode* still ends here either way -- the stream is
+  // finished on the next line and the watch feeds the recogniser nothing at
+  // all -- so the utterance that was just spoken is closed exactly as it was
+  // before, and what the watch hears afterwards belongs to no utterance.
+  const bool watch = may_watch && barge_watch_wanted();
+  if (!watch) mic_->stop();
   chunk_.clear();
   mic_->drain(chunk_);
   if (!chunk_.empty()) eng_.stt->feed(chunk_.data(), (int)chunk_.size(), kMicRate);
-  return trim(eng_.stt->finish());
+  const std::string text = trim(eng_.stt->finish());
+  // After the decode, so the watch's pre-roll starts empty and the words that
+  // were just sent cannot be handed back to a later turn as a pre-roll.
+  if (watch) begin_barge_watch();
+  return text;
 }
 
 void VoiceSession::end_listening_and_send() {
-  std::string text = finish_utterance();
+  std::string text = finish_utterance(true);
   {
     std::lock_guard<std::mutex> l(mutex_);
     partial_.clear();
@@ -996,7 +1064,7 @@ void VoiceSession::end_listening_unsent() {
   // the user editing words the recogniser had already changed its mind about.
   // The text is published as `partial_` with the sequence bumped: the panel
   // writes it into the message field, and nothing here starts a turn.
-  const std::string text = finish_utterance();
+  const std::string text = finish_utterance(false);
   std::lock_guard<std::mutex> l(mutex_);
   partial_ = text;
   ++dictated_seq_;
@@ -1006,7 +1074,7 @@ void VoiceSession::end_listening_unsent() {
 }
 
 void VoiceSession::discard_utterance() {
-  const std::string dropped = finish_utterance();
+  const std::string dropped = finish_utterance(false);
   {
     std::lock_guard<std::mutex> l(mutex_);
     partial_.clear();
@@ -1505,6 +1573,201 @@ void VoiceSession::tick_wake() {
   }
 }
 
+// ---------------------------------------------------------------------- M18.2
+//
+// ## The barge watch
+//
+// The microphone stays up while the app speaks, and what it hears decides one
+// thing only: whether to stop speaking. It is never decoded, never shown and
+// never sent. `core/barge_policy.h` owns the arithmetic and
+// `docs/bargein-measurements.md` owns the numbers in it; what is here is the
+// wiring, and the wiring has three jobs the policy cannot do for itself.
+//
+//  1. **Be a third owner of one capture device, without breaking the other
+//     two.** `begin_listening()` and `begin_wake()` are the other two, and
+//     every path that takes the device for one of them calls the other's
+//     closer. This one joins that discipline: `end_barge_watch()` is
+//     idempotent, `update()` closes the watch on any frame the session is not
+//     Thinking or Speaking, and `begin_barge_watch()` closes the wake state
+//     first. Nothing else starts or stops `mic_`.
+//
+//  2. **Not be `Listening`.** The listen timeout, M12.1's restore, M12.2's
+//     wake phrase and M3.15's handoff each have "the microphone is shut while
+//     the app speaks" written into their comments, and the trace line in
+//     `begin_listening()` is the evidence for it. So the watch is a flag and
+//     not a state: `state_` stays Thinking or Speaking, none of those four
+//     sees a reopened microphone, and the one trace line that says a
+//     microphone opened *and what it hears goes to Claude* still means that.
+//
+//  3. **Not truncate the reply.** On a fire this clears the speech queue and
+//     sets `barged_`, which the splitter in run_turn() honours exactly as it
+//     honours `muted_`. `cancel_` is untouched, so the turn thread goes on
+//     streaming and the whole reply still lands in the panel. That is the
+//     difference between this and the SPACE barge-in that predates it, and it
+//     is the thing the user asked for.
+bool VoiceSession::barge_watch_wanted() const {
+  if (!loaded_ || load_failed_) return false;
+  if (!mic_ || !speech_) return false;
+  // A Talk press is the user's own finger on the microphone; a gesture ends
+  // with the device shut and nothing here may reopen it under their hand.
+  if (hold_) return false;
+  // The conversation is being replaced. `update()` is handed to the reset
+  // thread for that second, so a device opened here would never be drained;
+  // and during a handover M17.2 keeps the microphone shut on purpose, because
+  // anything said into it belongs to a child that does not exist yet.
+  if (resetting() || handing_off()) return false;
+  // The latch is the ordinary case. A wake phrase is the other one, and it
+  // fires differently: see the hand-over at the bottom of tick_barge().
+  return mic_open_ || wake_phrase_armed(wake_phrase_locked_copy());
+}
+
+void VoiceSession::begin_barge_watch() {
+  if (barge_watch_) return;
+  // One device, one owner. The wake state has no claim on the microphone
+  // while a reply is being spoken, and `update()`'s own guard would end it a
+  // frame later anyway; doing it here means the two are never both up even
+  // for the frame in between.
+  end_wake();
+  // A no-op when `finish_utterance()` has just left the device running, which
+  // is the ordinary path and is why a barge watch costs no gap in capture at
+  // all: `MicIn::start()` returns early when it is already running, so the
+  // samples spanning the end of the user's utterance and the start of the
+  // reply are one unbroken stream.
+  if (!mic_->start()) {
+    set_status("mic failed to start");
+    return;
+  }
+  barge_watch_ = true;
+  barge_.reset();
+  barge_open_at_ = std::chrono::steady_clock::now();
+  barge_floor_ = 0.0f;
+  barge_preroll_.clear();
+  barge_fired_at_ = -1.0f;
+  // **`barged_` is deliberately not cleared here.** It belongs to the reply,
+  // not to the watch, and run_turn() clears it at the top. Clearing it here
+  // would reopen a window of a frame or two in which the turn that was just
+  // barged could enqueue another sentence before start_turn()'s join has
+  // torn it down -- the reply would go quiet and then say one more thing.
+  //
+  // Worded for somebody auditing the microphone rather than for somebody
+  // debugging this, the same as the wake state's line: it says the device is
+  // open, why, and what cannot happen to what it hears.
+  rend::log::info("[barge] the microphone stays open while the app speaks - it is watched for "
+                  "the sound of you interrupting and nothing heard here is ever decoded or sent");
+}
+
+void VoiceSession::end_barge_watch(bool handing_over) {
+  if (!barge_watch_) return;
+  barge_watch_ = false;
+  // `handing_over` is the fire path giving the device straight to
+  // `begin_listening()`. Stopping it there and starting it again a line later
+  // would drop the audio in between, which is exactly the audio the user is
+  // speaking.
+  if (!handing_over) mic_->stop();
+  // One line per reply, and never a word of what was heard: the leak the reply
+  // was measured to produce, the bar that leak set, and whether anybody
+  // cleared it. This is the harness for M18.4's tuning and it is the only way
+  // to tell "it did not fire" from "it never armed".
+  if (std::getenv("AII_BARGE_DEBUG")) {
+    const float gate = std::max(barge_floor_ * kGateOverFloor, kGateAbsMin);
+    rend::log::info(
+        "[barge-debug] reply watched {:.1f} s: learned leak {:.5f}, gate {:.5f}, threshold "
+        "{:.5f}, {}{}",
+        barge_.elapsed_sec(), barge_.leak_p99(), gate, barge_.threshold(gate),
+        barge_.learning() ? "never armed (less than a second of audible reply)"
+                          : (barge_fired_at_ >= 0.0f ? "FIRED" : "did not fire"),
+        barge_fired_at_ >= 0.0f ? " at " + std::to_string(barge_fired_at_) + " s" : "");
+  }
+  barge_preroll_.clear();
+}
+
+// One frame of the watch, from the Thinking and Speaking branches of update().
+void VoiceSession::tick_barge() {
+  if (!barge_watch_wanted()) {
+    end_barge_watch();
+    return;
+  }
+  if (!barge_watch_) begin_barge_watch();
+  if (!barge_watch_) return;  // the capture device refused; begin_barge_watch said so
+
+  chunk_.clear();
+  mic_->drain(chunk_);
+  if (chunk_.empty()) return;
+
+  // The same gate, the same constants and the same calibration the Listening
+  // branch and the wake state run -- for the third time and for the same
+  // reason both of those give: a second opinion about whether the room is
+  // quiet would eventually disagree with the first, and the day it did, this
+  // would silence a reply nobody had interrupted.
+  //
+  // With one difference, and it is the investigation's: **the floor is not
+  // adapted while the speaker is playing.** Everywhere else the floor tracks
+  // the quiet frames so the gate follows the room; here the quiet frames are
+  // quiet *because the app's own voice is what is in them*, and letting them
+  // teach the floor would tune the gate to the reply rather than to the room.
+  const auto now = std::chrono::steady_clock::now();
+  const float level = rms(chunk_);
+  const float spk = speaker_ ? speaker_->level() : 0.0f;
+  const float open_for = std::chrono::duration<float>(now - barge_open_at_).count();
+  float gate = std::max(barge_floor_ * kGateOverFloor, kGateAbsMin);
+  if (open_for < kCalibrateSec) {
+    barge_floor_ = std::min(std::max(barge_floor_, level), kFloorMax);
+    gate = std::max(barge_floor_ * kGateOverFloor, kGateAbsMin);
+  } else if (level < gate && spk <= kBargeSpeakerActive) {
+    barge_floor_ += (level - barge_floor_) * kFloorRate;
+  }
+
+  // Kept before the verdict, so that a frame which fires is itself in the
+  // pre-roll. Bounded at kBargePrerollSec and trimmed again on the way out.
+  barge_preroll_.insert(barge_preroll_.end(), chunk_.begin(), chunk_.end());
+  const size_t cap = size_t(kBargePrerollSec * kMicRate);
+  if (barge_preroll_.size() > cap)
+    barge_preroll_.erase(barge_preroll_.begin(), barge_preroll_.end() - cap);
+
+  // `dt` from the samples rather than from the wall clock: the frame loop's
+  // period is whatever the renderer gives it, and the only honest duration of
+  // a block of audio is how much audio is in it. It also makes the rule's
+  // behaviour identical whether the app is running at 60 fps or at 6.
+  const float dt = float(chunk_.size()) / float(kMicRate);
+  if (barge_.frame(level, gate, spk, dt) != BargeVerdict::Fire) return;
+
+  barge_fired_at_ = barge_.elapsed_sec();
+  const float run = barge_.voiced_run_sec();
+  // The voice stops here and the text does not. `speech_->clear()` drops what
+  // is queued and what is playing; `barged_` stops the splitter handing the
+  // queue anything more, which is the half the old silence() never had. See
+  // the member's comment for why `cancel_` stays where it is.
+  barged_ = true;
+  speech_->clear();
+  rend::log::info("[barge] somebody is talking over the reply {:.2f} s in; the voice stops here "
+                  "and the text keeps arriving",
+                  barge_fired_at_);
+
+  if (!mic_open_) {
+    // A wake phrase is armed and the latch is not. **Opening full listening
+    // here would hand the conversation an utterance from somebody who never
+    // said the phrase**, which is the one thing M12.2 promises cannot happen,
+    // so the reply is silenced and the microphone goes back to passive
+    // matching on the next Idle frame. The pre-roll is dropped with it, for
+    // the same reason wake_heard() throws away the segment the phrase was in:
+    // audio captured before the phrase is not the user's turn.
+    end_barge_watch();
+    set_status("stopped speaking - say the wake phrase when you want me");
+    return;
+  }
+
+  // M18.3. The onset run, and only the onset run, goes to the fresh stream:
+  // everything before it is the reply's own leakage and the room, and
+  // `docs/bargein-measurements.md` has the recogniser decoding "Sorry" out of
+  // exactly that. `end_barge_watch(true)` hands the device over without
+  // stopping it, so the audio between this frame and begin_listening()'s first
+  // one is not lost.
+  const size_t want = barge_preroll_samples(barge_preroll_.size(), run, kMicRate);
+  std::vector<float> pre(barge_preroll_.end() - want, barge_preroll_.end());
+  end_barge_watch(true);
+  begin_listening(std::move(pre));
+}
+
 // ---------------------------------------------------------------------------
 // The two M12 harnesses
 // ---------------------------------------------------------------------------
@@ -1749,6 +2012,12 @@ void VoiceSession::stop_reply_and_mic(const std::string& stopped_status) {
   // it lands" memory, which is exactly the memory that is about to be wrong.
   listen_restore_.user_shut_the_mic();
   end_wake();
+  // M18.2. Stop is the user taking the floor back by hand, so the watch that
+  // was listening for them doing it by voice goes too. It is the same line
+  // end_wake() is, in the same place, for the same reason: this function is
+  // reached from Stop, from Reset and from both restarts, and the microphone
+  // must be shut on the far side of all four.
+  end_barge_watch();
   if (s == State::Thinking || s == State::Speaking) {
     cancel_ = true;
     speech_->clear();
@@ -2448,6 +2717,13 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
   // directory instead -- which is the safe answer this policy gives whenever it
   // is unsure, and the user can still name the folder out loud.
   if (!is_injected) note_folder_evidence(text);
+  // M18.2. A new reply is audible again. This is the **only** place the flag
+  // is cleared, and it is cleared here rather than where the watch arms so
+  // that a reply which was barged stays silent for the whole of its life --
+  // including the frames between the barge and start_turn()'s join, in which
+  // the old turn's splitter is still running and would otherwise get one more
+  // sentence out after the app had been told to be quiet.
+  barged_ = false;
   speech_->mark_new_reply();
   // The one place a reply becomes sound, and therefore the only place mute can
   // honestly be applied. Clearing the queue alone (what silence() used to do)
@@ -2470,6 +2746,15 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
       // muted" look identical from outside, and this is the line that tells
       // them apart in a log.
       rend::log::trace("mute: dropped {} chars of speech", s.size());
+      return;
+    }
+    // M18.2. The user is talking over this reply. Exactly the mute path, one
+    // reply wide: the sentence is not enqueued, the transcript append above is
+    // untouched, and the turn goes on streaming because `cancel_` was never
+    // set. The count and not the words, for the reason discard_utterance()
+    // gives -- this is text the user decided not to hear.
+    if (barged_) {
+      rend::log::trace("barge: dropped {} chars of speech; the text is still arriving", s.size());
       return;
     }
     // Same record as flush_announcements()' — a reply's chunks as the splitter
@@ -2607,8 +2892,16 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
       // marker has been consumed.
       if (first) {
         first = false;
-        status_ = "speaking...";
-        set_state_locked(State::Speaking);
+        // M18.2. Not when this reply has been barged: the user is talking and
+        // the session is in `Listening` for them. A reply that was silenced
+        // before its first word arrived (a barge during Thinking) would
+        // otherwise announce itself as "speaking..." and take the state --
+        // and with it the microphone, on the next Idle frame -- out from
+        // under the sentence they are in the middle of.
+        if (!barged_) {
+          status_ = "speaking...";
+          set_state_locked(State::Speaking);
+        }
       }
     }
     // The transcript append that used to be here has moved inside the filter's
@@ -2654,7 +2947,14 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
     if (!lines_.empty() && !lines_.back().user) lines_.back().text = strip_aii_blocks(lines_.back().text);
     if (!r.ok) {
       status_ = "error: " + r.error;
-      set_state_locked(State::Idle);
+      // M18.2. The same exception the two Speaking transitions make, and the
+      // one that matters most: a turn that failed *after* the user barged in
+      // must not move the session out from under them. Idle here would be
+      // read by the next frame as "reply over", and the Idle branch would
+      // reopen the microphone on top of the utterance already in progress.
+      // The error still reaches the status line and the failure counter, so
+      // nothing about it is hidden.
+      if (!barged_) set_state_locked(State::Idle);
       ++turn_failed_seq_;
       // M2b.4. A failed *user* turn is visible — they are at the keyboard,
       // they just spoke, the status line says error. A failed **injected**
@@ -2662,9 +2962,17 @@ void VoiceSession::run_turn(std::string text, bool is_injected, std::string fall
       // nobody at the desk to see the status line, and silence is this app's
       // worst failure. So the promise is kept with a canned line instead.
       injected_turn_failed = is_injected;
-    } else {
+    } else if (!barged_) {
       set_state_locked(State::Speaking);  // update() returns to Idle once the audio drains
       status_ = "speaking...";
+    } else {
+      // M18.2. The reply finished arriving while the user was talking over
+      // it. There is nothing left to speak -- the queue was cleared at the
+      // fire and the splitter has been dropping sentences ever since -- and
+      // the state belongs to their utterance now, so it is left alone. The
+      // text is all in the panel, which was the point.
+      rend::log::info("[barge] the barged reply finished streaming; all of its text is in the "
+                      "panel and none of the rest of it was spoken");
     }
   }
   if (injected_turn_failed) {
@@ -2748,7 +3056,18 @@ bool VoiceSession::flush_announcements() {
   // Close the microphone for the same reason a reply does: nothing said into
   // it while the app is talking is the user. update() returns to Idle when
   // the audio drains, and reopens it from there if the latch is still on.
-  mic_->stop();
+  //
+  // M18.2. Unless the barge watch wants it, in which case the device stays up
+  // and is watched instead of being shut -- a worker report read out over the
+  // user is exactly as interruptible as a reply, and for the same reason. The
+  // capture buffer is dropped either way: what was said before the app started
+  // talking belongs to no turn.
+  if (barge_watch_wanted()) {
+    begin_barge_watch();
+    mic_->discard();
+  } else {
+    mic_->stop();
+  }
   chunk_.clear();
   mic_->drain(chunk_);
   chunk_.clear();

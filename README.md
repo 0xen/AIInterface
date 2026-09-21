@@ -113,7 +113,7 @@ build\bin\Release\avatar.exe
 
 | Control | Action |
 |---|---|
-| SPACE or the microphone button | start listening; again to stop and send (also barges in while Claude speaks) |
+| SPACE or the microphone button | start listening; again to stop and send. Pressed while Claude is speaking it **cancels** the reply — the voice stops and so does the text, at whatever word had arrived |
 | S or the speaker button | mute Claude's voice. A level, remembered across runs: audio already playing is cut and nothing further is spoken, while replies still arrive as text |
 | E or the stop button | cancel the reply in flight, close the mic, pause every worker |
 | Type, then Enter | send a typed message. This works while the microphone is open: what was being heard is discarded, the typed text is the turn, and listening resumes after the reply |
@@ -122,6 +122,18 @@ build\bin\Release\avatar.exe
 
 The assistant can mute itself, too: ask it to be quiet and it sets `panel.muted`
 and carries on replying in text. The speaker button or S brings it back.
+
+**Talking over it works too, and it is not the same thing as SPACE.** While the microphone
+latch is on (or a wake phrase is set), the microphone stays open while Claude speaks, and a
+loud, deliberate interruption — about a third of a second of continuous speech, which a cough
+or a keypress does not reach — stops the voice mid-sentence and opens listening for what you
+are saying. The reply is *silenced*, not cancelled: its text goes on arriving in the panel in
+full, so nothing is lost by interrupting. SPACE is the other choice and is still there for
+when you want the reply to stop altogether. Nothing heard while Claude is speaking is ever
+decoded or sent — it is watched for loudness and for nothing else — and if you say something
+and finish it, that utterance supersedes the reply you talked over. `AII_BARGE_DEBUG=1` logs
+one line per reply saying how much of Claude's own voice reached the microphone, what bar
+that set, and whether anything cleared it.
 
 Flags: `--say "text"` sends one turn as soon as the engines are up, `--seconds N` quits after N
 seconds, `--no-voice` shows the window without loading any engine, `--opaque` gives a normal

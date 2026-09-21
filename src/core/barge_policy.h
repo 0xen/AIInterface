@@ -263,4 +263,27 @@ class BargePolicy {
   bool fired_ = false;
 };
 
+// M18.3. How much of the watch's kept-back audio the fresh recogniser stream
+// is given when the rule fires: the onset run, and nothing earlier.
+//
+// The trim is the whole of the decision and the reason it is here rather than
+// inline at the call site is that it is the one part of the pre-roll anybody
+// can be wrong about. `docs/bargein-measurements.md` has the recogniser
+// emitting the word "Sorry" from a silence control with nobody in the room, so
+// audio from before the user started talking is not neutral padding -- it is a
+// source of words the user did not say, arriving at the front of their turn
+// where they are least likely to notice them. Everything before the run began
+// is the reply's leakage and the room, so it is dropped; the run itself is
+// what `kBargeOnsetSec` just spent 0.30 s proving was a voice.
+//
+// Clamped to what is actually held, so a caller whose buffer is shorter than
+// the run (a watch that opened mid-run, a cap set below the onset) gets what
+// there is rather than reading off the front of it.
+inline std::size_t barge_preroll_samples(std::size_t have, float voiced_run_sec, int rate) {
+  if (rate <= 0 || !(voiced_run_sec > 0.0f)) return 0;
+  const double want = double(voiced_run_sec) * double(rate);
+  if (want >= double(have)) return have;
+  return static_cast<std::size_t>(want);
+}
+
 }  // namespace aii

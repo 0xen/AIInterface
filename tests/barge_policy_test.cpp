@@ -272,6 +272,28 @@ int main() {
           "a gate above the learned leak wins: the clamp only ever raises");
   }
 
+  std::printf("M18.3: the pre-roll handed to the new stream is the onset run and nothing earlier\n");
+  {
+    constexpr int kRate = 16000;
+    // What the watch actually holds: kBargePrerollSec (0.5 s) of 16 kHz mono.
+    const std::size_t held = std::size_t(0.5f * kRate);
+    check(barge_preroll_samples(held, kBargeOnsetSec, kRate) == std::size_t(0.30f * kRate),
+          "a fire after the bare onset hands over 0.30 s of the 0.5 s held");
+    check(barge_preroll_samples(held, 0.72f, kRate) == held,
+          "**and never more than it has**: the 0.72 s run measured in run 4 is clamped to "
+          "the buffer, which is what stops a caller reading off the front of it");
+    check(barge_preroll_samples(0, kBargeOnsetSec, kRate) == 0,
+          "an empty buffer hands over nothing");
+    check(barge_preroll_samples(held, 0.0f, kRate) == 0,
+          "and so does a run of no length, rather than the whole buffer");
+    check(barge_preroll_samples(held, -1.0f, kRate) == 0, "a negative run included");
+    check(barge_preroll_samples(held, kBargeOnsetSec, 0) == 0,
+          "a rate of zero is refused rather than divided by");
+    check(barge_preroll_samples(held, kBargeOnsetSec, kRate) < held,
+          "**the audio before the run is dropped** -- it is the reply's own leakage and the "
+          "room, and the measurements have the recogniser making words out of exactly that");
+  }
+
   std::printf("\n%s\n", failures == 0 ? "all cases pass" : "FAILURES");
   return failures == 0 ? 0 : 1;
 }
