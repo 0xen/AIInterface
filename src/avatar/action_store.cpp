@@ -6,6 +6,7 @@
 #include <sstream>
 #include <system_error>
 
+#include "core/app_bus.h"
 #include "core/user_paths.h"
 #include "json.hpp"
 
@@ -34,6 +35,40 @@ constexpr float kScanEvery = 1.0f;
 // The leading `_` is the same rule the script scan already uses, so the
 // bookkeeping can never be mistaken for an action.
 const char* kArmedFile = "_armed.json";
+
+// FNV-1a, 64-bit, over the whole file, as sixteen hex digits. The same
+// function `user_paths.cpp` uses for the seed manifest and for the same
+// reason: it answers "are these the same bytes?" and keeps this file to the
+// standard library, so the store stays testable with no engine and no window.
+//
+// **Not the seed manifest.** `.seeded` records what this *app shipped* into a
+// tree, so that an upgrade can tell a refresh from a hand edit. This records
+// what the *user armed*, and the two must not be conflated: a file the seeder
+// legitimately refreshed is still a file the user has not consented to in its
+// new form, and that is precisely the case finding 11 is about.
+std::string file_fingerprint(const fs::path& p) {
+  std::ifstream f(p, std::ios::binary);
+  if (!f) return std::string();
+  std::uint64_t h = 1469598103934665603ull;
+  char buf[4096];
+  while (f.read(buf, sizeof(buf)) || f.gcount() > 0) {
+    const std::streamsize n = f.gcount();
+    for (std::streamsize i = 0; i < n; ++i) {
+      h ^= static_cast<std::uint8_t>(buf[i]);
+      h *= 1099511628211ull;
+    }
+    if (!f) break;
+  }
+  char out[17] = {};
+  std::snprintf(out, sizeof(out), "%016llx", static_cast<unsigned long long>(h));
+  return std::string(out);
+}
+
+// The policy folder: one level above `actions\`, and the same directory
+// `ScriptHost::discover()` scans. Stated here rather than derived from
+// `actions_root().parent_path()` so that the two readers of this rule are both
+// looking at the same sentence.
+fs::path scripts_root() { return user_data_root() / "scripts"; }
 
 bool is_python_file(const fs::path& p) {
   std::string ext = p.extension().string();
@@ -110,6 +145,28 @@ std::string truncated(const std::string& s, std::size_t max) {
 
 fs::path ActionStore::actions_root() { return user_data_root() / "scripts" / "actions"; }
 
+std::string ActionStore::policy_key(const std::string& name) { return "policy:" + name; }
+
+bool ActionStore::policy_allowed(const fs::path& file) {
+  // Read straight off the record, with no store and no scan: this is called
+  // from `ScriptHost::discover()` at startup, before anything else has looked
+  // at the directory. The failure direction is deliberate — an unreadable or
+  // absent record allows nothing, so a policy runs only when a file this app
+  // wrote says the user said yes to these exact bytes.
+  std::ifstream f(ActionStore::actions_root() / kArmedFile, std::ios::binary);
+  if (!f) return false;
+  json j = json::parse(f, nullptr, false);
+  if (j.is_discarded() || !j.is_object()) return false;
+  const auto armed = j.find("armed");
+  if (armed == j.end() || !armed->is_object()) return false;
+  const std::string key = policy_key(file.stem().string());
+  const auto it = armed->find(key);
+  if (it == armed->end() || !it->is_string()) return false;
+  const std::string recorded = it->get<std::string>();
+  if (recorded.empty()) return false;
+  return recorded == file_fingerprint(file);
+}
+
 void ActionStore::load() {
   const fs::path root = actions_root();
   std::error_code ec;
@@ -130,31 +187,46 @@ void ActionStore::load() {
 }
 
 void ActionStore::read_armed() {
-  armed_names_.clear();
+  armed_.clear();
   seen_names_.clear();
   std::ifstream f(actions_root() / kArmedFile, std::ios::binary);
   if (!f) return;
   json j = json::parse(f, nullptr, false);
   if (j.is_discarded() || !j.is_object()) return;
-  const auto read = [&](const char* key, std::vector<std::string>* into) {
-    const auto it = j.find(key);
-    if (it == j.end() || !it->is_array()) return;
-    for (const json& n : *it)
-      if (n.is_string()) into->push_back(n.get<std::string>());
-  };
-  read("armed", &armed_names_);
-  read("seen", &seen_names_);
+  const auto armed = j.find("armed");
+  if (armed != j.end()) {
+    // M19.1 writes an object of key -> fingerprint. Everything before it wrote
+    // a bare array of names, and that file is still read rather than
+    // discarded: throwing away a consent record on upgrade would re-ask about
+    // every action the user has ever armed, which is a pop-up that teaches
+    // them to click it away.
+    if (armed->is_object()) {
+      for (const auto& [key, value] : armed->items())
+        armed_[key] = value.is_string() ? value.get<std::string>() : std::string();
+    } else if (armed->is_array()) {
+      for (const json& n : *armed)
+        if (n.is_string()) armed_[n.get<std::string>()] = std::string();
+    }
+  }
+  const auto seen = j.find("seen");
+  if (seen != j.end() && seen->is_array()) {
+    for (const json& n : *seen)
+      if (n.is_string()) seen_names_.push_back(n.get<std::string>());
+  }
   // A file written by an older build has `armed` and no `seen`. Everything
   // armed has plainly been answered, so it counts as seen; anything else in
   // the directory is asked about once, which is the right side to err on.
-  for (const std::string& n : armed_names_)
-    if (std::find(seen_names_.begin(), seen_names_.end(), n) == seen_names_.end())
-      seen_names_.push_back(n);
+  for (const auto& [key, fingerprint] : armed_) {
+    (void)fingerprint;
+    if (std::find(seen_names_.begin(), seen_names_.end(), key) == seen_names_.end())
+      seen_names_.push_back(key);
+  }
 }
 
 void ActionStore::write_armed() const {
   json j = json::object();
-  j["armed"] = armed_names_;
+  j["armed"] = json::object();
+  for (const auto& [key, fingerprint] : armed_) j["armed"][key] = fingerprint;
   j["seen"] = seen_names_;
   std::error_code ec;
   fs::create_directories(actions_root(), ec);
@@ -177,6 +249,7 @@ void ActionStore::rescan() {
     a.name = e.path().stem().string();
     a.path = e.path().string();
     a.description = truncated(first_docstring_line(e.path()), kActionDescMax);
+    a.fingerprint = file_fingerprint(e.path());
     found.push_back(std::move(a));
   }
   // Sorted, so "which action is listed first" is a property of the name rather
@@ -186,8 +259,7 @@ void ActionStore::rescan() {
             [](const Action& a, const Action& b) { return a.name < b.name; });
 
   for (std::size_t i = 0; i < found.size(); ++i) {
-    found[i].armed = std::find(armed_names_.begin(), armed_names_.end(), found[i].name) !=
-                     armed_names_.end();
+    found[i].armed = resolve_armed(&found[i]);
     found[i].in_digest = i < kActionDigestMax;
   }
 
@@ -203,32 +275,141 @@ void ActionStore::rescan() {
   // rather than lasting until the next launch.
   for (const Action& a : found) {
     if (std::find(seen_names_.begin(), seen_names_.end(), a.name) != seen_names_.end()) continue;
+    // Already in the queue means already asked about, and the two reasons it
+    // can be there are both reasons not to arm it from here: the user is
+    // looking at the question right now, or M19.1 has just revoked it because
+    // the bytes moved. `set_auto_allow`'s own comment has always said the
+    // switch does not reach into the queue; before M19.1 the next scan did it
+    // anyway, one second later.
+    if (std::find(awaiting_.begin(), awaiting_.end(), a.name) != awaiting_.end()) continue;
     if (auto_allow_) {
       // Armed on sight, because the user has said every new one may be. Still
       // recorded as seen, so turning the switch back off does not make the
       // whole set ask again.
-      armed_names_.push_back(a.name);
+      armed_[a.name] = a.fingerprint;
       seen_names_.push_back(a.name);
       write_armed();
       news_.push_back(a.name);
-    } else if (std::find(awaiting_.begin(), awaiting_.end(), a.name) == awaiting_.end()) {
+    } else {
       awaiting_.push_back(a.name);
     }
   }
-  // A file deleted outside the app leaves nothing behind here either.
-  awaiting_.erase(std::remove_if(awaiting_.begin(), awaiting_.end(),
-                                 [&](const std::string& n) {
-                                   return !std::any_of(
-                                       found.begin(), found.end(),
-                                       [&](const Action& a) { return a.name == n; });
-                                 }),
-                  awaiting_.end());
   actions_ = std::move(found);
   // Re-resolve armed after any auto-arm above, so the list handed out is never
   // one frame behind the file that was just written.
-  for (Action& a : actions_)
-    a.armed =
-        std::find(armed_names_.begin(), armed_names_.end(), a.name) != armed_names_.end();
+  for (Action& a : actions_) {
+    const auto it = armed_.find(a.name);
+    a.armed = it != armed_.end();
+  }
+  rescan_policies();
+  // A file deleted outside the app leaves nothing behind here either. Policies
+  // are in this queue too, so the check is against everything `find()` can
+  // resolve rather than against the action list alone.
+  awaiting_.erase(std::remove_if(awaiting_.begin(), awaiting_.end(),
+                                 [&](const std::string& n) { return find(n) == nullptr; }),
+                  awaiting_.end());
+}
+
+// M19.2. The policy scan. Deliberately the same shape as the action scan above
+// — flat, non-recursive, `_` and `.` skipped — because `ScriptHost::discover()`
+// picks exactly that set up, and a gate that disagrees with the thing it gates
+// is worse than no gate.
+void ActionStore::rescan_policies() {
+  std::vector<Action> found;
+  std::error_code ec;
+  for (const fs::directory_entry& e : fs::directory_iterator(scripts_root(), ec)) {
+    if (ec) break;
+    if (!e.is_regular_file(ec) || ec) continue;
+    if (!is_python_file(e.path())) continue;
+    const std::string file = e.path().filename().string();
+    if (!file.empty() && (file[0] == '_' || file[0] == '.')) continue;
+    if (found.size() >= kActionsMax) break;
+    Action a;
+    a.name = e.path().stem().string();
+    a.path = e.path().string();
+    a.policy = true;
+    a.in_digest = false;  // never in the prompt: the model cannot call one
+    const std::string doc = first_docstring_line(e.path());
+    // Said on the row rather than assumed known. The approval window shows a
+    // name and a line, and "this one runs every time you start the app" is the
+    // whole difference between the two things the window now asks about.
+    a.description = truncated(
+        doc.empty() ? std::string("runs at every launch") : "runs at every launch - " + doc,
+        kActionDescMax);
+    a.fingerprint = file_fingerprint(e.path());
+    found.push_back(std::move(a));
+  }
+  std::sort(found.begin(), found.end(),
+            [](const Action& a, const Action& b) { return a.name < b.name; });
+
+  for (Action& a : found) {
+    a.armed = resolve_armed(&a);
+    const std::string key = policy_key(a.name);
+    if (a.armed) continue;
+    if (std::find(seen_names_.begin(), seen_names_.end(), key) != seen_names_.end()) continue;
+    if (std::find(awaiting_.begin(), awaiting_.end(), key) != awaiting_.end()) continue;
+    // **`auto_allow` is not consulted here, and that is the point.** That
+    // switch is the user saying the scripts *the assistant writes for them to
+    // call* may run without a click. A file that runs unattended for the whole
+    // life of the app from the next launch is the case they asked for a pop-up
+    // about, so it always gets one.
+    awaiting_.push_back(key);
+    std::fprintf(stderr, "[scripts] new policy script '%s' is held until you allow it: %s\n",
+                 a.name.c_str(), a.path.c_str());
+    AppBus::instance().post(BusLine("script.status")
+                                .str("text", "the policy script '" + a.name +
+                                                 "' is waiting for you to allow it")
+                                .flag("ok", false)
+                                .done());
+  }
+  policies_ = std::move(found);
+}
+
+bool ActionStore::resolve_armed(Action* a) {
+  const std::string key = a->policy ? policy_key(a->name) : a->name;
+  const auto it = armed_.find(key);
+  if (it == armed_.end()) return false;
+  if (it->second.empty()) {
+    // A record from before M19.1. There is no arm-time to compare against, so
+    // the current bytes are adopted as the armed ones and the adoption is
+    // logged: an upgrade that re-asked about every action instead would put a
+    // window of names in front of the user with nothing new to tell them.
+    it->second = a->fingerprint;
+    write_armed();
+    std::fprintf(stderr,
+                 "[actions] '%s' was armed before its bytes were recorded; recording them now\n",
+                 key.c_str());
+    return true;
+  }
+  if (!a->fingerprint.empty() && it->second == a->fingerprint) return true;
+  // The bytes moved under a yes the user gave to different code, or the file
+  // cannot be read at all. Consent is withdrawn here and now — written back,
+  // so it survives the app being killed — and the question goes back into the
+  // queue the approval window draws.
+  armed_.erase(it);
+  seen_names_.erase(std::remove(seen_names_.begin(), seen_names_.end(), key), seen_names_.end());
+  write_armed();
+  note_changed(*a);
+  return false;
+}
+
+void ActionStore::note_changed(const Action& a) {
+  const std::string key = a.policy ? policy_key(a.name) : a.name;
+  if (std::find(awaiting_.begin(), awaiting_.end(), key) == awaiting_.end())
+    awaiting_.push_back(key);
+  const char* kind = a.policy ? "policy script" : "action";
+  std::fprintf(stderr, "[actions] the %s '%s' changed since you armed it; it will not run "
+                       "until you confirm it again\n",
+               kind, a.name.c_str());
+  // The existing status path: the same `script.status` a script itself posts,
+  // so this lands in the Scripts section of the settings surface and in the
+  // bus log, with no new route to keep working. Posted rather than published:
+  // inbound is what `BusBindings` applies on the frame loop.
+  AppBus::instance().post(BusLine("script.status")
+                              .str("text", std::string("the ") + kind + " '" + a.name +
+                                               "' changed since you armed it; confirm it again")
+                              .flag("ok", false)
+                              .done());
 }
 
 bool ActionStore::tick(float dt) {
@@ -244,14 +425,24 @@ bool ActionStore::tick(float dt) {
   return before_n != actions_.size() || before != after;
 }
 
-const Action* ActionStore::find(const std::string& name) const {
+const Action* ActionStore::find_action(const std::string& name) const {
   for (const Action& a : actions_)
     if (a.name == name) return &a;
   return nullptr;
 }
 
+const Action* ActionStore::find(const std::string& name) const {
+  if (const Action* a = find_action(name)) return a;
+  // A policy answers only to its prefixed key, which is what the queue and the
+  // approval window carry. A bare name never reaches one, so the window can
+  // draw a policy row without the name in an ```aii``` block ever resolving.
+  for (const Action& p : policies_)
+    if (policy_key(p.name) == name) return &p;
+  return nullptr;
+}
+
 ActionRefusal ActionStore::check(const std::string& name) const {
-  const Action* a = find(name);
+  const Action* a = find_action(name);
   // The name is resolved against the discovered set and nothing else. This is
   // the line that makes "a name, never a path and never a body" true: there is
   // no branch here that reads a file the scan did not already find.
@@ -259,6 +450,14 @@ ActionRefusal ActionStore::check(const std::string& name) const {
   if (!authoring_) return ActionRefusal::AuthoringOff;
   if (!a->in_digest) return ActionRefusal::PastCap;
   if (!a->armed) return ActionRefusal::NotArmed;
+  // M19.1. The last word on consent is the file on disk at the moment of the
+  // call, not the scan up to a second ago and not the name. The body is read
+  // again by `runpy` a few milliseconds from here, so this is the only
+  // comparison that is about the bytes that will actually run.
+  const auto it = armed_.find(a->name);
+  const std::string now = file_fingerprint(a->path);
+  if (it == armed_.end() || now.empty() || (!it->second.empty() && it->second != now))
+    return ActionRefusal::Changed;
   return ActionRefusal::None;
 }
 
@@ -273,15 +472,28 @@ void ActionStore::set_auto_allow(bool on) {
 }
 
 void ActionStore::arm(const std::string& name) {
-  if (std::find(armed_names_.begin(), armed_names_.end(), name) == armed_names_.end())
-    armed_names_.push_back(name);
+  // **The bytes are read here, at the moment of the yes.** That is the whole
+  // of M19.1: the record the later calls are checked against is taken from the
+  // file the user was just shown, so "armed" can never mean more than the code
+  // that was on disk when they clicked.
+  const Action* a = find(name);
+  armed_[name] = a ? file_fingerprint(a->path) : std::string();
   if (std::find(seen_names_.begin(), seen_names_.end(), name) == seen_names_.end())
     seen_names_.push_back(name);
   write_armed();
   awaiting_.erase(std::remove(awaiting_.begin(), awaiting_.end(), name), awaiting_.end());
-  for (Action& a : actions_)
-    if (a.name == name) a.armed = true;
-  news_.push_back(name);
+  for (Action& x : actions_)
+    if (x.name == name) x.armed = true;
+  bool is_policy = false;
+  for (Action& p : policies_)
+    if (policy_key(p.name) == name) {
+      p.armed = true;
+      is_policy = true;
+    }
+  // `news_` is what the running conversation is told, and the model has no
+  // verb that reaches a policy, so arming one is not news to it. It is news to
+  // the user, and they were told by the window they clicked.
+  if (!is_policy) news_.push_back(name);
 }
 
 void ActionStore::dismiss(const std::string& name) {
@@ -310,13 +522,14 @@ void ActionStore::dismiss_all() {
 }
 
 bool ActionStore::remove(const std::string& name) {
-  const Action* a = find(name);
+  // `find_action`, not `find`: the Scripts row deletes actions, and a policy
+  // file is the user's own and is not this button's to unlink.
+  const Action* a = find_action(name);
   if (!a) return false;
   std::error_code ec;
   const bool gone = fs::remove(a->path, ec) && !ec;
   if (!gone) return false;
-  armed_names_.erase(std::remove(armed_names_.begin(), armed_names_.end(), name),
-                     armed_names_.end());
+  armed_.erase(name);
   // Forgotten entirely, not just disarmed: a later file of the same name is a
   // different script and must be asked about on its own account.
   seen_names_.erase(std::remove(seen_names_.begin(), seen_names_.end(), name),

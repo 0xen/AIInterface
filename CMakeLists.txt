@@ -324,6 +324,20 @@ if(AII_BUILD_TESTS)
     target_compile_options(action_digest_test PRIVATE /utf-8 /W4)
   endif()
   aii_copy_runtime_dlls(action_digest_test)
+
+  # ---- action_bytes_test: consent is to the bytes, not to the name -------
+  # M19.1/M19.2, findings 11 and 12. Same shape as action_digest_test and for
+  # the same reason -- the store is free of ImGui, the engine and the window --
+  # but this one is about the consent record rather than the prompt, so it
+  # works against real files under %TEMP% with APPDATA pointed at them.
+  add_executable(action_bytes_test tests/action_bytes_test.cpp src/avatar/action_store.cpp)
+  target_include_directories(action_bytes_test PRIVATE src src/avatar)
+  target_link_libraries(action_bytes_test PRIVATE aii_core)
+  target_compile_definitions(action_bytes_test PRIVATE AII_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets")
+  if(MSVC)
+    target_compile_options(action_bytes_test PRIVATE /utf-8 /W4)
+  endif()
+  aii_copy_runtime_dlls(action_bytes_test)
 endif()
 
 # ---- avatar: the corner window on the Renderer engine (submodule) ----
