@@ -80,6 +80,27 @@ int main() {
       {"Error: ENOSPC: no space left on device, write", Msg::FailUnclear, "unknown"},
       {"", Msg::FailUnclear, "unknown"},
       {"\xe4\xbd\x95\xe3\x81\x8b", Msg::FailUnclear, "unknown"},  // 何か
+      // --- M20.4: free prose that used to be classified by one word in it ---
+      //
+      // All of these are result text the CLI can hand back through
+      // `is_error`, which is prose written by the other side and not a string
+      // this app built. Before M20.4 the first of them was spoken as "I
+      // stopped it before it finished", which is a sentence about something
+      // the app did and is a lie about every one of these.
+      {"the user cancelled the subscription", Msg::FailUnclear, "cli result"},
+      {"I cancelled the booking as you asked", Msg::FailUnclear, "cli result"},
+      {"could not connect the two arguments in the draft", Msg::FailUnclear, "cli result"},
+      {"the file has 429 lines and the last one is blank", Msg::FailUnclear, "cli result"},
+      {"the report exited the building at noon", Msg::FailUnclear, "cli result"},
+      // Still classified, because these are the phrases that mean what they
+      // say wherever they appear -- the narrow half of the old rule, kept.
+      {"Claude AI usage limit reached|1731369600", Msg::FailAtItsLimit, "cli result"},
+      {"claude process exited: Claude AI usage limit reached|1731369600", Msg::FailAtItsLimit,
+       "code_client"},
+      // --- M20.4: the app's own strings still match, anchored ---
+      {"a worker named cancel is already running", Msg::FailAlreadyRunning, "worker_pool"},
+      {"HTTP 529 overloaded_error", Msg::FailAtItsLimit, "claude_client"},
+      {"WinHttpQueryDataAvailable failed (12002)", Msg::FailCouldNotReach, "claude_client"},
   };
 
   std::printf("-- every client error string maps to a plain sentence --\n");
@@ -136,6 +157,18 @@ int main() {
   check(distinct, "the unknown-error line is nobody else's line");
   check(unclear.find("on screen") != std::string::npos,
         "the unknown-error line points at where the real reason is, instead of hiding it");
+
+  // M20.4, finding 22, as its own assertion because it is the one this rule
+  // was rewritten for: the word "cancel" inside somebody else's sentence is
+  // not this app having stopped a turn.
+  std::printf("\n-- a word inside free prose is not a diagnosis --\n");
+  const std::string stopped_by_us = app_text_in(AppLang::English, Msg::FailStoppedByUs);
+  const std::string prose = "the user cancelled the subscription";
+  const std::string said = app_text_in(AppLang::English, failure_reason(prose));
+  std::printf("     %-40s -> %s\n", prose.c_str(), said.c_str());
+  check(said != stopped_by_us, "\"the user cancelled the subscription\" is not read as \"stopped\"");
+  check(failure_reason("cancelled") == Msg::FailStoppedByUs,
+        "the backend's own \"cancelled\", written whole and alone, still is");
 
   std::printf("%s\n", failures == 0 ? "all ok" : "FAILURES");
   return failures == 0 ? 0 : 1;

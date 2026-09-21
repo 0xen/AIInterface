@@ -855,6 +855,16 @@ int main(int /*argc*/, char** /*argv*/) {
     // environment override wins for that run, and the settings surface says
     // which model is actually in force rather than showing the picker's row
     // as though it were.
+    //
+    // M20.2. And the override must not be *written back*, which is what it was
+    // doing. The picker below is seeded from whatever is in force, the frame
+    // loop mirrors the picker into `settings.json` every frame, and so a run
+    // with AII_MODEL set replaced the user's stored choice within a second of
+    // starting — the same trap `--theme` was given `themeFromArgs` for, and
+    // this is the same guard under a different name. An override is for one
+    // run by definition; a run must not be able to change what the next one
+    // comes up as unless the user asked it to.
+    const bool modelFromEnv = !voiceCfg.model_override.empty();
     if (voiceCfg.model_override.empty()) {
         const std::string key = settings.get_string("model", "name",
                                                     aii::model_choice(aii::kModelChoiceDefault).key);
@@ -2193,6 +2203,22 @@ int main(int /*argc*/, char** /*argv*/) {
         // is reported once, the same way a failed avatar reload is.
         settings.tick(dt);
         if (settings.take_status_change()) log::warn("{}", settings.status());
+        // M20.3. The digest the system prompt carries, recomposed on every
+        // save that landed — the same rule `set_actions_digest` follows below
+        // when a script file changes, and for the same reason. It was composed
+        // once at launch, so every setting changed after that reached the next
+        // child as the value it used to have: the assistant would be told the
+        // wake phrase was empty, or the timeout sixty seconds, by a prompt
+        // built after the user had changed both.
+        //
+        // Only the composed-at-launch copy, again like the actions digest: a
+        // system prompt is a launch argument and the running child's cannot be
+        // rewritten. What this fixes is the *restart*, which is what finding
+        // 18 was about.
+        if (settings.take_saved()) {
+            aii::set_settings_digest(aii::settings_digest(settings));
+            log::info("[settings] saved; the digest a new instance is given is recomposed");
+        }
         // A toolbar button the agent asked for and did not get. Refusals happen
         // on the turn thread and are deliberately never spoken (config.cpp), so
         // this line is the only record that one was turned away.
@@ -3105,6 +3131,11 @@ int main(int /*argc*/, char** /*argv*/) {
                 avatarOptions.scripts.push_back({a.name, a.description, a.armed, a.in_digest});
             avatarOptions.art_status = avatarSource.status();
             avatarOptions.art_status_ok = avatarSource.status_ok();
+            // M20.1. The same carry for the file the surface writes to. Before
+            // this the status went only to the log, and the panel went on
+            // saying "Saved" over a write that had failed.
+            avatarOptions.settings_status = settings.status();
+            avatarOptions.settings_status_failed = settings.save_failed();
             avatarOptions.derived = avatarSource.derived();
             avatarOptions.custom_theme = avatarSource.theme() == aii::AvatarSource::custom_theme();
             // M8.3. What the session is really doing, which is not always what
@@ -3254,7 +3285,16 @@ int main(int /*argc*/, char** /*argv*/) {
             // through the table tomorrow when the alias behind it has moved on
             // — and so that an entry dropped from the table degrades to the
             // CLI's default at the next read rather than onto a command line.
-            settings.set_string("model", "name", aii::model_choice(uiState.model).key);
+            //
+            // M20.2. Not while AII_MODEL is set, exactly as the theme is not
+            // written while --theme is. The picker is showing the override,
+            // and storing what the environment said for this run would make an
+            // override a permanent change nobody asked for. A model picked by
+            // hand during such a run still restarts the child on it — the
+            // choice is honoured, it is simply not what the next run comes up
+            // as, which is what "for this run" means.
+            if (!modelFromEnv)
+                settings.set_string("model", "name", aii::model_choice(uiState.model).key);
             // The scrim and the caption belong to the loader, not the panel:
             // the loading screen has to look the same whether or not there is
             // anything underneath it. The foreground draw list puts them over

@@ -1414,6 +1414,19 @@ void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
   if (ImGui::SmallButton("x##settings_close")) state.settings_open = false;
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close settings");
 
+  // M20.1. Whether anything below this line is reaching the file at all.
+  // Above the first control on purpose: it qualifies every "Saved" in the
+  // surface, and a reader who has scrolled past it has read it.
+  if (!options.settings_status.empty()) {
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Text, options.settings_status_failed ? warn() : dim());
+    ImGui::TextWrapped("%s", options.settings_status.c_str());
+    if (options.settings_status_failed)
+      ImGui::TextWrapped("Nothing on this surface is being kept. It is still being tried; "
+                         "close something that has the file open and it will land.");
+    ImGui::PopStyleColor();
+  }
+
   settings_heading("Appearance");
   settings_row("Avatar");
   name_picker("##avatar_pick", options.avatars, state.avatar_name);

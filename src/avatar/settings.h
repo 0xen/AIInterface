@@ -310,6 +310,19 @@ class Settings {
   // repeating it — same shape as AvatarSource::take_status_change().
   bool take_status_change();
 
+  // M20.1. True while the last write failed and the change is still owed to
+  // the file. The settings surface draws its status amber on this rather than
+  // on `!status_ok()` alone, because a *recovered* save is also a status the
+  // user should see and it is not a warning.
+  bool save_failed() const { return !status_ok_ && dirty_; }
+
+  // M20.3. True once per save that actually reached the disk. The frame loop
+  // recomposes the settings digest on it, the same way it recomposes the
+  // actions digest when `ActionStore::tick` reports a change — so a restart
+  // hands the new child the values the file has now and not the ones it had
+  // at launch.
+  bool take_saved();
+
   // M3.14. What is actually on disk under `section`/`key`, rendered the way
   // the file spells it, or an empty string when the file does not name it.
   //
@@ -324,6 +337,9 @@ class Settings {
 
  private:
   void note(std::string line, bool ok);
+  // M20.1. note() plus "and it is still owed": keeps `dirty_` and advances
+  // the retry backoff.
+  void fail(std::string line);
   void save();
 
   std::filesystem::path path_;
@@ -332,6 +348,11 @@ class Settings {
   nlohmann::json root_ = nlohmann::json::object();
   bool dirty_ = false;
   float since_change_ = 0.0f;
+  // M20.1. Zero while nothing has failed, which is also how `tick()` tells
+  // the debounce from the backoff.
+  float retry_wait_ = 0.0f;
+  // M20.3. Set by a save that reached the disk, cleared by take_saved().
+  bool saved_ = false;
   std::string status_;
   bool status_ok_ = false;
   bool status_new_ = false;
