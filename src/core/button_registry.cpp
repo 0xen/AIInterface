@@ -20,8 +20,11 @@ std::string truncate_chars(const std::string& s, std::size_t max_chars) {
   std::size_t chars = 0;
   for (std::size_t i = 0; i < s.size();) {
     if (chars == max_chars) return s.substr(0, i);
-    const unsigned char c = static_cast<unsigned char>(s[i]);
-    i += c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1;
+    // M24.2. This used to be a one-line ternary on the lead byte, one of three
+    // decoders in this repo that disagreed about malformed input. `utf8_next`
+    // is the one that is left; the cut is still only ever taken at a boundary
+    // it stopped on, because it never advances into a sequence it decoded.
+    utf8_next(s, i);
     ++chars;
   }
   return s;

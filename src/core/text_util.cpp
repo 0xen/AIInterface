@@ -3,22 +3,47 @@
 #include <cctype>
 
 namespace aii {
-namespace {
 
-// Decode one UTF-8 code point starting at s[i]; advances i.
-uint32_t next_cp(const std::string& s, size_t& i) {
-  unsigned char c = (unsigned char)s[i];
-  uint32_t cp;
-  int extra;
-  if (c < 0x80) { cp = c; extra = 0; }
-  else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; extra = 1; }
-  else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; extra = 2; }
-  else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; extra = 3; }
-  else { ++i; return 0xFFFD; }
-  ++i;
-  for (int k = 0; k < extra && i < s.size(); ++k, ++i) cp = (cp << 6) | ((unsigned char)s[i] & 0x3F);
+// The contract, including every malformed case and which of the three old
+// decoders did what with it, is in the header.
+std::uint32_t utf8_next(const std::string& s, std::size_t& i) {
+  const auto at = [&s](std::size_t k) { return static_cast<unsigned char>(s[k]); };
+  const unsigned char c = at(i);
+  if (c < 0x80) {
+    ++i;
+    return c;
+  }
+  std::size_t len;
+  std::uint32_t cp;
+  std::uint32_t lowest;  // the smallest code point this length may legally spell
+  if ((c & 0xE0) == 0xC0) { len = 2; cp = c & 0x1Fu; lowest = 0x80u; }
+  else if ((c & 0xF0) == 0xE0) { len = 3; cp = c & 0x0Fu; lowest = 0x800u; }
+  else if ((c & 0xF8) == 0xF0) { len = 4; cp = c & 0x07u; lowest = 0x10000u; }
+  else { ++i; return kUtf8Replacement; }
+  if (i + len > s.size()) {  // truncated by the end of the string
+    ++i;
+    return kUtf8Replacement;
+  }
+  for (std::size_t k = 1; k < len; ++k) {
+    const unsigned char t = at(i + k);
+    if ((t & 0xC0) != 0x80) {  // not a continuation byte: the lead was a lie
+      ++i;
+      return kUtf8Replacement;
+    }
+    cp = (cp << 6) | (t & 0x3Fu);
+  }
+  // Overlongs, surrogates and anything past the last plane are well-formed as
+  // bit patterns and are not characters. Accepting them is how a NUL arrives
+  // spelled as two bytes and how a lone surrogate reaches a draw call.
+  if (cp < lowest || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) {
+    ++i;
+    return kUtf8Replacement;
+  }
+  i += len;
   return cp;
 }
+
+namespace {
 
 bool is_japanese_cp(uint32_t cp) {
   return (cp >= 0x3040 && cp <= 0x30FF) ||   // hiragana + katakana
@@ -31,7 +56,7 @@ bool is_japanese_cp(uint32_t cp) {
 
 bool has_japanese(const std::string& s) {
   size_t i = 0;
-  while (i < s.size()) if (is_japanese_cp(next_cp(s, i))) return true;
+  while (i < s.size()) if (is_japanese_cp(utf8_next(s, i))) return true;
   return false;
 }
 
@@ -57,7 +82,7 @@ std::vector<ScriptRun> split_by_script(const std::string& s) {
   size_t i = 0;
   while (i < s.size()) {
     const size_t start = i;
-    const Script sc = script_of(next_cp(s, i));
+    const Script sc = script_of(utf8_next(s, i));
     const std::string piece = s.substr(start, i - start);
     if (sc == Script::Neutral) {
       if (runs.empty()) pending += piece;
@@ -104,7 +129,7 @@ std::vector<ScriptRun> split_by_script(const std::string& s) {
 bool has_speakable_content(const std::string& s) {
   size_t i = 0;
   while (i < s.size()) {
-    uint32_t cp = next_cp(s, i);
+    uint32_t cp = utf8_next(s, i);
     if (cp < 0x80 ? std::isalnum((int)cp) != 0 : is_japanese_cp(cp) || cp >= 0xC0) return true;
   }
   return false;
@@ -156,7 +181,7 @@ int estimate_tokens(const std::string& utf8) {
   bool any = false;
   for (const ScriptRun& run : split_by_script(utf8)) {
     size_t chars = 0, i = 0;
-    while (i < run.text.size()) { next_cp(run.text, i); ++chars; }
+    while (i < run.text.size()) { utf8_next(run.text, i); ++chars; }
     if (chars == 0) continue;
     any = true;
     tokens += static_cast<double>(chars) / (run.japanese ? 1.6 : 3.6);

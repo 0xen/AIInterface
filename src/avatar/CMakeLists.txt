@@ -39,6 +39,8 @@ add_executable(avatar
   settings.h
   sidebar_window.cpp
   sidebar_window.h
+  tool_window_core.cpp
+  tool_window_core.h
   voice_session.cpp
   voice_session.h
   watermark.cpp

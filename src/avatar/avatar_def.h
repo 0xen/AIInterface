@@ -301,6 +301,21 @@ AvatarStage avatar_stage_layout(const AvatarDefinition& def, std::uint32_t band_
 bool load_avatar_definition(const std::filesystem::path& dir, const std::string& theme,
                             AvatarDefinition& out, std::string* error);
 
+// M24.1. The one hex-colour parser. There were three — the palette loader
+// below, `colourFromHex` in main.cpp and `colour_from_hex` in bus_bindings.cpp
+// — and the two in the avatar window differed from this one in exactly one
+// way: they rejected an eight-digit value instead of reading its alpha. Since
+// every caller of those two throws the alpha away anyway (`set_custom_colour`
+// forces it opaque, and the bus binding reads only r/g/b), the palette
+// loader's behaviour is the superset and is what survives.
+//
+// Accepts "rrggbb", "#rrggbb", "rrggbbaa" and "#rrggbbaa", upper or lower
+// case. Alpha defaults to opaque. Nothing else parses: no three-digit short
+// form, no named colours, no whitespace — a value that does not match leaves
+// `out` untouched and returns false, and every caller's contract is that a bad
+// value costs that one key and never the file it came from.
+bool avatar_colour_from_hex(const std::string& text, std::uint32_t& out);
+
 // ---- M1c.5: a picked body colour and the palette derived from it ----------
 //
 // The user picks one colour — the body — and the app derives the rest. Their

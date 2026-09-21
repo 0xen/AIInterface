@@ -45,26 +45,6 @@ bool hex_nibble(char c, std::uint32_t& out) {
   return true;
 }
 
-// "#rrggbb", "rrggbb", "#rrggbbaa" or "rrggbbaa". Hex because that is what an
-// art tool puts on the clipboard; alpha defaults to opaque because a palette
-// entry the user bothered to name is one they want to see.
-bool parse_rgba(const std::string& text, std::uint32_t& out) {
-  std::string s = text;
-  if (!s.empty() && s.front() == '#') s.erase(s.begin());
-  if (s.size() != 6 && s.size() != 8) return false;
-  std::array<std::uint32_t, 8> n{};
-  for (std::size_t i = 0; i < s.size(); ++i) {
-    if (!hex_nibble(s[i], n[i])) return false;
-  }
-  const std::uint32_t r = n[0] * 16 + n[1];
-  const std::uint32_t g = n[2] * 16 + n[3];
-  const std::uint32_t b = n[4] * 16 + n[5];
-  const std::uint32_t a = s.size() == 8 ? n[6] * 16 + n[7] : 255u;
-  out = avatar_rgba(static_cast<std::uint8_t>(r), static_cast<std::uint8_t>(g),
-                    static_cast<std::uint8_t>(b), static_cast<std::uint8_t>(a));
-  return true;
-}
-
 // nlohmann's const operator[] asserts on a missing key, and a missing key is
 // the ordinary case in a file the user is still writing, so every lookup goes
 // through this and every check below is a type test on the result.
@@ -125,7 +105,8 @@ bool apply_palette(const nlohmann::json& obj, const std::string& what, Palette& 
       error = "avatar.json: " + what + " key \"" + key + "\" must be ASCII";
       return false;
     }
-    if (!value.is_string() || !parse_rgba(value.get<std::string>(), pal.rgba[idx])) {
+    if (!value.is_string() ||
+        !avatar_colour_from_hex(value.get<std::string>(), pal.rgba[idx])) {
       error = "avatar.json: " + what + " \"" + key + "\" is not a #rrggbb or #rrggbbaa colour";
       return false;
     }
@@ -135,6 +116,27 @@ bool apply_palette(const nlohmann::json& obj, const std::string& what, Palette& 
 }
 
 }  // namespace
+
+// "#rrggbb", "rrggbb", "#rrggbbaa" or "rrggbbaa". Hex because that is what an
+// art tool puts on the clipboard; alpha defaults to opaque because a palette
+// entry the user bothered to name is one they want to see. The header states
+// the rest of the contract, including what it deliberately does not accept.
+bool avatar_colour_from_hex(const std::string& text, std::uint32_t& out) {
+  std::string s = text;
+  if (!s.empty() && s.front() == '#') s.erase(s.begin());
+  if (s.size() != 6 && s.size() != 8) return false;
+  std::array<std::uint32_t, 8> n{};
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    if (!hex_nibble(s[i], n[i])) return false;
+  }
+  const std::uint32_t r = n[0] * 16 + n[1];
+  const std::uint32_t g = n[2] * 16 + n[3];
+  const std::uint32_t b = n[4] * 16 + n[5];
+  const std::uint32_t a = s.size() == 8 ? n[6] * 16 + n[7] : 255u;
+  out = avatar_rgba(static_cast<std::uint8_t>(r), static_cast<std::uint8_t>(g),
+                    static_cast<std::uint8_t>(b), static_cast<std::uint8_t>(a));
+  return true;
+}
 
 const AvatarClip* AvatarDefinition::find_clip(const std::string& clip_name) const {
   for (const auto& c : clips) {

@@ -68,6 +68,19 @@ void wake_rule() {
   ok("three japanese characters count as three, not nine", wake_chars(kAria) == 3);
   ok("a truncated tail is dropped whole, never split",
      normalise_wake(std::string("ari") + kAria.substr(0, 2)) == "ari");
+  // M24.2. The decoder here is now `aii::utf8_next`, shared with text_util and
+  // the button registry. The case above is unchanged; these are the ones the
+  // local decoder got wrong. It read a stray continuation byte as a real code
+  // point in U+0080..U+00BF, which `fold` kept and re-emitted as two valid
+  // bytes — so a garbage byte off the recogniser became a character inside the
+  // phrase being matched. It is now U+FFFD and dropped, like the truncated
+  // tail, and the good text around it survives.
+  ok("a stray continuation byte is dropped, not promoted to a character",
+     normalise_wake(std::string("ar\x80ia")) == "aria");
+  ok("a lead byte whose continuations are letters keeps the letters",
+     normalise_wake(std::string("\xE3") + "aria") == "aria");
+  ok("a truncated tail mid-string no longer stops the walk",
+     normalise_wake(kAria.substr(0, 2) + std::string("aria")) == "aria");
 
   std::printf("\nwake_word: what is armed\n");
   ok("empty is off", !wake_phrase_armed(""));
