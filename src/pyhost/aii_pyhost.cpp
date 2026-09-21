@@ -92,6 +92,20 @@ void add_hold(aii::BusLine& line, double hold) {
 // The bindings. Registered into CPython's inittab by pybind11 at DLL load,
 // which is why this DLL is loaded before the interpreter is started and never
 // unloaded afterwards.
+// **What this module bounds, and what it does not** (M19.2, finding 12).
+//
+// Every binding below is a fixed verb over the bus: there is no "run this
+// command", no "register a button that invokes something", and every path that
+// comes back in is validated by the app, not by the script. That vocabulary is
+// the boundary, and it is a real one — it is why a policy cannot ask this app
+// to shell out, and why `button` takes a directory and not a command line.
+//
+// It is not a sandbox, and nothing here should be read as claiming one. The
+// interpreter underneath is a full CPython inside `avatar.exe`: `os._exit()`
+// ends the process, `ctypes` reaches whatever the process can, and an `import`
+// of anything on the machine works. A script is therefore held to what it may
+// *ask this app for*, and to nothing else; the gate that decides whether it
+// runs at all is consent to the file, in `avatar/action_store.h`.
 PYBIND11_EMBEDDED_MODULE(aii, m) {
   m.doc() = "The AIInterface app bus, from Python. See scripts/examples/.";
 

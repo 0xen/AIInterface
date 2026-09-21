@@ -8,6 +8,7 @@
 #include <fstream>
 #include <system_error>
 
+#include "action_store.h"
 #include "core/app_bus.h"
 #include "core/user_paths.h"
 #include "pyhost/aii_pyhost.h"
@@ -72,6 +73,10 @@ std::vector<std::string> ScriptHost::discover(const std::vector<std::string>& ex
   for (const std::string& note : seed_notes) std::fprintf(stderr, "[scripts] %s\n", note.c_str());
 
   std::vector<std::string> out;
+  // `--script` is not gated. The gate exists because a file can appear in a
+  // directory without the user having asked for it; a path they typed on their
+  // own command line is the ask, and a consent window in front of it would be
+  // a dialog confirming what the user just said.
   for (const std::string& p : extra) {
     if (fs::exists(p, ec) && !ec) out.push_back(fs::absolute(p, ec).string());
   }
@@ -82,6 +87,22 @@ std::vector<std::string> ScriptHost::discover(const std::vector<std::string>& ex
     if (!is_python_file(e.path())) continue;
     const std::string name = e.path().filename().string();
     if (!name.empty() && (name[0] == '_' || name[0] == '.')) continue;
+    // M19.2, finding 12. **A policy runs only if the user has allowed these
+    // bytes.** Before this, dropping a `.py` here was the whole of the
+    // decision: the file ran on a full CPython at the next launch, for the
+    // life of the app, with nothing asked and nothing said — a weaker gate
+    // than the one an *action* has to pass, though a policy can do strictly
+    // more. The record is `ActionStore`'s, because the queue and the window
+    // that ask the question are already there and a second consent store
+    // would be a second thing to get wrong.
+    //
+    // The announcement is the store's job, not this one's: `ActionStore` scans
+    // this same directory every second, so a file held here appears in the
+    // approval queue whether it arrived before this launch or during it.
+    if (!ActionStore::policy_allowed(e.path())) {
+      std::fprintf(stderr, "[scripts] holding '%s': not allowed yet\n", name.c_str());
+      continue;
+    }
     mine.push_back(e.path().string());
   }
   // Sorted, so "which script ran first" is a property of the name rather than
