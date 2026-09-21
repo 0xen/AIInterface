@@ -1431,7 +1431,17 @@ void VoiceSession::end_wake() {
 void VoiceSession::wake_heard(const std::string& heard) {
   const std::string phrase = wake_phrase_locked_copy();
   if (!wake_match(heard, phrase)) return;
-  rend::log::info("[wake] MATCHED \"{}\" in \"{}\" - opening full listening", phrase, heard);
+  // Review finding 24. **The phrase and the length, never the sentence.** This
+  // line used to print the whole hypothesis the phrase was found in, which is
+  // the one thing the passive state exists not to keep: everything decoded
+  // while matching is dropped where it stands, including the segment the
+  // phrase was in -- and then written to the log anyway, where it survives the
+  // session. The phrase is the user's own configured string and the length is
+  // what makes a false positive diagnosable, which is the same trade
+  // discard_utterance() makes for the one other class of speech this app hears
+  // and does not send.
+  rend::log::info("[wake] MATCHED \"{}\" in {} characters heard - opening full listening", phrase,
+                  heard.size());
   // **What woke the app is never sent.** end_wake() flushes the recogniser and
   // discards the result, and begin_listening() then starts a fresh stream on a
   // freshly discarded capture buffer, so the sentence the phrase was embedded
