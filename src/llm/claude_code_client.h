@@ -82,9 +82,16 @@ class ClaudeCodeClient final : public LlmClient {
   std::string session_id() const { std::lock_guard<std::mutex> l(mutex_); return session_id_; }
   std::string model() const { std::lock_guard<std::mutex> l(mutex_); return model_; }
 
+  // One line of the CLI's stream-json, already stripped of its newline. Called
+  // on the reader thread, and public only so that it can be called off one:
+  // this is the function that reads text written by another program, it is
+  // where review finding 1 lived, and a client constructed and never started
+  // is a perfectly good place to feed it recorded lines. See
+  // `tests/json_shape_test.cpp`. It throws nothing, whatever it is given.
+  void handle_line(const std::string& line);
+
  private:
   void reader_loop();
-  void handle_line(const std::string& line);
   bool write_line(const std::string& line);
 
   Options opt_;

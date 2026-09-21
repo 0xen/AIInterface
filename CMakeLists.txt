@@ -153,6 +153,17 @@ if(AII_BUILD_TESTS)
     target_compile_options(aii_block_test PRIVATE /utf-8 /W4)
   endif()
 
+  # ---- json_shape_test: a line from the CLI that is not the shape expected --
+  # M15.2. Links aii_core because it drives a real ClaudeCodeClient -- one that
+  # is constructed and never started, so no `claude` process and no engine is
+  # loaded; the DLLs beside it are there only because aii_core imports them.
+  add_executable(json_shape_test tests/json_shape_test.cpp)
+  target_link_libraries(json_shape_test PRIVATE aii_core)
+  if(MSVC)
+    target_compile_options(json_shape_test PRIVATE /utf-8 /W4)
+  endif()
+  aii_copy_runtime_dlls(json_shape_test)
+
   # ---- memory_store_test: the file the user's "remember this" lands in ----
   # Same rule as cwd_policy_test: memory_store.cpp is standard-library-only, so
   # stable ids, the cap and the hand-edit rules are all checked against a temp
