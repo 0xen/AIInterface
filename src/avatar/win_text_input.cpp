@@ -88,6 +88,13 @@ void sync_modifiers(ImGuiIO& io) {
 
 struct WinTextInput::State {
   HWND hwnd = nullptr;
+  // The ImGui context this window's keys belong to, captured at install().
+  // Until M30 the procedure fed whichever context was *current* when the
+  // message arrived, which with one window was always the right one and with
+  // seven -- the widget plus six script windows -- was almost always the
+  // widget's. A script window's text field could never receive a keystroke,
+  // and imnodes never saw a Delete.
+  ImGuiContext* ctx = nullptr;
   bool submit = false;
   // Whether the last Enter press was handed to ImGui. The release has to
   // follow the press: a key-up for a key ImGui never saw go down leaves its
@@ -101,6 +108,15 @@ LRESULT CALLBACK subclass_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
                                UINT_PTR /*id*/, DWORD_PTR ref) {
   auto* s = reinterpret_cast<WinTextInput::State*>(ref);
   // Messages can arrive before the first frame and after the context is gone.
+  // The context is switched for the duration of the feed and put back, so a
+  // key for a script window never lands in the widget's io and the frame loop
+  // finds the ambient context exactly as it left it.
+  ImGuiContext* const prev = ImGui::GetCurrentContext();
+  if (s && s->ctx) ImGui::SetCurrentContext(s->ctx);
+  struct Restore {
+    ImGuiContext* prev;
+    ~Restore() { ImGui::SetCurrentContext(prev); }
+  } restore{prev};
   if (s && ImGui::GetCurrentContext()) {
     ImGuiIO& io = ImGui::GetIO();
     switch (msg) {
@@ -164,6 +180,7 @@ std::unique_ptr<WinTextInput> WinTextInput::install(void* hwnd) {
   auto in = std::unique_ptr<WinTextInput>(new WinTextInput());
   in->s_ = std::make_unique<State>();
   in->s_->hwnd = static_cast<HWND>(hwnd);
+  in->s_->ctx = ImGui::GetCurrentContext();
   if (!SetWindowSubclass(in->s_->hwnd, subclass_proc, kSubclassId,
                          reinterpret_cast<DWORD_PTR>(in->s_.get())))
     return nullptr;

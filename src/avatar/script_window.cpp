@@ -26,6 +26,7 @@
 
 #include "imgui_layer.h"
 #include "tool_window_core.h"
+#include "win_text_input.h"
 
 using namespace rend;
 
@@ -129,6 +130,11 @@ LRESULT CALLBACK scriptProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
       case WM_LBUTTONUP: in->buttons.emplace_back(0, false); break;
       case WM_RBUTTONDOWN: in->buttons.emplace_back(1, true); break;
       case WM_RBUTTONUP: in->buttons.emplace_back(1, false); break;
+      // M30.1. The middle button was never forwarded, and it is imnodes'
+      // default pan button -- the first node graph a user opened could not be
+      // moved at all. Right-drag pans too (see the IO setup in create()).
+      case WM_MBUTTONDOWN: in->buttons.emplace_back(2, true); break;
+      case WM_MBUTTONUP: in->buttons.emplace_back(2, false); break;
       case WM_MOUSEWHEEL: in->wheel += GET_WHEEL_DELTA_WPARAM(wp) / 120.0f; break;
       case WM_CLOSE:
         // Swallowed and latched, WorkerWindow's reason exactly: the SDL
@@ -183,6 +189,10 @@ struct ScriptWindow::Impl : ToolWindowCore {
   // Created right after the ImGui layer exists (create()) and destroyed
   // before it goes (~ScriptWindow()).
   ImNodesContext* node_ctx = nullptr;
+  // M30.1. Keys, through the same HWND subclass the widget uses, bound to this
+  // window's ImGui context (win_text_input.cpp). Without it a script window
+  // has no keyboard: no typing into input_text, no Delete for a selected link.
+  std::unique_ptr<WinTextInput> keys;
   // Node ids this window has placed at least once via SetNodePos. A script
   // re-records every ~100ms; a node already positioned must not be re-pinned
   // under the user's drag unless the script forces it (SetNodePos's `force`).
@@ -301,6 +311,20 @@ void replay(ScriptWindow::Impl& s, std::vector<std::string>& id_stack,
       r.id = "link_created:" + std::to_string(link_start) + ":" + std::to_string(link_end);
       r.clicked = true;
       results.push_back(r);
+    }
+    // Delete with links selected removes them. imnodes only *reports*
+    // destruction for a detach-by-drag; deleting a selection is the app's
+    // job, and it is the same result to the script either way.
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && ImNodes::NumSelectedLinks() > 0) {
+      std::vector<int> selected(static_cast<std::size_t>(ImNodes::NumSelectedLinks()));
+      ImNodes::GetSelectedLinks(selected.data());
+      for (int id : selected) {
+        UiResult r;
+        r.id = "link_destroyed:" + std::to_string(id);
+        r.clicked = true;
+        results.push_back(r);
+      }
+      ImNodes::ClearLinkSelection();
     }
     int destroyed_id = 0;
     if (ImNodes::IsLinkDestroyed(&destroyed_id)) {
@@ -930,6 +954,19 @@ std::unique_ptr<ScriptWindow> ScriptWindow::create(platform::IPlatformBackend& b
   // own comment on why SetCurrentContext is called explicitly).
   ImNodes::SetImGuiContext(ImGui::GetCurrentContext());
   s.node_ctx = ImNodes::CreateContext();
+  // How a graph is navigated (M30.1, from the first user report: "I cannot
+  // navigate it"). imnodes pans with one configurable button, middle by
+  // default; the user reached for the right button, so that is the pan
+  // button here, and Alt+left drag pans as well for a mouse without one.
+  // Ctrl+click on a pin detaches its link (imnodes then reports it destroyed,
+  // which reaches the script as `link_destroyed`). These pointers are into
+  // this window's own ImGuiIO, which lives as long as its context does.
+  {
+    ImNodesIO& nio = ImNodes::GetIO();
+    nio.AltMouseButton = ImGuiMouseButton_Right;
+    nio.EmulateThreeButtonMouse.Modifier = &ImGui::GetIO().KeyAlt;
+    nio.LinkDetachWithModifierClick.Modifier = &ImGui::GetIO().KeyCtrl;
+  }
 
   s.input = std::make_unique<ScriptInput>();
   if (!s.subclass(scriptProc, s.input.get())) {
@@ -937,6 +974,10 @@ std::unique_ptr<ScriptWindow> ScriptWindow::create(platform::IPlatformBackend& b
     // SDL's identityless CloseRequested quits the whole application.
     return fail("could not subclass the script window for input");
   }
+  // The ImGui context is still this window's here, which is what install()
+  // captures. A failure is survivable: the window works without a keyboard.
+  s.keys = WinTextInput::install(s.hwnd);
+  if (!s.keys) log::warn("script window: {} has no keyboard (subclass refused)", spec.key);
   log::info("script window: {} up, hwnd {:p}, {}x{} at {},{}", spec.key,
             static_cast<void*>(s.hwnd), s.w, s.h, s.remembered.x, s.remembered.y);
   return self;
@@ -949,6 +990,9 @@ ScriptWindow::~ScriptWindow() {
   // reverse of create()'s order, and for the same reason ToolWindowCore's own
   // shutdown() releases `ui` before `renderer`: whatever a context is bound
   // to must still be alive while it is torn down.
+  // The keyboard subclass first: it points at the input state and the ImGui
+  // context, both of which go below.
+  s.keys.reset();
   if (s.node_ctx) {
     if (s.ui) s.ui->make_current();
     ImNodes::SetCurrentContext(s.node_ctx);

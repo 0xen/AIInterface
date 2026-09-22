@@ -123,6 +123,14 @@ a diagram of the microphone-to-recogniser-to-Claude pipeline, a wiring view
 of an action's own steps, anything shaped like nodes and links rather than a
 form. This is `aii.ui`'s node editor, one imnodes context per script window.
 
+How the user moves around it, so you can say so when you open one: **drag a
+node** by its title bar; **pan** the canvas with a right-button drag (or
+Alt + left drag, or the middle button); **wire** two pins by dragging from one
+to the other; **select** a link by clicking it and press **Delete** to remove
+it, or Ctrl-click a pin to detach its link; **box-select** nodes with a left
+drag on empty canvas. There is no zoom -- imnodes does not have one -- so the
+minimap is how a large graph is found.
+
 | Call | What it does |
 |---|---|
 | `ui.begin_node_editor()` / `ui.end_node_editor()` | Wraps the whole graph for this frame |

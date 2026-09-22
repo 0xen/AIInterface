@@ -21,6 +21,10 @@ Every milestone that merges adds an entry here in the same commit.
   back whatever you connected.
 
 ### Fixed
+- **Node graphs can be moved around now.** The first one opened could not be panned at all:
+  the button that pans was never passed on to the window. Right-drag pans, Alt-drag pans,
+  the middle button pans, and a selected link goes with the Delete key. The assistant's
+  windows also take the keyboard now, so typing into one of their text fields works.
 - **Starting the app by double-clicking it works again.** Since the previous day's changes it
   died silently within a blink of being opened from Explorer, though it ran fine from a
   terminal. The cause was the log file being opened twice with sharing denied; the second
