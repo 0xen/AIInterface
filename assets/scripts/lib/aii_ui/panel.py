@@ -36,6 +36,13 @@ class Panel:
         self.hz = hz
         self._last_error = None
 
+    def set_title(self, title):
+        """Re-title the window. `ui.open` on a key that is already open only
+        updates its title and size, so this is safe to call at any time."""
+        if title and title != self.title:
+            self.title = title
+            ui.open(self.key, self.title, self.w, self.h)
+
     def open(self):
         """Open the window if it is not already. Returns False (and logs)
         when the app refuses -- most often the six-window cap."""

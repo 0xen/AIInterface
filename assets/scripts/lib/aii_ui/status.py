@@ -89,6 +89,11 @@ class StatusPanel:
     def _apply_state(self, data):
         if not isinstance(data, dict):
             return
+        # `title` too: the assistant writes the file *after* the action has
+        # opened the window, so the title it chose would otherwise never land.
+        if data.get("title"):
+            self.title = str(data["title"])
+            self._panel.set_title(self.title)
         if "status" in data:
             self.set_status(str(data["status"]))
         fields = data.get("fields")

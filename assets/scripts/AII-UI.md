@@ -224,6 +224,7 @@ first use). `StatusPanel.watch(path)` reads:
 
 ```json
 {
+  "title": "AIInterface build",
   "status": "building",
   "fields": {"branch": "master", "step": "2 of 5"},
   "progress": 0.4,
@@ -231,8 +232,9 @@ first use). `StatusPanel.watch(path)` reads:
 }
 ```
 
-Every key is optional. `status` and each entry of `fields` replace what was
-there; `progress` is 0..1; `log` is appended -- if the new list starts with
+Every key is optional. `title` re-titles the window (write it in the same
+file as the first status, since the action opens the window before it reads
+your file); `status` and each entry of `fields` replace what was there; `progress` is 0..1; `log` is appended -- if the new list starts with
 everything already shown, only the new tail is added, so rewriting the whole
 file each time does not repeat old lines. `state.watch_json(path)` is the
 primitive underneath this: it returns the parsed dict only when the file's
