@@ -60,7 +60,9 @@
 //   {"t":"session.stop"}               {"t":"session.reset"}
 //   {"t":"session.say","text":"hello"} {"t":"session.get"}
 //   {"t":"settings.model","name":"haiku"}
+//   {"t":"settings.model_worker","name":"sonnet"}
 //   {"t":"settings.tools","group":"file_write","on":true}
+//   {"t":"settings.tools","group":"browser","on":true}
 //   {"t":"settings.language","english":true,"japanese":false}
 //   {"t":"settings.listen_timeout","seconds":45}
 //   {"t":"settings.auto_listen","on":true}

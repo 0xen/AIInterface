@@ -198,6 +198,17 @@ and run commands in the directory it is given without asking. Give the assistant
 are willing to hand over. Set `AII_WORKER_BYPASS=0` to make workers ask instead, accepting that
 they will stall when they do.
 
+Workers run on the `opus` alias by default — cheaper and quicker than the conversational model,
+and good enough for most of what gets spawned. Change it in the settings panel (`model.worker`,
+under the Model picker: `default`, `opus`, `sonnet` or `haiku`) or per task, with `model=` on a
+`spawn` or `schedule ... task=` line.
+
+Turn on the **Browser** tool group (off by default) and both the assistant and its workers can
+drive your Chrome — open tabs, read pages, click, type, screenshot — without asking, through the
+Claude in Chrome extension. It needs that extension installed and Chrome open; without it the
+switch does nothing. `AII_WORKER_CHROME=0` keeps it from workers specifically while leaving the
+conversational instance's own access alone.
+
 The window uses the engine's D3D12 backend: on the AMD driver here only a DirectComposition
 swapchain gives per-pixel alpha (the engine's Vulkan path composites opaque). The text panel
 is drawn with GDI into a bitmap each time something changes and blitted by a shader, which is
@@ -330,6 +341,8 @@ build\Release\voiceloop.exe --speak "Text to speak. 日本語も。"    # synthe
 | `AII_VOICES_JA` | `10,3` | the Japanese ones, as VOICEVOX styles from the loaded `0.vvm`; empty switches them off |
 | `AII_EARLY_WORDS` | `12` | the first chunk of a reply is spoken at a comma or after this many words; `0` waits for full sentences |
 | `AII_WORKER_BYPASS` | `1` | background workers skip permission prompts; `0` makes them ask, which stalls them |
+| `AII_WORKER_MODEL` | `model.worker` setting | overrides which model workers run on (`opus`, `sonnet`, `haiku`, or a full model id); the setting alone already covers this for everyone but a harness |
+| `AII_WORKER_CHROME` | `1` | background workers get Chrome tools when the Browser group is on; `0` withholds it from workers while leaving the conversational instance's own access alone |
 
 ## How a turn flows
 

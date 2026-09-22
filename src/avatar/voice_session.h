@@ -385,6 +385,15 @@ class VoiceSession {
   // middle of a conversation does not discard it.
   void set_wake_phrase(std::string phrase);
   std::string wake_phrase() const;
+  // M31. Two more levels, the same shape and the same reason as the ones
+  // above: `model.worker` and `tools.browser` are both `Live` settings, read
+  // fresh at each worker spawn and each worker's launch respectively, so
+  // pushing them down every frame costs nothing and there is nothing to warn
+  // about. Both are no-ops when nothing changed, forwarded straight to
+  // `WorkerPool` -- see `set_model`/`set_chrome` there for what each decides.
+  // Safe to call before a pool exists (`--no-voice`, or before `start()`).
+  void set_worker_model(std::string model_arg);
+  void set_worker_chrome(bool on);
   // True while the passive capture is running. Frame loop only, like
   // mic_open(); the panel reads the Snapshot copy.
   bool wake_listening() const { return wake_open_; }

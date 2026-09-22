@@ -151,6 +151,11 @@ struct ScheduleAction {
                        // instruction). Empty for a bare timer.
   std::string name;    // a worker's name, a script's tag; free for the kind.
   std::string cwd;     // captured at creation, never re-resolved at fire time.
+  // M31. The `--model` argument the deferred worker starts on, already
+  // resolved from a `model=` key to `model_choice(...).arg` by the caller --
+  // see `ScheduleRequest::model`. Empty means "the pool's own default",
+  // exactly as an empty `WorkerPool::spawn` override does.
+  std::string model;
 };
 
 struct Schedule {
@@ -184,6 +189,14 @@ struct ScheduleRequest {
   std::string name;   // the worker's name
   std::string label;  // short human words for the pending list
   std::string grade;  // "fixed"/"phrased"; empty means "take it from the shape"
+  // M31. **Already resolved**, unlike every other field here: the caller (the
+  // ```aii``` block's handler) validates `model=` against
+  // `model_choice_for_key()` before this is built, because that table lives
+  // in `core/model_choice.h` and this file does not depend on it. Empty means
+  // "no model= given, or it named nothing this build recognises" -- both read
+  // as "use the pool's own default", which is the safe fallback for a value
+  // the model got wrong.
+  std::string model;
 };
 
 // Why a request was refused. The *words* are not here: the ```aii``` block

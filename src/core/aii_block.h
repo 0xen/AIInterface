@@ -37,6 +37,14 @@ struct Command {
   std::string in;
   std::string say;
   std::string grade;
+  // M31. `spawn`'s and `schedule ... task=`'s optional `model=<default|opus|
+  // sonnet|haiku>` -- the settings.json key spelling, not a `--model` string,
+  // exactly as `setting value=` already reads keys rather than CLI args. A
+  // single token, not end-of-line: every legal value is one word. The
+  // handler passes it through only when `model_choice_for_key()` recognises
+  // it; anything else is ignored with one log line, because the model does
+  // not get to name arbitrary strings on a command line.
+  std::string model;
   // The `button` verb's fields (M1c.2). Kept in the same struct rather than a
   // variant because the block is line-oriented key=value either way and one
   // parser is what makes a new verb a few lines instead of a format.

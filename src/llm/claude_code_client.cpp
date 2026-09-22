@@ -204,10 +204,24 @@ bool ClaudeCodeClient::start(std::string* error) {
   // without it — it denied and carried on — but that is the SDK deciding we
   // have no handler, not a promise, and this turns the promise into a flag.
   if (opt_.tools != "default") cmd += " --tools " + quote_arg(opt_.tools);
-  if (!opt_.tools.empty() && opt_.tools != "default")
-    cmd += " --allowedTools " + quote_arg(opt_.tools) + " --permission-prompts none";
+  if (!opt_.tools.empty() && opt_.tools != "default") {
+    // M31. Claude in Chrome's tools are `mcp__claude-in-chrome__*`, an MCP
+    // server rather than a built-in tool, so they are granted by adding the
+    // server's own prefix to the allowlist -- never to `--tools`, which names
+    // built-ins only. Without this a restricted list would carry `--chrome`
+    // and still deny every tool it turns on, exactly the "granted but denied"
+    // shape `WebSearch`/`WebFetch` needed `--allowedTools` for in the first
+    // place (M3.7, above).
+    std::string allowed = opt_.tools;
+    if (opt_.chrome) allowed += ",mcp__claude-in-chrome";
+    cmd += " --allowedTools " + quote_arg(allowed) + " --permission-prompts none";
+  }
   if (opt_.tools == "default" && opt_.bypass_permissions)
     cmd += " --permission-mode bypassPermissions";
+  // M31. See Options::chrome. `--chrome` alone is enough for `tools ==
+  // "default"` (workers): bypassPermissions already covers the MCP tools it
+  // adds. A restricted list needed the allowlist entry above as well.
+  if (opt_.chrome) cmd += " --chrome";
   if (!opt_.system_prompt.empty()) cmd += " --system-prompt " + quote_arg(opt_.system_prompt);
   // See Options::suppress_cli_context. Two flags because they suppress two
   // different things: --safe-mode takes the project CLAUDE.md and the user's

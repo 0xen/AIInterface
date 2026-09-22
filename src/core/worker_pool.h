@@ -50,11 +50,42 @@ class WorkerPool {
 
   void set_on_report(ReportFn fn) { report_ = std::move(fn); }
 
+  // M31. The model a worker runs on when a `spawn` names none of its own — a
+  // CLI alias ("opus", "sonnet", "haiku") or empty for "no --model flag,
+  // whatever the CLI would pick". See `model_choice.h` for why an alias and
+  // not a dated id: the same reasoning applies here, and this is not a second
+  // table, just a second reader of the one that already exists.
+  //
+  // **Why a lesser model by default.** The user's decision (22 Sep 2026): "by
+  // default the AI uses lesser AI models such as Opus for the default worker
+  // model" -- cost and speed. The conversation's model is chosen for talking
+  // to a person, who is waiting and hears every second of it; a worker's task
+  // is graded on getting the work done, not on how quickly, and nobody is
+  // listening to it think. Opus is still a capable model, and the shipped
+  // default -- it is a *lesser* choice only next to what the conversational
+  // instance can be set to, not a weak one on its own.
+  //
+  // `Live`: read fresh at each `spawn()`, so changing it costs nothing and
+  // reaches the next worker started, never the ones already running.
+  void set_model(std::string model) { model_ = std::move(model); }
+  std::string model() const { return model_; }
+
+  // M31. Whether a worker gets Claude in Chrome (`--chrome`), mirroring
+  // whatever the `tools.browser` switch says for the conversational instance
+  // -- see main.cpp. `Live`, like `model_` above.
+  void set_chrome(bool on) { chrome_ = on; }
+  bool chrome() const { return chrome_; }
+
   // Starts an instance on `task` in `cwd` (empty = this process's directory).
   // Returns false and fills `error` when the process cannot start or the name
   // is already taken by a running worker.
+  //
+  // `model_override` (M31): non-empty wins over `model_` for this one worker
+  // -- the assistant asking for `sonnet` on a trivial task through the `aii`
+  // block's `spawn ... model=` field. Empty (the ordinary case) means "use
+  // whatever the pool is set to".
   bool spawn(const std::string& name, const std::string& cwd, const std::string& task,
-             std::string* error);
+             std::string* error, const std::string& model_override = {});
   // Interrupts the worker's current turn; it stays in the list as Paused.
   //
   // M17.3. Returns straight away, as it always did -- the interrupt is a line
@@ -124,6 +155,13 @@ class WorkerPool {
 
   std::string exe_;
   bool bypass_ = true;
+  // M31. Defaults: opus for the model (see set_model's comment) and Chrome on
+  // -- the same-machine default `AII_WORKER_CHROME` seeds -- because a worker
+  // is untouched by the conversational instance's own tool toggles and the
+  // browser switch has to have *some* answer before main.cpp's first frame
+  // mirrors `tools.browser` into it.
+  std::string model_ = "opus";
+  bool chrome_ = true;
   ReportFn report_;
   mutable std::mutex mutex_;
   std::vector<std::unique_ptr<Worker>> workers_;

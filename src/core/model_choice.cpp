@@ -33,10 +33,13 @@ const ModelChoice kChoices[kModelChoiceCount] = {
 
 }  // namespace
 
+// M31. Rewritten: workers used to be untouched by any model setting at all
+// and this said so. They now have their own row (Worker model, below this
+// one), so the sentence has to say where to look instead of that nothing is
+// there to look at.
 const char kModelWorkersNote[] =
-    "Workers are not affected: they are separate `claude` processes with their own grant, and "
-    "they keep the CLI's default model whatever is picked here. This is the model of the one you "
-    "are talking to.";
+    "This is the model of the one you are talking to. Workers are separate `claude` "
+    "processes with their own grant -- see Worker model below.";
 
 const ModelChoice& model_choice(int id) {
   if (id < 0 || id >= kModelChoiceCount) return kChoices[kModelChoiceDefault];

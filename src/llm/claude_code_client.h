@@ -66,6 +66,24 @@ class ClaudeCodeClient final : public LlmClient {
     // `apiKeyHelper`, so it cannot be used on the subscription this app runs
     // on.
     bool suppress_cli_context = false;
+    // M31. Claude in Chrome (the user's decision, 22 Sep 2026: "the workers as
+    // well as the main AI have the ability to drive Claude in Chrome"). The
+    // pinned CLI (2.1.280) has `--chrome` / `--no-chrome`; its tools are MCP
+    // tools named `mcp__claude-in-chrome__<name>`. `start()` appends
+    // `--chrome` when this is set, and, when `tools` is a restricted list,
+    // also adds the server prefix `mcp__claude-in-chrome` to `--allowedTools`
+    // -- `--chrome` alone is not enough there, because a named allowlist opts
+    // *in* to exactly its own names and would otherwise leave the MCP tools
+    // ungranted. When `tools == "default"` (workers) `--chrome` alone is
+    // enough: `bypassPermissions` already covers whatever tools the flag adds.
+    //
+    // **Unmeasured from here.** Every other flag in this file was measured
+    // against a running CLI by reading back what it actually did; this one
+    // could not be, because nothing in this task can drive a browser or watch
+    // one being driven. It is built to the CLI's own `--help` text and to the
+    // tool-naming convention every other MCP server in this app already
+    // follows. The coordinator measures it through the app.
+    bool chrome = false;
   };
 
   explicit ClaudeCodeClient(Options opt) : opt_(std::move(opt)) {}

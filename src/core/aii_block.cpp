@@ -100,6 +100,7 @@ std::vector<Command> parse_commands(const std::string& text,
         else if (key == "value") c.value = value;
         else if (key == "confirm") c.confirm = value;
         else if (key == "text") c.text = value;
+        else if (key == "model") c.model = value;
       }
       if (c.verb.empty()) continue;
       // App-owned verbs are applied here and dropped: see the header. A

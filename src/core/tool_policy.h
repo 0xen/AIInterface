@@ -47,6 +47,15 @@ enum ToolGroupId {
   kToolGroupWeb = 0,
   kToolGroupFileRead,
   kToolGroupFileWrite,
+  // M31. Claude in Chrome (the user's decision, 22 Sep 2026: "the workers as
+  // well as the main AI have the ability to drive Claude in Chrome"). Unlike
+  // the other three this is not a `--tools` name at all -- it is the CLI's
+  // `--chrome` flag, whose tools then arrive as `mcp__claude-in-chrome__*` --
+  // so `tools` is deliberately empty for this row (see `ToolGroup::tools`) and
+  // `tool_list()` skips it rather than putting an empty entry on the command
+  // line. `build_llm` reads this group with `tool_group_active()` exactly like
+  // the other three and sets `Options::chrome` from it.
+  kToolGroupBrowser,
   kToolGroupCount,
 };
 
@@ -54,7 +63,9 @@ struct ToolGroup {
   const char* key;    // the settings.json key, under "tools". On-disk format.
   const char* label;  // the row label in the settings surface
   // The CLI tool names this group grants, comma separated, exactly as
-  // `--allowedTools` spells them.
+  // `--allowedTools` spells them. **Empty for the `browser` row**: what it
+  // grants is not a named tool but the `--chrome` flag, so there is nothing
+  // to put on `--tools`/`--allowedTools` and `tool_list()` skips it.
   const char* tools;
   bool on_by_default;
   // Drawn amber with a warning under it. True for anything that can change

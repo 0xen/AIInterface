@@ -43,6 +43,13 @@ Every milestone that merges adds an entry here in the same commit.
   happens again the log will now say where, instead of just stopping.
 
 ### Changed
+- **Workers now run on a lighter model by default.** Cheaper and quicker, and good enough
+  for most of what gets handed off. Change it in settings, or per task if you want a
+  particular one done on something else.
+- **The assistant, and its workers, can now drive your Chrome browser.** Turn on Browser
+  under Tools and it can open pages, read them, click and fill things in for you, without
+  asking each time. Off until you turn it on, because it acts in your browser without
+  asking, and it needs the Claude in Chrome extension.
 - **Choosing a microphone and a speaker.** The app can now be told which microphone and
   which output to use by name, with two environment variables, instead of always taking the
   Windows defaults. If the name matches nothing it says so and lists what it found. Useful when

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "format": 2,
+  "format": 3,
   "graphs": {
     "system": {
       "start": { "id": "start", "pos": [0, 0] },

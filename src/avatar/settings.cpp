@@ -362,6 +362,15 @@ const SettingKey kSettingKeys[] = {
      "a theme the current avatar declares", "(the avatar's own)"},
     {"avatar.colour", SettingValue::Colour, SettingCost::Live, Msg::Count, "theme.colour",
      "#rrggbb", "(none)"},
+    // M31. Unlike `model.name` this is `Live`: it is read fresh at each
+    // worker spawn (`WorkerPool::spawn`), not fixed on a command line that is
+    // already running, so nothing here has to be restarted or lost. "default"
+    // means no `--model` flag, exactly as it does for the conversational
+    // instance; the shipped default is "opus", not "default" -- see
+    // `WorkerPool::set_model` for why a lesser model is the worker's own
+    // starting point.
+    {"model.worker", SettingValue::ModelKey, SettingCost::Live, Msg::Count, "settings.model_worker",
+     "default, opus, sonnet or haiku", "opus"},
 
     // -- stored now, read at startup. Real, saved, and not in force this run.
     {"startup.auto_listen", SettingValue::Bool, SettingCost::NextLaunch, Msg::SettingNextLaunch,
@@ -376,6 +385,15 @@ const SettingKey kSettingKeys[] = {
     {"tools.file_read", SettingValue::Bool, SettingCost::Restart, Msg::SettingRestartTools,
      "settings.tools", "on or off", "on"},
     {"tools.file_write", SettingValue::Bool, SettingCost::Restart, Msg::SettingRestartTools,
+     "settings.tools", "on or off", "off"},
+    // M31. Claude in Chrome. Off by default: it acts in the user's own
+    // browser without asking first, and defaulting it off is the consent
+    // step the user's own request for this capability still needs. Restart,
+    // like the other three tool rows, for the conversational instance; a
+    // worker never restarts on it -- main.cpp mirrors this same value into
+    // the pool as a `Live` change instead, on the rule that a capability the
+    // user has not allowed themselves is not one a worker gets either.
+    {"tools.browser", SettingValue::Bool, SettingCost::Restart, Msg::SettingRestartTools,
      "settings.tools", "on or off", "off"},
 
     // -- M10.5. The two consent switches, and **the model may read them but

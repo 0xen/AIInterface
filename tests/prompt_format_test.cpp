@@ -105,7 +105,7 @@ int main() {
   // what makes the fallback reachable; the rest are the test's own.
   write_file(dir / "graph.json", R"({
   "version": 1,
-  "format": 2,
+  "format": 3,
   "graphs": {
     "system": {
       "start": {"id": "start", "pos": [0, 0]},
@@ -152,7 +152,7 @@ int main() {
              "<!-- aii-prompt-format: 99 -->\nORPHAN-BODY, and nothing ships under this name.\n");
   write_file(dir / "system" / "bare.md", "BARE-BODY, with no header of any kind.\n");
   write_file(dir / "system" / "hidden.md",
-             "<!-- aii-prompt-format: 2\n  {{#file_write}} and a brace, inside the comment\n-->\n"
+             "<!-- aii-prompt-format: 3\n  {{#file_write}} and a brace, inside the comment\n-->\n"
              "HIDDEN-BODY, the only part of this file anyone should ever see.\n");
 
   PromptStore store;

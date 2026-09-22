@@ -157,6 +157,39 @@ int main() {
     check(c.size() == 1 && c[0].value == "pixel cat",
           "a value with a space still works when it is quoted");
   }
+  // ---- M31. spawn/schedule's optional model= ---------------------------
+  //
+  // The parser only reads the token; it is `VoiceSession` that checks it
+  // against `model_choice_for_key()` and drops anything that fails, so this
+  // file only has to prove the field survives parsing intact -- both when it
+  // is a value the table would recognise and when it is not, since the parser
+  // has no opinion about that either way.
+  std::printf("model= on spawn and schedule\n");
+  {
+    // `task=` runs to the end of the line, so `model=` (a single token, not
+    // an end-of-line field) has to come before it on the wire -- the same
+    // ordering constraint every other single-token key already has next to
+    // `task=`/`say=`/`path=`/`text=`.
+    const std::vector<Command> c = parse(block("spawn name=counter model=sonnet task=count things"));
+    check(c.size() == 1 && c[0].model == "sonnet" && c[0].task == "count things",
+          "spawn keeps model= alongside its other fields");
+  }
+  {
+    const std::vector<Command> c = parse(block("spawn name=counter task=count things"));
+    check(c.size() == 1 && c[0].model.empty(), "and it is empty when the line does not carry one");
+  }
+  {
+    const std::vector<Command> c =
+        parse(block("schedule in=10m model=haiku task=tidy the folder"));
+    check(c.size() == 1 && c[0].model == "haiku", "schedule's task= line carries model= too");
+  }
+  {
+    // The parser passes anything through -- a typo, a dated id -- exactly as
+    // it does every other field; it is the dispatcher's job to refuse it.
+    const std::vector<Command> c = parse(block("spawn name=counter model=gpt5 task=count things"));
+    check(c.size() == 1 && c[0].model == "gpt5",
+          "an unrecognised model is still parsed as written; the handler is what refuses it");
+  }
 
   // ---- 3. the name guard ------------------------------------------------
   //

@@ -84,6 +84,8 @@ Config Config::from_env() {
   // rest of the reading, including "40 means 40 per cent".
   c.handoff_threshold = (float)std::atof(env_or("AII_HANDOFF_AT", "0.40").c_str());
   c.worker_bypass = env_or("AII_WORKER_BYPASS", "1") != "0";
+  c.worker_model = env_or("AII_WORKER_MODEL", "opus");
+  c.worker_chrome = env_or("AII_WORKER_CHROME", "1") != "0";
   // M3.9. The window reads the tool policy out of settings.json, where the
   // tick boxes write it; voiceloop has no settings.json, so this is how the
   // headless twin is run in a configuration other than the table's default —

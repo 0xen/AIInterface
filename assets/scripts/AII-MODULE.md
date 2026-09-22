@@ -82,7 +82,8 @@ contained, and its last error line appears in the settings panel under Scripts.
 | `aii.settings_info(echo="")` | Ask what every setting is; answered by a `settings.info` event |
 | `aii.session_info(echo="")` | Ask about the session — model, usage, state |
 | `aii.model(name, echo="")` | Change the model (restarts the conversation) |
-| `aii.tools(group, on=True, echo="")` | Turn a tool group on or off |
+| `aii.model_worker(name, echo="")` | Change the model background workers run on (no restart; reaches the next worker spawned) |
+| `aii.tools(group, on=True, echo="")` | Turn a tool group on or off (`web`, `file_read`, `file_write`, `browser`) |
 | `aii.language(english, japanese, echo="")` | Which languages are on |
 
 ## Listening to the app

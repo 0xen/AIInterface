@@ -143,6 +143,20 @@ struct Config {
                                // (nothing in this app can answer one, so a worker
                                // that asks would hang). Set to 0 to make them ask
                                // and stall instead of acting unattended.
+  // M31. AII_WORKER_MODEL: the model a worker runs on when nothing overrides
+  // it per-spawn. A CLI alias, default "opus" -- see WorkerPool::set_model for
+  // why a lesser model is the shipped default. Read once, here, to seed the
+  // pool the same way `worker_bypass` does; the settings surface's `Live`
+  // `model.worker` row (main.cpp) then keeps it current every frame without a
+  // restart, exactly as it does for `tools.browser` below.
+  std::string worker_model = "opus";
+  // M31. AII_WORKER_CHROME: whether a worker gets Claude in Chrome. Default
+  // on, but in practice governed every frame by the `tools.browser` switch
+  // (main.cpp mirrors it into the pool) -- the user's own consent gate for the
+  // conversational instance doubles as the worker's, on the rule that a
+  // capability the user has not allowed themselves is not one a worker gets
+  // either.
+  bool worker_chrome = true;
 
   std::string models_dir;      // AII_MODELS_DIR compile definition
   std::string stt_dir;

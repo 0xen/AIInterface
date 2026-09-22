@@ -503,6 +503,12 @@ void VoiceSession::load() {
   // worker can fail, with the table still on its default.
   set_enabled_languages(effective_langs());
   workers_ = std::make_unique<WorkerPool>(cfg_.claude_exe, cfg_.worker_bypass);
+  // M31. Seeded from Config the same way `worker_bypass` already was --
+  // AII_WORKER_MODEL / AII_WORKER_CHROME for a run with no panel (voiceloop),
+  // and the panel's own `model.worker` / `tools.browser` rows override them
+  // every frame from here on through set_worker_model()/set_worker_chrome().
+  workers_->set_model(cfg_.worker_model);
+  workers_->set_chrome(cfg_.worker_chrome);
   workers_->set_on_report([this](const std::string& name, WorkerPool::State state,
                                  const std::string& shown, const std::string& spoken) {
     // M12.1, and the first line of the callback on purpose: **a worker has
@@ -1313,6 +1319,17 @@ void VoiceSession::set_listen_timeout(float seconds) {
 
 float VoiceSession::listen_timeout() const {
   return listen_timeout_.load(std::memory_order_relaxed);
+}
+
+// M31. `workers_` is only ever touched from the frame loop (spawn, pause,
+// stop, this) so no lock is needed here beyond what WorkerPool itself takes;
+// see its header. Both are no-ops when `workers_` does not exist yet.
+void VoiceSession::set_worker_model(std::string model_arg) {
+  if (workers_) workers_->set_model(std::move(model_arg));
+}
+
+void VoiceSession::set_worker_chrome(bool on) {
+  if (workers_) workers_->set_chrome(on);
 }
 
 // ---------------------------------------------------------------------------
@@ -3909,7 +3926,7 @@ void VoiceSession::deliver_schedule(const Schedule& s) {
       w.phrased = s.grade == ReportGrade::Phrased;
       scheduled_workers_.push_back(std::move(w));
     }
-    if (workers_ && workers_->spawn(name, a.cwd, a.task, &err)) {
+    if (workers_ && workers_->spawn(name, a.cwd, a.task, &err, a.model)) {
       log("[schedule] started deferred worker " + name + " in " + a.cwd);
       // A cancel that arrived while the spawn was in flight. **Today this is
       // unreachable, and deliberately written anyway.** `request_cancel()` only
@@ -4055,6 +4072,16 @@ std::string create_schedule(const Command& c, const std::string& evidence, std::
   req.name = c.name;
   req.label = c.label;
   req.grade = c.grade;
+  // M31. Resolved here, not in `build_schedule()`: `core/schedule.h` does not
+  // depend on `core/model_choice.h`, and this is the one door a `model=` on a
+  // `schedule` line comes through. Anything the table does not recognise is
+  // dropped with one log line rather than reaching a command line -- the same
+  // rule `spawn`'s own handler applies below.
+  if (!c.model.empty()) {
+    const int midx = model_choice_for_key(c.model);
+    if (midx >= 0) req.model = model_choice(midx).arg;
+    else rend::log::info("[schedule] ignored unknown model=\"{}\"", c.model);
+  }
   ScheduleAction action;
   ReportGrade grade = ReportGrade::Fixed;
   double seconds = 0.0;
@@ -4177,7 +4204,16 @@ void VoiceSession::run_commands(const std::string& reply_text) {
       // worker, not a report about where it went. The log has the reason.
       const CwdDecision where = resolve_worker_cwd(c.cwd, evidence);
       if (!where.honoured) log("[worker] " + where.why);
-      if (workers_->spawn(c.name, where.dir, c.task, &err)) {
+      // M31. `model=` on a spawn line, resolved the same way schedule's is:
+      // only a value `model_choice_for_key()` recognises reaches the pool, so
+      // the model cannot put an arbitrary string on the child's command line.
+      std::string model_arg;
+      if (!c.model.empty()) {
+        const int midx = model_choice_for_key(c.model);
+        if (midx >= 0) model_arg = model_choice(midx).arg;
+        else log("[worker] ignored unknown model=\"" + c.model + "\"");
+      }
+      if (workers_->spawn(c.name, where.dir, c.task, &err, model_arg)) {
         log("[worker] spawned " + c.name + " in " + where.dir);
       } else {
         // `err` is a client error string ("CreateProcess failed (2): claude

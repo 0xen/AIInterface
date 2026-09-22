@@ -1,4 +1,4 @@
-<!-- aii-prompt-format: 2 -->
+<!-- aii-prompt-format: 3 -->
 <!--
   What the app tells you when the user asks what is new. The list between the
   fences is not written here: the app substitutes `{{changelog}}` with the most

@@ -34,8 +34,10 @@
 // setting existed and is still the default. It is a legal and reachable state,
 // spelled `""`, the same way `tool_list()` spells an empty grant.
 //
-// **Workers do not read this.** `WorkerPool::spawn` builds its own client and
-// is left alone; see the note on `kModelWorkersNote`.
+// **Workers do not read this row.** They have their own, `model.worker`
+// (M31, `WorkerPool::set_model`), which draws on this same table but defaults
+// to `opus` rather than to the CLI's own default; see the note on
+// `kModelWorkersNote` and the Worker model row under the Model picker.
 #include <string>
 
 namespace aii {

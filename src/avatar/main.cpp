@@ -928,6 +928,31 @@ int main(int /*argc*/, char** /*argv*/) {
               aii::model_label(voiceCfg.model_override),
               voiceCfg.model_override.empty() ? std::string("no --model flag")
                                               : "--model " + voiceCfg.model_override);
+    // M31. The worker model, read here in the same breath as the
+    // conversational one and for a related but not identical reason: unlike
+    // `model.name` this is a `Live` setting (nothing here is fixed on a
+    // command line that is already running), so what is read now is only the
+    // *seed* -- the picker below and the per-frame mirror further down keep it
+    // current for the rest of the run without a restart. `AII_WORKER_MODEL`
+    // still wins for this run, the same override shape `AII_MODEL` has, so a
+    // hand-set value is not immediately overwritten by whatever the picker
+    // seeds itself to.
+    const bool workerModelFromEnv = aii::env_or("AII_WORKER_MODEL", "") != "";
+    if (!workerModelFromEnv) {
+        const std::string key = settings.get_string("model", "worker",
+                                                     aii::model_choice(aii::kModelChoiceOpus).key);
+        const int idx = aii::model_choice_for_key(key);
+        if (idx < 0)
+            log::warn("[model] settings.json names `{}` for model.worker, which this build does "
+                      "not know - falling back to opus",
+                      key);
+        voiceCfg.worker_model =
+            aii::model_choice(idx < 0 ? aii::kModelChoiceOpus : idx).arg;
+    } else {
+        log::info("[model] AII_WORKER_MODEL is set, so settings.json's model.worker is not "
+                  "applied this run");
+    }
+    log::info("[model] workers: {}", aii::model_label(voiceCfg.worker_model));
     // M3.14. The settings the AI is told about, handed to the prompt store
     // before anything composes a system prompt. Here rather than beside the
     // store because this is the point at which `settings` has been read and
@@ -1399,6 +1424,12 @@ int main(int /*argc*/, char** /*argv*/) {
     uiState.settings_scroll_model = settingsScrollModel;
     uiState.model = std::max(0, aii::model_choice_for_arg(voiceCfg.model_override));
     modelInForce = voiceCfg.model_override;
+    // M31. The worker model's picker seed. `Live`, so there is no "in force"
+    // counterpart to keep in step the way `modelInForce` does above -- the
+    // per-frame mirror further down is the only thing that ever reads this
+    // again, and it is a no-op unless the picker actually moves.
+    uiState.model_worker =
+        std::max(0, aii::model_choice_for_arg(voiceCfg.worker_model));
     // M3.12. The panel as it stands before anyone has touched it. Seeded from
     // the panel rather than from `voiceCfg`, because the case that matters is
     // exactly the one where they differ (AII_MODEL naming something off the
@@ -3376,6 +3407,15 @@ int main(int /*argc*/, char** /*argv*/) {
                 // string comparison and touches no command line, which is why
                 // `wake.phrase` is a `Live` row.
                 session->set_wake_phrase(uiState.wake_phrase);
+                // M31. Two more levels, the same shape and the same
+                // no-op-unless-changed contract: the worker model and whether
+                // workers get Claude in Chrome are both read fresh per spawn,
+                // never fixed on an already-running command line, so there is
+                // nothing to restart and nothing to warn about. The browser
+                // one mirrors the *conversational* toggle rather than its own
+                // control -- see tools.browser in settings.cpp for why.
+                session->set_worker_model(aii::model_choice(uiState.model_worker).arg);
+                session->set_worker_chrome(uiState.tools.on[aii::kToolGroupBrowser]);
                 // Only reaches here once the panel has satisfied itself the
                 // session can take it; say() refuses the rest anyway.
                 if (!r.send_text.empty()) {
@@ -3447,6 +3487,10 @@ int main(int /*argc*/, char** /*argv*/) {
             // as, which is what "for this run" means.
             if (!modelFromEnv)
                 settings.set_string("model", "name", aii::model_choice(uiState.model).key);
+            // M31. Mirrored the same way, and the same AII_WORKER_MODEL-for-
+            // this-run-only guard `modelFromEnv` gives the conversational row.
+            if (!workerModelFromEnv)
+                settings.set_string("model", "worker", aii::model_choice(uiState.model_worker).key);
             // The scrim and the caption belong to the loader, not the panel:
             // the loading screen has to look the same whether or not there is
             // anything underneath it. The foreground draw list puts them over

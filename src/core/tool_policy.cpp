@@ -41,6 +41,19 @@ const ToolGroup kGroups[kToolGroupCount] = {
      "first, anywhere it can reach. There is no confirmation step\n"
      "and no undo.",
      kFileWritingOffered},
+    // M31. Claude in Chrome, the user's decision (22 Sep 2026). `tools` is
+    // empty -- see tool_policy.h -- because this is the CLI's `--chrome` flag,
+    // not a `--tools` name; `mcp__claude-in-chrome__*` are the tools it hands
+    // over. Amber and off by default for the same reason `file_write` is: it
+    // acts (clicks, navigates, reads pages) without asking first, in the
+    // user's own browser, and defaulting it off is the consent step the user
+    // asked this milestone to add.
+    {"browser", "Browser", "", false, true,
+     "Off: Claude cannot see or drive your browser.",
+     "On: Claude can open tabs, read pages and click in your\n"
+     "Chrome through the Claude in Chrome extension, without\n"
+     "asking first. Needs the extension installed and Chrome open.",
+     true},
 };
 
 }  // namespace
@@ -76,6 +89,11 @@ std::string tool_list(const ToolPolicy& p) {
   std::string out;
   for (int i = 0; i < kToolGroupCount; ++i) {
     if (!tool_group_active(p, i)) continue;
+    // M31. `browser` grants `--chrome`, not a `--tools` name -- its `tools`
+    // field is empty on purpose (tool_policy.h) -- so it must not add a comma
+    // or an empty entry to this list. `build_llm` reads it separately through
+    // `tool_group_active(cfg.tools, kToolGroupBrowser)`.
+    if (!*kGroups[i].tools) continue;
     if (!out.empty()) out += ',';
     out += kGroups[i].tools;
   }

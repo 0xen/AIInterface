@@ -121,7 +121,16 @@ int main() {
       }
     }
     // The one sentence that has to change shape rather than just disappear.
-    check(has(text, "You have no tools of your own.") == (tool_list(p).empty()),
+    //
+    // **Not `tool_list(p).empty()`** since M31: `tool_list()` deliberately
+    // excludes `browser` (it grants `--chrome`, not a `--tools` name -- see
+    // tool_policy.h), so a policy with only `browser` on has an empty
+    // `tool_list()` and yet is not a policy with nothing granted. The
+    // `{{#tools}}` section this sentence sits behind is keyed off "is any
+    // group active at all", and that is what this has to match.
+    bool any_group_active = false;
+    for (int i = 0; i < kToolGroupCount; ++i) any_group_active |= tool_group_active(p, i);
+    check(has(text, "You have no tools of your own.") == !any_group_active,
           label + " says it has nothing only when it has nothing");
 
     // The user's own bug, as a check. The report was "it says it can create a

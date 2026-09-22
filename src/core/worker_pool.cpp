@@ -117,7 +117,7 @@ WorkerPool::~WorkerPool() {
 }
 
 bool WorkerPool::spawn(const std::string& name, const std::string& cwd, const std::string& task,
-                       std::string* error) {
+                       std::string* error, const std::string& model_override) {
   {
     std::lock_guard<std::mutex> l(mutex_);
     for (const auto& w : workers_) {
@@ -145,6 +145,11 @@ bool WorkerPool::spawn(const std::string& name, const std::string& cwd, const st
   o.tools = "default";  // every built-in tool; the conversational instance gets two
   o.cwd = w->cwd;
   o.bypass_permissions = bypass_;  // nothing here can answer a permission prompt
+  // M31. `model_override` wins when this one spawn named a model of its own;
+  // otherwise the pool's own setting, which defaults to `opus` and is read
+  // fresh here so a change reaches the next worker started without a restart.
+  o.model = model_override.empty() ? model_ : model_override;
+  o.chrome = chrome_;
   // Deliberately NOT suppress_cli_context (M3.5): a worker is a coding agent
   // running inside a repo the user pointed it at, so that repo's `CLAUDE.md`,
   // their skills, MCP servers, hooks, plugins and custom agents are all

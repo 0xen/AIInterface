@@ -1186,6 +1186,27 @@ void model_section(AvatarUiState& state, const AvatarOptions& options) {
     ImGui::TextWrapped("In force now: %s.", model_label(options.model_in_force).c_str());
     ImGui::PopStyleColor();
   }
+
+  // M31. The worker model, a second picker row and a much simpler one: it is
+  // `Live` (`model.worker` in `kSettingKeys`), read fresh at each worker's
+  // spawn, so there is no running child to lose and no restart line to draw --
+  // a moved row here reaches the *next* worker started and nothing else.
+  ImGui::Dummy(ImVec2(0.0f, 6.0f));
+  settings_row("Worker model");
+  const ModelChoice& picked_worker = model_choice(state.model_worker);
+  if (ImGui::BeginCombo("##model_worker_pick", picked_worker.label)) {
+    for (int i = 0; i < kModelChoiceCount; ++i) {
+      const ModelChoice& c = model_choice(i);
+      const bool sel = i == state.model_worker;
+      if (ImGui::Selectable(c.label, sel)) state.model_worker = i;
+      if (sel) ImGui::SetItemDefaultFocus();
+    }
+    ImGui::EndCombo();
+  }
+  ImGui::PushStyleColor(ImGuiCol_Text, dim());
+  ImGui::TextWrapped("The model each background worker runs on. Opus is the default: cheaper "
+                     "and quicker than the one you talk to.");
+  ImGui::PopStyleColor();
 }
 
 // ---- M3.8: what the one you talk to is allowed to do ------------------------
@@ -1254,12 +1275,16 @@ void tools_section(AvatarUiState& state, const AvatarOptions& options) {
     }
     // The warning belongs under the row it is about, not in a footnote: a
     // greyed control with no visible reason reads as a bug.
+    //
+    // M31. This used to be one sentence written for `file_write` alone, which
+    // was correct only because it was the one risky row. With `browser` a
+    // second risky row this would show under it too, unread twice over: the
+    // warning is now the group's own `tip_on` -- already exactly this
+    // register ("On: Claude can ... without asking first") -- so a fourth
+    // risky group is, again, a row in the table and nothing else.
     if (g.risky) {
       ImGui::PushStyleColor(ImGuiCol_Text, warn());
-      ImGui::TextWrapped("A tool switched on here is granted, not offered: with this ticked, "
-                         "Claude creates and overwrites files with no confirmation and no undo, "
-                         "in whatever folder the app was launched from unless it is given a "
-                         "path. Leave it off and writing stays a worker's job.");
+      ImGui::TextWrapped("%s", g.tip_on);
       ImGui::PopStyleColor();
     }
   }

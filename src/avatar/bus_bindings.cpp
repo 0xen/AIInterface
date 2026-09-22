@@ -649,6 +649,19 @@ void BusBindings::on_settings(const BusMessage& m, std::string* error) {
     return changed(model_choice(idx).key);
   }
 
+  // M31. Same table, same validation, a different field: the worker model is
+  // `Live` rather than `Restart` (nothing here replaces a running child), but
+  // the refusal for an unknown name is exactly as load-bearing as it is for
+  // `model` above -- a `--model` the CLI rejects is a worker that starts and
+  // then fails its one turn.
+  if (m.verb == "model_worker") {
+    const std::string name = m.str("name");
+    const int idx = model_choice_for_key(name);
+    if (idx < 0) return refuse("no such model: " + name);
+    ui.model_worker = idx;
+    return changed(model_choice(idx).key);
+  }
+
   if (m.verb == "tools") {
     const std::string group = m.str("group");
     int id = -1;
@@ -734,7 +747,13 @@ void BusBindings::on_settings(const BusMessage& m, std::string* error) {
     bus.publish(
         BusLine("settings.info")
             .str("model", model_choice(ui.model).key)
+            // M31. `tool_list()` never carries `browser` -- it is a flag, not
+            // a `--tools` name (tool_policy.h) -- so it is named here on its
+            // own, the same way the worker model is: both are real state a
+            // script could ask about and neither shows up in the string above.
+            .str("model_worker", model_choice(ui.model_worker).key)
             .str("tools", tool_list(ui.tools))
+            .flag("tools_browser", tool_group_active(ui.tools, kToolGroupBrowser))
             .str("language", language_spec({ui.lang_english, ui.lang_japanese}))
             .flag("auto_listen", ui.auto_listen)
             .num("listen_timeout", listen_timeout_seconds(ui), 0)

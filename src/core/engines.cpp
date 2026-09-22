@@ -68,6 +68,10 @@ bool build_llm(const Config& cfg, Engines& out, const LogFn& log, std::string* e
   // means `--tools ""`, which is what this app ran on before M3.7.
   const std::string tools = tool_list(cfg.tools);
   o.tools = tools;
+  // M31. Claude in Chrome, read the same way every other tool group is: the
+  // `browser` row is a flag rather than a `--tools` name (see tool_policy.h),
+  // which is why it is read here directly instead of joining `tools` above.
+  o.chrome = tool_group_active(cfg.tools, kToolGroupBrowser);
   // The conversational instance runs on this app's prompts and nothing the CLI
   // found for itself (M3.5). Workers deliberately keep everything — see
   // WorkerPool::spawn, which does not set this. With tools on this also keeps

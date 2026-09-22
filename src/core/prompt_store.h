@@ -106,7 +106,16 @@ struct PromptNode {
 // `project/changelog.md` would prepend a `<context>` block containing the
 // literal characters `{{changelog}}` and tell the user that was the list of
 // recent changes.
-constexpr int kPromptFormat = 2;
+//
+// **3 (M31)** adds the fourth tool-group section, `{{#browser}}`/
+// `{{^browser}}`, alongside `{{#web}}`, `{{#file_read}}` and `{{#file_write}}`.
+// `expand_tool_sections` already reads the key straight off `tool_policy.h`'s
+// table, so no parser changed -- but a format-2 binary has no `browser` row in
+// that table at all, and `expand_tool_sections` reports an unknown key rather
+// than silently keeping it, so a prompt written for this version would read on
+// an older binary as a paragraph of stray `{{#browser}}` text and a log line
+// calling it a typo. That is exactly the shape M16.2 exists to catch.
+constexpr int kPromptFormat = 3;
 
 // What a body declares, or -1 when it declares nothing. `<!-- aii-prompt-format: 2 -->`
 // is 2; a marker with no number after it, or one outside any comment, is -1,

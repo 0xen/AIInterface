@@ -157,6 +157,7 @@ ScheduleRefusal build_schedule(const ScheduleRequest& r, ScheduleAction* action,
     return ScheduleRefusal::NothingToDo;
   }
   a.cwd = r.cwd.empty() ? app_dir() : r.cwd;
+  a.model = r.model;  // already resolved by the caller; see ScheduleRequest::model
 
   ReportGrade grade = a.kind == "worker" ? ReportGrade::Phrased : ReportGrade::Fixed;
   if (!r.grade.empty()) grade = grade_from_string(r.grade);

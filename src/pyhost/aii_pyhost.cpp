@@ -565,10 +565,28 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       "every turn fails.\n"
       "\n"
       "The same write the picker makes, with the same reach: it is remembered, "
-      "and it reaches Claude when the child next starts. Workers are unaffected "
-      "-- they are separate processes with their own grant.\n"
+      "and it reaches Claude when the child next starts. Workers have their own "
+      "model -- see model_worker() -- and are unaffected by this one.\n"
       "\n"
       "Answered by `settings.changed` with key='model'.");
+
+  // M31.
+  m.def(
+      "model_worker",
+      [](const std::string& name, const std::string& echo) {
+        return post_line(
+            aii::BusLine("settings.model_worker").str("name", name).str("echo", echo).done());
+      },
+      py::arg("name"), py::arg("echo") = "",
+      "Pick the model background workers run on, by the same settings.json "
+      "keys as model(): 'default', 'opus', 'sonnet' or 'haiku'. Unlike the "
+      "conversational model this is read fresh at each worker's spawn, so it "
+      "reaches the next worker started rather than waiting for a restart, and "
+      "the shipped default is 'opus' rather than 'default' -- a worker is "
+      "graded on getting the work done, not on how quickly, so it runs on a "
+      "cheaper, quicker model unless told otherwise.\n"
+      "\n"
+      "Answered by `settings.changed` with key='model_worker'.");
 
   m.def(
       "tools",
@@ -581,10 +599,13 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       },
       py::arg("group"), py::arg("on") = true, py::arg("echo") = "",
       "Grant or withhold one tool group for the conversational instance: "
-      "'web', 'file_read' or 'file_write'. An enabled group is *granted*, not "
-      "offered -- nothing in this app can answer a permission prompt -- so "
-      "'file_write' lets Claude change files on this PC without asking. Reaches "
-      "the child when it next starts, like the model.");
+      "'web', 'file_read', 'file_write' or 'browser'. An enabled group is "
+      "*granted*, not offered -- nothing in this app can answer a permission "
+      "prompt -- so 'file_write' lets Claude change files on this PC without "
+      "asking, and 'browser' (M31, off by default) lets it drive your Chrome "
+      "through the Claude in Chrome extension. Reaches the child when it next "
+      "starts, like the model; 'browser' also reaches background workers, "
+      "which take their Chrome grant from this same switch.");
 
   m.def(
       "language",

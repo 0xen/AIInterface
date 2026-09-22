@@ -509,6 +509,13 @@ struct AvatarUiState {
   // Seeded by main.cpp before the first frame from `Config::model_override`,
   // so the default is not spelled twice.
   int model = kModelChoiceDefault;
+  // M31. Same shape as `model` immediately above, for the worker model
+  // instead of the conversational one, and with one real difference: this one
+  // is `Live` (see `kSettingKeys`, `model.worker`), so main.cpp pushes it down
+  // into the `WorkerPool` every frame rather than waiting for a restart.
+  // Shipped default is Opus, not the CLI's own default -- see
+  // `WorkerPool::set_model`.
+  int model_worker = kModelChoiceOpus;
   // M10.5. The two consent switches, and the panel is their **only** writer --
   // `kSettingKeys` marks both `NotSettable` so the ```aii``` block cannot
   // reach them. `authoring` decides whether the app loads and offers what it
