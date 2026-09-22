@@ -102,10 +102,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -370,14 +372,32 @@ void routeDiagnostics() {
     }
 
     bool redirected = false;
+    std::string reopenNote;
     auto toFile = [&](std::FILE* stream, DWORD which) {
-        std::FILE* f = nullptr;
-        if (_wfreopen_s(&f, file.c_str(), L"a", stream) != 0 || !f) return;
+        // `_wfreopen`, not `_wfreopen_s`. The secure variant opens for writing
+        // with `_SH_SECURE`, which denies other writers -- so the second of
+        // these two calls, stderr onto the file stdout already holds, failed
+        // with EACCES, stderr stayed a stream with no handle, and the first
+        // write to it (the Claude command-line line, M26) was a CRT invalid
+        // parameter: fast-fail 0xc0000409, nothing in the log, on every
+        // double-click launch from 21 Sep until this was found on 22 Sep.
+        // A terminal launch never took this path, which is why nobody saw it.
+        const int before = _fileno(stream);
+        std::FILE* f = _wfreopen(file.c_str(), L"a", stream);
+        if (!f) {
+            reopenNote += (which == STD_OUTPUT_HANDLE ? " stdout" : " stderr") +
+                          std::string(" reopen failed errno=") + std::to_string(errno) +
+                          " (fileno was " + std::to_string(before) + ")";
+            return;
+        }
         // Unbuffered: line buffering would still hold a line across a hang,
         // and this stream is read precisely when something has gone wrong.
         std::setvbuf(stream, nullptr, _IONBF, 0);
         const intptr_t osf = _get_osfhandle(_fileno(stream));
         if (osf != -1) SetStdHandle(which, reinterpret_cast<HANDLE>(osf));
+        reopenNote += (which == STD_OUTPUT_HANDLE ? " stdout" : " stderr") +
+                      std::string(" reopened: fileno ") + std::to_string(before) + " -> " +
+                      std::to_string(_fileno(stream)) + ", handle " + std::to_string(osf);
         redirected = true;
     };
     if (!haveOut) toFile(stdout, STD_OUTPUT_HANDLE);
@@ -385,9 +405,46 @@ void routeDiagnostics() {
     if (!redirected) rend::log::mirrorToFile(file);
 
     rend::log::info("avatar start: logging to {}", file.string());
+    if (!reopenNote.empty()) rend::log::info("[diag] console-less start:{}", reopenNote);
+}
+
+// A CRT function handed an argument it refuses -- a closed stream, a bad file
+// descriptor -- ends the process with a fast-fail (0xc0000409) that no
+// exception filter sees and that leaves nothing in the log, which is how a
+// double-click launch died on 22 Sep 2026 with the log stopping mid-start.
+// This handler runs first: it writes the stack as module+offset to the log
+// through the info stream (not the error stream, which may be the stream at
+// fault), and then lets the CRT do what it was going to do.
+void onInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
+    void* frames[32];
+    const USHORT n = CaptureStackBackTrace(1, 32, frames, nullptr);
+    std::string trace;
+    for (USHORT i = 0; i < n; ++i) {
+        HMODULE mod = nullptr;
+        char name[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               static_cast<const char*>(frames[i]), &mod) &&
+            GetModuleFileNameA(mod, name, sizeof(name))) {
+            const char* base = std::strrchr(name, '\\');
+            const auto off = reinterpret_cast<uintptr_t>(frames[i]) - reinterpret_cast<uintptr_t>(mod);
+            char line[MAX_PATH + 32];
+            std::snprintf(line, sizeof(line), "\n    %s+0x%llx", base ? base + 1 : name,
+                          static_cast<unsigned long long>(off));
+            trace += line;
+        } else {
+            char line[48];
+            std::snprintf(line, sizeof(line), "\n    %p", frames[i]);
+            trace += line;
+        }
+    }
+    rend::log::warn("[diag] the C runtime refused an argument; the process is about to end. "
+                    "Stack:{}", trace);
+    std::fflush(stdout);
 }
 
 int main(int /*argc*/, char** /*argv*/) {
+    _set_invalid_parameter_handler(&onInvalidParameter);
     routeDiagnostics();
     // **The folder every worker falls back to**, captured here and nowhere
     // else: this is the directory the user launched the app from, which is the

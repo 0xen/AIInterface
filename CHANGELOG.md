@@ -7,6 +7,13 @@ Every milestone that merges adds an entry here in the same commit.
 
 ## 2026-09-22
 
+### Fixed
+- **Starting the app by double-clicking it works again.** Since the previous day's changes it
+  died silently within a blink of being opened from Explorer, though it ran fine from a
+  terminal. The cause was the log file being opened twice with sharing denied; the second
+  open failed and the first line written to it ended the process. If a similar fault ever
+  happens again the log will now say where, instead of just stopping.
+
 ### Changed
 - **Choosing a microphone and a speaker.** The app can now be told which microphone and
   which output to use by name, with two environment variables, instead of always taking the
