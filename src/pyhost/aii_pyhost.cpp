@@ -1395,6 +1395,16 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       "This node's grid-space position as of the last begin_frame(), or None "
       "if it was not drawn that frame.");
   ui.def(
+      "node_size",
+      [](int id) -> py::object {
+        auto it = g_rec.results.find("node_size:" + std::to_string(id));
+        if (it == g_rec.results.end()) return py::none();
+        return py::make_tuple(it->second.f[0], it->second.f[1]);
+      },
+      py::arg("id"),
+      "This node's drawn (width, height) in pixels as of the last "
+      "begin_frame(), or None if it was not drawn that frame.");
+  ui.def(
       "selected_nodes",
       [] {
         std::vector<int> out;

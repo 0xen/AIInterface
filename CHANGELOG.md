@@ -21,6 +21,9 @@ Every milestone that merges adds an entry here in the same commit.
   back whatever you connected.
 
 ### Fixed
+- **Nodes in a graph no longer sit on top of each other.** Once each box has been drawn
+  and its real size is known, any box overlapping another is nudged right or down until
+  they all have room, once, and then left alone so your own dragging is respected.
 - **A rewritten window no longer flickers against its old self.** Asking the assistant to
   change a window it already had open made two copies of the script draw into the same
   window, alternating every frame. Opening a window that is already open now hands it to

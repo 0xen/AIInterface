@@ -303,6 +303,15 @@ void replay(ScriptWindow::Impl& s, std::vector<std::string>& id_stack,
       rp.f[0] = pos.x;
       rp.f[1] = pos.y;
       results.push_back(rp);
+      // The drawn size too (M30.3): a script cannot know how wide a title or
+      // a hint line came out, and without it nothing on the Python side can
+      // tell that two nodes overlap.
+      const ImVec2 dim = ImNodes::GetNodeDimensions(id);
+      UiResult rd;
+      rd.id = "node_size:" + std::to_string(id);
+      rd.f[0] = dim.x;
+      rd.f[1] = dim.y;
+      results.push_back(rd);
       UiResult rs;
       rs.id = "node_selected:" + std::to_string(id);
       rs.b = ImNodes::IsNodeSelected(id);

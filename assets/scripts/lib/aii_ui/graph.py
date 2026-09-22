@@ -43,8 +43,19 @@ class NodeGraph:
     let the graph allocate them and look pins up with `pin()`.
     """
 
-    def __init__(self, minimap=True):
+    def __init__(self, minimap=True, auto_space=True, spacing=28.0):
+        # `auto_space`: once a node has been drawn and its real size is known,
+        # any node overlapping an earlier one is pushed right or down (the
+        # shorter move) until nothing overlaps, with `spacing` pixels between.
+        # It runs once per node, on its first frames, and never again -- so a
+        # user who drags two nodes together afterwards is left alone. The
+        # first graphs the assistant drew put hint-heavy nodes on a grid sized
+        # for bare titles and they sat on top of each other (user, 22 Sep).
         self.minimap = minimap
+        self.auto_space = auto_space
+        self.spacing = float(spacing)
+        self._size = {}       # id -> (w, h) as last drawn
+        self._settle = set()  # node ids still owed a spacing pass
         self._next_id = 1
         self._nodes = {}      # id -> node dict
         self._node_order = []
@@ -84,6 +95,7 @@ class NodeGraph:
             "outputs": [],
             "pos": tuple(pos) if pos else None,
             "color": tuple(color) if color else None,
+            "size": None,
             "body": body,
         }
         for spec in inputs:
@@ -98,6 +110,7 @@ class NodeGraph:
             self._pin_of[(node_id, "out", label)] = attr_id
         self._nodes[node_id] = node
         self._node_order.append(node_id)
+        self._settle.add(node_id)
         return node_id
 
     def remove_node(self, node_id):
@@ -148,7 +161,7 @@ class NodeGraph:
 
     # ---- layout ---------------------------------------------------------
 
-    def layout_grid(self, columns=3, dx=220, dy=140):
+    def layout_grid(self, columns=3, dx=300, dy=180):
         """Give a grid position to every node that does not have one yet,
         so a graph built from `from_dict()` (or from `add_node()` calls with
         no `pos`) lands somewhere sensible instead of stacked at the origin."""
@@ -170,12 +183,18 @@ class NodeGraph:
         drags, selection), then record this frame's editor. Call this once
         per tick from a `Panel`'s `draw(ui)`."""
         self._apply_edits(ui)
+        moves = self._space_out(ui) if self.auto_space else {}
 
         ui.begin_node_editor()
 
         for node_id in self._node_order:
             node = self._nodes[node_id]
-            if node["pos"] is not None and node_id not in self._placed:
+            if node_id in moves:
+                x, y = moves[node_id]
+                node["pos"] = (x, y)
+                ui.set_node_pos(node_id, x, y, force=True)
+                self._placed.add(node_id)
+            elif node["pos"] is not None and node_id not in self._placed:
                 ui.set_node_pos(node_id, node["pos"][0], node["pos"][1])
                 self._placed.add(node_id)
 
@@ -221,6 +240,61 @@ class NodeGraph:
             pos = ui.node_pos(node_id)
             if pos is not None:
                 self._nodes[node_id]["pos"] = pos
+            size = ui.node_size(node_id)
+            if size is not None:
+                self._nodes[node_id]["size"] = size
+
+    def _space_out(self, ui):
+        """The spacing pass. Returns {node_id: (x, y)} for nodes to move this
+        frame, or {} when there is nothing to do yet or nothing left to do.
+        Waits until every node still owed a pass has been drawn once (so its
+        size is known); then pushes each overlapping later node right or
+        down, whichever is the shorter move, and repeats until clean."""
+        if not self._settle:
+            return {}
+        for node_id in self._settle:
+            node = self._nodes.get(node_id)
+            if node is None:
+                continue
+            if node["pos"] is None or node["size"] is None:
+                return {}  # not drawn yet; try again next frame
+        rects = {}
+        for node_id in self._node_order:
+            node = self._nodes[node_id]
+            if node["pos"] is None or node["size"] is None:
+                continue
+            rects[node_id] = [node["pos"][0], node["pos"][1], node["size"][0], node["size"][1]]
+        moved = set()
+        gap = self.spacing
+        order = [n for n in self._node_order if n in rects]
+        for _ in range(64):
+            clean = True
+            for i, a in enumerate(order):
+                ax, ay, aw, ah = rects[a]
+                for b in order[i + 1:]:
+                    if b not in self._settle and a not in self._settle:
+                        continue
+                    # Move the later one, unless only the earlier is unsettled.
+                    mover = b if b in self._settle else a
+                    other = a if mover == b else b
+                    mx, my, mw, mh = rects[mover]
+                    ox, oy, ow, oh = rects[other]
+                    if mx >= ox + ow + gap or ox >= mx + mw + gap:
+                        continue
+                    if my >= oy + oh + gap or oy >= my + mh + gap:
+                        continue
+                    push_x = (ox + ow + gap) - mx
+                    push_y = (oy + oh + gap) - my
+                    if push_y <= push_x:
+                        rects[mover][1] = my + push_y
+                    else:
+                        rects[mover][0] = mx + push_x
+                    moved.add(mover)
+                    clean = False
+            if clean:
+                break
+        self._settle.clear()
+        return {n: (rects[n][0], rects[n][1]) for n in moved}
 
     def _apply_edits(self, ui):
         for start, end in ui.links_created():

@@ -167,6 +167,7 @@ minimap is how a large graph is found.
 | `ui.links_created()` -> `[(start_attr, end_attr), ...]` | New links the user dragged, since your last recording |
 | `ui.links_destroyed()` -> `[link_id, ...]` | Links the user deleted |
 | `ui.node_pos(id)` -> `(x, y)` or `None` | Where a node ended up, as of the last render |
+| `ui.node_size(id)` -> `(w, h)` or `None` | How big it was drawn, in pixels; a title-only node is about 120 x 90, one with two pins and two hint lines about 260 x 150 |
 | `ui.selected_nodes()` -> `[id, ...]` | The current node selection |
 | `ui.PIN_CIRCLE` .. `ui.PIN_QUAD_FILLED` | Pin shapes, 0..5, for `shape` |
 | `ui.MINIMAP_BOTTOM_LEFT` .. `ui.MINIMAP_TOP_RIGHT` | Minimap corners, 0..3, for `location` |
@@ -222,9 +223,20 @@ is a share of the window and would stretch the node across the whole editor,
 and keep any value it returns on the `node` dict so it survives the next
 recording. `pin(node_id, label)`
 looks up a pin's attribute id. `add_link`/`remove_link`/`remove_node`,
-`links()`, `nodes()`, `selected_nodes()`. `layout_grid(columns=3, dx=220,
-dy=140)` gives a grid position to any node that does not have one, which is
+`links()`, `nodes()`, `selected_nodes()`. `layout_grid(columns=3, dx=300,
+dy=180)` gives a grid position to any node that does not have one, which is
 what turns a graph read from a state file straight into something readable.
+
+**Spacing is automatic.** `NodeGraph(auto_space=True)` is the default: once a
+node has been drawn and its real size is known, any node sitting on an
+earlier one is pushed right or down, whichever is shorter, until nothing
+overlaps, with `spacing=28` pixels between. It runs once per node and never
+again, so the user's own dragging is respected. So you may leave `pos` out
+entirely and let `layout_grid()` plus the spacing pass arrange things, or
+give rough positions and let the pass fix the collisions. If you do place
+nodes by hand, remember a node is as wide as its longest line -- a Japanese
+example sentence makes a node 250 to 300 pixels wide -- so columns 300 apart
+and rows 180 apart are the minimum, not the default.
 Callbacks: `on_link(start, end) -> bool` (return `False` to refuse a link the
 user just dragged), `on_unlink(link_id)`, `on_select(node_ids)`.
 
