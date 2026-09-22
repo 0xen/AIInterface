@@ -60,7 +60,7 @@ target_include_directories(avatar PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
   "${AII_RENDERER_DIR}/pyhost/include")
 # Comctl32 for SetWindowSubclass: the window's HWND is how this app gets a
 # character event at all, since the engine's portable event set has none (B1).
-target_link_libraries(avatar PRIVATE aii_core rend::engine imgui Comctl32)
+target_link_libraries(avatar PRIVATE aii_core rend::engine imgui imnodes Comctl32)
 # Where avatar definitions are seeded *from* on first run. Baked in the same
 # way aii_core bakes the model directories, because the destination
 # (%APPDATA%) is the only copy that is ever read afterwards — this path is

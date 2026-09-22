@@ -145,6 +145,29 @@ std::string truncated(const std::string& s, std::size_t max) {
 
 fs::path ActionStore::actions_root() { return user_data_root() / "scripts" / "actions"; }
 
+fs::path ActionStore::tmp_root() { return user_data_root() / "scripts" / "tmp"; }
+
+std::string ActionStore::tmp_overview(const std::vector<Action>& temp_rows) {
+  std::string out;
+  out += "# Temporary scripts\n\n";
+  out += "Everything in this folder is temporary and could be cleared at any point. A script "
+         "here runs the moment it is named in a `run` line -- there is no approval window and "
+         "nothing about it is remembered between launches. This file is written by the app and "
+         "regenerated whenever the folder changes; edits to it are lost. To keep one of these "
+         "beyond \"could be cleared at any point\", move it into ..\\actions\\, where it goes "
+         "through the normal approval.\n\n";
+  if (temp_rows.empty()) {
+    out += "(empty)\n";
+    return out;
+  }
+  for (const Action& a : temp_rows) {
+    out += "- " + a.name + ".py -- ";
+    out += a.description.empty() ? std::string("(no description)") : a.description;
+    out += "\n";
+  }
+  return out;
+}
+
 std::string ActionStore::policy_key(const std::string& name) { return "policy:" + name; }
 
 bool ActionStore::policy_allowed(const fs::path& file) {
@@ -171,6 +194,10 @@ void ActionStore::load() {
   const fs::path root = actions_root();
   std::error_code ec;
   fs::create_directories(root, ec);
+  // M29. The temporary folder, created here too: `rescan()` needs it to exist
+  // before its first `directory_iterator`, and the CLAUDE.md it writes needs
+  // somewhere to land even when nothing has ever been dropped in it.
+  fs::create_directories(tmp_root(), ec);
   // The same seed rule the rest of the app uses: refresh a file when the
   // shipped bytes changed and nobody has touched the installed copy, so a
   // better example reaches a machine that has already run the app without
@@ -258,8 +285,20 @@ void ActionStore::rescan() {
   std::sort(found.begin(), found.end(),
             [](const Action& a, const Action& b) { return a.name < b.name; });
 
+  // M29. Temp rows are appended *after* every action, so `in_digest` (the
+  // `kActionDigestMax` cap below) favours the ones the user actually consented
+  // to over a throwaway the assistant wrote a minute ago. A name already taken
+  // by an action wins outright: `run name=x` has to resolve to exactly one
+  // file, and it is the one the user clicked Confirm on.
+  std::set<std::string> names_taken;
+  for (const Action& a : found) names_taken.insert(a.name);
+  rescan_tmp(found, names_taken);
+
   for (std::size_t i = 0; i < found.size(); ++i) {
-    found[i].armed = resolve_armed(&found[i]);
+    // A temp row is armed by location, not by a record in `armed_` — there is
+    // no consent to compare bytes against, so it never goes through
+    // `resolve_armed()`.
+    found[i].armed = found[i].temporary ? true : resolve_armed(&found[i]);
     found[i].in_digest = i < kActionDigestMax;
   }
 
@@ -274,6 +313,10 @@ void ActionStore::rescan() {
   // action, whenever the app happens to notice it, and a dismissal is durable
   // rather than lasting until the next launch.
   for (const Action& a : found) {
+    // M29. A temp row is never seen, never queued and never written to
+    // `_armed.json` — its news was already pushed inside `rescan_tmp()`, the
+    // one place that knows whether this launch has announced it before.
+    if (a.temporary) continue;
     if (std::find(seen_names_.begin(), seen_names_.end(), a.name) != seen_names_.end()) continue;
     // Already in the queue means already asked about, and the two reasons it
     // can be there are both reasons not to arm it from here: the user is
@@ -296,8 +339,10 @@ void ActionStore::rescan() {
   }
   actions_ = std::move(found);
   // Re-resolve armed after any auto-arm above, so the list handed out is never
-  // one frame behind the file that was just written.
+  // one frame behind the file that was just written. A temp row is left
+  // alone: it has no entry in `armed_` by design and is always armed anyway.
   for (Action& a : actions_) {
+    if (a.temporary) continue;
     const auto it = armed_.find(a.name);
     a.armed = it != armed_.end();
   }
@@ -308,6 +353,86 @@ void ActionStore::rescan() {
   awaiting_.erase(std::remove_if(awaiting_.begin(), awaiting_.end(),
                                  [&](const std::string& n) { return find(n) == nullptr; }),
                   awaiting_.end());
+}
+
+// M29. The temp-folder scan, appended to `found` (the action rows already
+// gathered by `rescan()`) rather than kept apart the way policies are: a temp
+// row is callable by name exactly like an action, and `kActionDigestMax`
+// needs to see both lists as one to make the actions-first ordering mean
+// anything.
+void ActionStore::rescan_tmp(std::vector<Action>& found, const std::set<std::string>& names_taken) {
+  std::vector<Action> temp_found;
+  std::error_code ec;
+  const fs::path root = tmp_root();
+  for (const fs::directory_entry& e : fs::directory_iterator(root, ec)) {
+    if (ec) break;
+    if (!e.is_regular_file(ec) || ec) continue;
+    if (!is_python_file(e.path())) continue;
+    const std::string file = e.path().filename().string();
+    if (!file.empty() && (file[0] == '_' || file[0] == '.')) continue;
+    if (found.size() + temp_found.size() >= kActionsMax) break;
+    Action a;
+    a.name = e.path().stem().string();
+    if (names_taken.count(a.name)) {
+      // Named once per launch, not once per second: `warned_collisions_`
+      // makes this a one-time note rather than a line every scan for as long
+      // as the stray file sits there.
+      if (warned_collisions_.insert(a.name).second)
+        std::fprintf(stderr,
+                     "[action] temp script '%s' shares a name with an action; the action wins "
+                     "and the temp file is ignored\n",
+                     a.name.c_str());
+      continue;
+    }
+    a.path = e.path().string();
+    a.description = truncated(first_docstring_line(e.path()), kActionDescMax);
+    // Cheap, and kept for symmetry with an action row even though `CLAUDE.md`
+    // shows none of it: there is no consent record to key it against here,
+    // but a fingerprint that always exists is one fewer special case for
+    // anything that later reads an `Action` without checking `temporary`.
+    a.fingerprint = file_fingerprint(e.path());
+    a.temporary = true;
+    a.armed = true;
+    temp_found.push_back(std::move(a));
+  }
+  std::sort(temp_found.begin(), temp_found.end(),
+            [](const Action& a, const Action& b) { return a.name < b.name; });
+
+  // News: a temp row seen for the first time this launch is news to the
+  // running conversation, exactly like an auto-armed action, because the
+  // assistant just wrote it and needs to know mid-conversation that it is
+  // callable. `announced_temp_` is per-launch and unpersisted on purpose —
+  // there is nothing to remember between launches about a folder that "could
+  // be cleared at any point".
+  for (const Action& a : temp_found)
+    if (announced_temp_.insert(a.name).second) news_.push_back(a.name);
+
+  // `CLAUDE.md`, written only when its content changed. On the very first
+  // scan of a launch, compare against whatever is already on disk too, so an
+  // unchanged folder costs no write across a restart.
+  const std::string overview = tmp_overview(temp_found);
+  if (!tmp_overview_checked_) {
+    tmp_overview_checked_ = true;
+    std::ifstream cur(root / "CLAUDE.md", std::ios::binary);
+    if (cur) {
+      std::ostringstream ss;
+      ss << cur.rdbuf();
+      last_tmp_overview_ = ss.str();
+    }
+  }
+  if (overview != last_tmp_overview_) {
+    std::ofstream f(root / "CLAUDE.md", std::ios::binary | std::ios::trunc);
+    if (f) {
+      f << overview;
+      last_tmp_overview_ = overview;
+    } else {
+      std::fprintf(stderr, "[action] could not write %s\n",
+                   (root / "CLAUDE.md").string().c_str());
+    }
+  }
+
+  found.insert(found.end(), std::make_move_iterator(temp_found.begin()),
+              std::make_move_iterator(temp_found.end()));
 }
 
 // M19.2. The policy scan. Deliberately the same shape as the action scan above
@@ -449,6 +574,12 @@ ActionRefusal ActionStore::check(const std::string& name) const {
   if (!a) return ActionRefusal::NoSuchAction;
   if (!authoring_) return ActionRefusal::AuthoringOff;
   if (!a->in_digest) return ActionRefusal::PastCap;
+  // M29. A temp row has no consent record to compare against — the folder it
+  // sits in is the trust boundary, not a fingerprint in `_armed.json` — so
+  // `NotArmed` and `Changed` do not apply to it. `AuthoringOff` and `PastCap`
+  // still do: the folder does not override the author switch or the digest
+  // cap.
+  if (a->temporary) return ActionRefusal::None;
   if (!a->armed) return ActionRefusal::NotArmed;
   // M19.1. The last word on consent is the file on disk at the moment of the
   // call, not the scan up to a second ago and not the name. The body is read
@@ -542,6 +673,10 @@ bool ActionStore::remove(const std::string& name) {
   return true;
 }
 
+// §9's digest: `name [not armed] -- one line`, plus M29's `[temp]` mark for a
+// row found in `tmp\` rather than `actions\` — always armed, never asked
+// about, and worth flagging so the assistant can tell the user which ones
+// would need moving to `actions\` to survive the folder being cleared.
 std::string ActionStore::digest() const {
   if (actions_.empty()) return std::string("(none yet)");
   std::string out;
@@ -558,6 +693,7 @@ std::string ActionStore::digest() const {
     // finding was that the row and the syntax line are what move this model,
     // where surrounding prose bought hallucinated readings.
     if (!a.armed) out += "  [NOT ARMED - ask the user to arm it]";
+    if (a.temporary) out += "  [temp]";
     out += " -- ";
     out += a.description.empty() ? std::string("(no description)") : a.description;
     out += "\n";
@@ -579,12 +715,24 @@ std::vector<std::string> ActionStore::take_news() {
 }
 
 std::string ActionStore::summary() const {
-  if (actions_.empty()) return std::string("No actions.");
-  std::size_t armed = 0;
-  for (const Action& a : actions_)
-    if (a.armed) ++armed;
-  return std::to_string(actions_.size()) +
-         (actions_.size() == 1 ? " action, " : " actions, ") + std::to_string(armed) + " armed.";
+  std::size_t action_n = 0, armed_n = 0, temp_n = 0;
+  for (const Action& a : actions_) {
+    if (a.temporary) {
+      ++temp_n;
+      continue;
+    }
+    ++action_n;
+    if (a.armed) ++armed_n;
+  }
+  std::string out = action_n == 0
+                         ? std::string("No actions")
+                         : std::to_string(action_n) + (action_n == 1 ? " action, " : " actions, ") +
+                               std::to_string(armed_n) + " armed";
+  // Only mentioned when there is at least one, so the common case — nothing in
+  // `tmp\` — reads exactly as it always has.
+  if (temp_n > 0) out += "; " + std::to_string(temp_n) + " temporary";
+  out += ".";
+  return out;
 }
 
 }  // namespace aii

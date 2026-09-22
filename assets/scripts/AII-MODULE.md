@@ -6,8 +6,14 @@ It is seeded here by the app; edits are overwritten when a newer copy ships.
 A script is a `.py` file **directly in this folder** — one level up from
 `actions\` and `examples\`. It runs for the life of the app, on its own thread.
 An *action* lives in `actions\`, defines `run()`, and is called by name instead.
-`lib\` is neither: it holds helper packages such as `aii_ui` that a script or
-action can `import`, and it is never scanned for scripts of its own.
+`tmp\` is also actions, called the same way, but armed the moment they are
+written there -- no approval, because the folder itself is temporary and may
+be cleared at any time, by the user or by a later version of the app, and
+remembers nothing between sessions. It is the default place to write anything
+meant for one occasion; `actions\` is for a script the user wants to keep, and
+each new file there asks once. `lib\` is neither: it holds helper packages such
+as `aii_ui` that a script or action can `import`, and it is never scanned for
+scripts of its own.
 
 ```python
 import aii

@@ -1212,6 +1212,197 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       "set_scroll_here_y", [](float center) { ui_push(aii::UiOp::SetScrollHereY).f[0] = center; },
       py::arg("center") = 0.5f, "Scroll the current window so this point is at center (0..1).");
 
+  // ---- aii.ui node graphs (M30, imnodes) -----------------------------
+  //
+  // Same recording shape as everything above: a command per call, a result
+  // read back after end_frame()'s next begin_frame(). Node-graph results are
+  // not one widget's id (`ui_compose_id`) -- they are the synthetic strings
+  // `ui_bridge.h`'s BeginNodeEditor/EndNodeEditor comment names
+  // (`node_pos:<id>`, `node_selected:<id>`, `link_created:<start>:<end>`,
+  // `link_destroyed:<id>`), which `script_window.cpp` writes directly into
+  // the results map, so the four reader functions below scan `g_rec.results`
+  // for those prefixes rather than looking one up by composed id.
+  ui.def(
+      "begin_node_editor", [] { ui_push(aii::UiOp::BeginNodeEditor); },
+      "Begin a node-graph editor. One per frame; a second Begin while one is "
+      "open is ignored by the app.");
+  ui.def(
+      "end_node_editor", [] { ui_push(aii::UiOp::EndNodeEditor); },
+      "End the node-graph editor. This is where links_created(), "
+      "links_destroyed(), node_pos() and selected_nodes() get their answers "
+      "for *this* window, next time you call begin_frame().");
+  ui.def(
+      "begin_node", [](int id) { ui_push(aii::UiOp::BeginNode).i[0] = id; }, py::arg("id"),
+      "Begin one node. Ids are the script's own, unique within this editor.");
+  ui.def(
+      "end_node", [] { ui_push(aii::UiOp::EndNode); }, "End a begin_node().");
+  ui.def(
+      "begin_node_title_bar", [] { ui_push(aii::UiOp::BeginNodeTitleBar); },
+      "Begin a node's title bar; put text() (or similar) between this and "
+      "end_node_title_bar(). Must come before any attribute in the node.");
+  ui.def(
+      "end_node_title_bar", [] { ui_push(aii::UiOp::EndNodeTitleBar); },
+      "End a begin_node_title_bar().");
+  ui.def(
+      "begin_input_attribute",
+      [](int id, int shape) {
+        aii::UiCommand& c = ui_push(aii::UiOp::BeginInputAttribute);
+        c.i[0] = id;
+        c.i[1] = shape;
+      },
+      py::arg("id"), py::arg("shape") = 1,
+      "Begin an input attribute (pin on the left). shape is one of the "
+      "PIN_* constants.");
+  ui.def(
+      "end_input_attribute", [] { ui_push(aii::UiOp::EndInputAttribute); },
+      "End a begin_input_attribute().");
+  ui.def(
+      "begin_output_attribute",
+      [](int id, int shape) {
+        aii::UiCommand& c = ui_push(aii::UiOp::BeginOutputAttribute);
+        c.i[0] = id;
+        c.i[1] = shape;
+      },
+      py::arg("id"), py::arg("shape") = 1,
+      "Begin an output attribute (pin on the right). shape is one of the "
+      "PIN_* constants.");
+  ui.def(
+      "end_output_attribute", [] { ui_push(aii::UiOp::EndOutputAttribute); },
+      "End a begin_output_attribute().");
+  ui.def(
+      "begin_static_attribute", [](int id) { ui_push(aii::UiOp::BeginStaticAttribute).i[0] = id; },
+      py::arg("id"), "Begin an attribute with no pin -- can't be linked, but can hold widgets.");
+  ui.def(
+      "end_static_attribute", [] { ui_push(aii::UiOp::EndStaticAttribute); },
+      "End a begin_static_attribute().");
+  ui.def(
+      "link",
+      [](int id, int start_attr, int end_attr) {
+        aii::UiCommand& c = ui_push(aii::UiOp::NodeLink);
+        c.i[0] = id;
+        c.f[0] = static_cast<float>(start_attr);
+        c.f[1] = static_cast<float>(end_attr);
+      },
+      py::arg("id"), py::arg("start_attr"), py::arg("end_attr"),
+      "Draw a link between two attribute ids used in begin_input_attribute() "
+      "/ begin_output_attribute() calls. id is the link's own, unique id.");
+  ui.def(
+      "set_node_pos",
+      [](int id, float x, float y, bool force) {
+        aii::UiCommand& c = ui_push(aii::UiOp::SetNodePos);
+        c.i[0] = id;
+        c.i[1] = force ? 1 : 0;
+        c.f[0] = x;
+        c.f[1] = y;
+      },
+      py::arg("id"), py::arg("x"), py::arg("y"), py::arg("force") = false,
+      "Place a node in grid space. Applied once per node id unless force=True "
+      "-- a script that keeps re-recording a position does not fight the "
+      "user's drag.");
+  ui.def(
+      "mini_map",
+      [](float fraction, int location) {
+        aii::UiCommand& c = ui_push(aii::UiOp::NodeMiniMap);
+        c.f[0] = fraction;
+        c.i[0] = location;
+      },
+      py::arg("fraction") = 0.2f, py::arg("location") = 1,
+      "A navigable minimap of the editor. Record after every node and link "
+      "in the frame; the app ignores it if recorded outside "
+      "begin_node_editor()/end_node_editor().");
+  ui.def(
+      "push_node_color",
+      [](int idx, const py::object& rgba) {
+        aii::UiCommand& c = ui_push(aii::UiOp::PushNodeColor);
+        c.i[0] = idx;
+        ui_set_rgba(c.f, rgba);
+      },
+      py::arg("idx"), py::arg("rgba"),
+      "Override one NODE_COL_* for the following node-editor items.");
+  ui.def(
+      "pop_node_color", [] { ui_push(aii::UiOp::PopNodeColor); },
+      "Undo the last push_node_color() call.");
+
+  ui.def(
+      "links_created",
+      [] {
+        std::vector<std::pair<int, int>> out;
+        for (const auto& [id, r] : g_rec.results) {
+          if (!r.clicked || id.rfind("link_created:", 0) != 0) continue;
+          const std::size_t sep = id.find(':', 13);
+          if (sep == std::string::npos) continue;
+          try {
+            out.emplace_back(std::stoi(id.substr(13, sep - 13)), std::stoi(id.substr(sep + 1)));
+          } catch (const std::exception&) {
+          }
+        }
+        return out;
+      },
+      "Every link the user finished dragging since the last begin_frame(), "
+      "as (start_attr, end_attr) tuples.");
+  ui.def(
+      "links_destroyed",
+      [] {
+        std::vector<int> out;
+        for (const auto& [id, r] : g_rec.results) {
+          if (!r.clicked || id.rfind("link_destroyed:", 0) != 0) continue;
+          try {
+            out.push_back(std::stoi(id.substr(15)));
+          } catch (const std::exception&) {
+          }
+        }
+        return out;
+      },
+      "Every link id the user detached since the last begin_frame().");
+  ui.def(
+      "node_pos",
+      [](int id) -> py::object {
+        auto it = g_rec.results.find("node_pos:" + std::to_string(id));
+        if (it == g_rec.results.end()) return py::none();
+        return py::make_tuple(it->second.f[0], it->second.f[1]);
+      },
+      py::arg("id"),
+      "This node's grid-space position as of the last begin_frame(), or None "
+      "if it was not drawn that frame.");
+  ui.def(
+      "selected_nodes",
+      [] {
+        std::vector<int> out;
+        for (const auto& [id, r] : g_rec.results) {
+          if (!r.b || id.rfind("node_selected:", 0) != 0) continue;
+          try {
+            out.push_back(std::stoi(id.substr(14)));
+          } catch (const std::exception&) {
+          }
+        }
+        return out;
+      },
+      "Every node id selected in the editor as of the last begin_frame().");
+
+  // ImNodesPinShape_ values (imnodes.h), for begin_input_attribute() /
+  // begin_output_attribute()'s `shape`.
+  ui.attr("PIN_CIRCLE") = 0;
+  ui.attr("PIN_CIRCLE_FILLED") = 1;
+  ui.attr("PIN_TRIANGLE") = 2;
+  ui.attr("PIN_TRIANGLE_FILLED") = 3;
+  ui.attr("PIN_QUAD") = 4;
+  ui.attr("PIN_QUAD_FILLED") = 5;
+  // ImNodesMiniMapLocation_ values, for mini_map()'s `location`.
+  ui.attr("MINIMAP_BOTTOM_LEFT") = 0;
+  ui.attr("MINIMAP_BOTTOM_RIGHT") = 1;
+  ui.attr("MINIMAP_TOP_LEFT") = 2;
+  ui.attr("MINIMAP_TOP_RIGHT") = 3;
+  // ImNodesCol_ values, mirrored by hand for the same reason the ImGuiCol_
+  // block below is: this DLL does not include imnodes.h (only
+  // `script_window.cpp` does). third_party/imnodes is pinned to Nelarius/
+  // imnodes @ master as vendored for M30; these are that commit's
+  // ImNodesCol_ ordinals and only change if the pin moves and the enum
+  // changed under it.
+  ui.attr("NODE_COL_NODE_BACKGROUND") = 0;
+  ui.attr("NODE_COL_TITLE_BAR") = 4;
+  ui.attr("NODE_COL_LINK") = 7;
+  ui.attr("NODE_COL_PIN") = 10;
+
   // ImGuiCol_ / ImGuiInputTextFlags_ / ImGuiTreeNodeFlags_ / ImGuiTableFlags_
   // values, mirrored by hand because this DLL does not include imgui.h (only
   // `script_window.cpp` does). Dear ImGui v1.91.8, the tag `FetchImgui.cmake`

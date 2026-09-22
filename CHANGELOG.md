@@ -11,6 +11,14 @@ Every milestone that merges adds an entry here in the same commit.
 - **Small windows of its own.** The assistant can now open small windows beside the chat to
   show you things — a project's build status that goes orange, red or green, a progress bar,
   a log — and it has a toolkit of ready-made panels it can extend itself.
+- **A scratch folder for throwaway scripts.** For something written for one occasion — a
+  quick check, a window for the build that's running right now — the assistant can now write
+  and run a script straight away, with no approval to wait on. It's not kept between
+  sessions and may be cleared at any time. Ask it to keep one and it writes a proper copy
+  that asks to be allowed, once, the normal way.
+- **Node graphs in its windows.** The assistant can now draw boxes with pins in the small
+  windows it opens, wire them together, and let you drag them around too — and it can read
+  back whatever you connected.
 
 ### Fixed
 - **Starting the app by double-clicking it works again.** Since the previous day's changes it

@@ -279,6 +279,10 @@ struct AvatarOptions {
     std::string description;
     bool armed = false;
     bool in_digest = true;
+    // M29. True for a row found in `scripts\tmp\`: always armed, drawn with a
+    // dimmed ` temp` tag and no Confirm button, since there is nothing to
+    // confirm.
+    bool temporary = false;
   };
   std::vector<ScriptRow> scripts;
 

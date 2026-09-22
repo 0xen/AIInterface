@@ -25,10 +25,12 @@ functions themselves, in their own files.
 
 from . import colors, state, widgets
 from .colors import for_state
+from .graph import NodeGraph
 from .panel import Panel
 from .status import StatusPanel
 
 __all__ = [
+    "NodeGraph",
     "Panel",
     "StatusPanel",
     "colors",

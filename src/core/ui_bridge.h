@@ -135,6 +135,23 @@ enum class UiOp : std::uint8_t {
   SetTooltip,  // applies to the item before it, as ImGui's does
   // meta
   SetScrollHereY,
+  // node graphs (M30, imnodes). One editor per Begin/EndNodeEditor pair, ids
+  // are the script's own ints. Results after EndNodeEditor, all latched:
+  // `link_created:<start>:<end>` (clicked), `link_destroyed:<id>` (clicked),
+  // `node_selected:<id>` (b), and `node_pos:<id>` (f[0], f[1], grid space)
+  // for every node drawn this frame. SetNodePos is applied once per node id
+  // per editor unless i[1] (force) is set, so a script can place a node
+  // without pinning it under the user's drag.
+  BeginNodeEditor, EndNodeEditor,
+  BeginNode, EndNode,                      // i[0]=node id
+  BeginNodeTitleBar, EndNodeTitleBar,
+  BeginInputAttribute, EndInputAttribute,  // i[0]=attr id, i[1]=pin shape
+  BeginOutputAttribute, EndOutputAttribute,
+  BeginStaticAttribute, EndStaticAttribute,
+  NodeLink,                                // i[0]=link id, f[0]=start attr, f[1]=end attr
+  SetNodePos,                              // i[0]=node id, f[0]=x, f[1]=y, i[1]=force
+  NodeMiniMap,                             // f[0]=size fraction, i[0]=location
+  PushNodeColor, PopNodeColor,             // i[0]=ImNodesCol, f=rgba
   Count
 };
 

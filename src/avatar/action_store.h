@@ -57,6 +57,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -100,6 +101,11 @@ struct Action {
   // announced and gated through the same queue but is **not callable by
   // name**. Never true for a row in `all()`.
   bool policy = false;
+  // M29. True for a row found in `tmp_root()` rather than `actions_root()`.
+  // Armed by location, not by consent: nothing about a temporary row is ever
+  // written to `_armed.json` or `seen_names_`, and there is no approval
+  // window for one. See the boundary note on `tmp_root()`.
+  bool temporary = false;
 };
 
 // Why a call was refused, so the caller can say the right sentence. Every one
@@ -186,6 +192,30 @@ class ActionStore {
 
   static std::filesystem::path actions_root();
 
+  // ---- the temporary folder (M29) --------------------------------------
+  //
+  // `scripts\tmp\`, beside `actions\`. The user's own decision, 22 Sep 2026:
+  // the assistant was writing too many scripts that each needed a click, so
+  // this is the place it can write a throwaway one instead. Everything in it
+  // is armed **by location** — the folder itself is the trust boundary, not
+  // any record this app keeps — and it "could be cleared at any point": there
+  // is no consent to withdraw, nothing here is written to `_armed.json`, and
+  // nothing here is asked about through the approval window.
+  //
+  // **Be honest about what that means.** A file dropped in `tmp\` runs on a
+  // full CPython interpreter the moment the assistant names it in a `run`
+  // line — no click, no fingerprint check, nothing between the write and the
+  // call. That is the shape of the folder the user asked for, not an
+  // oversight of this implementation. If the user wants a script kept beyond
+  // "could be cleared at any point", the assistant rewrites it into
+  // `actions\`, where it goes through the normal gate.
+  static std::filesystem::path tmp_root();
+
+  // The `CLAUDE.md` written into `tmp_root()`, as a pure function so it can be
+  // tested without touching disk. One bullet per row, `name.py -- description`
+  // (or `(no description)`), `(empty)` when there are none.
+  static std::string tmp_overview(const std::vector<Action>& temp_rows);
+
   // ---- policy scripts (M19.2) -----------------------------------------
   //
   // A `.py` directly in `scripts\` is a *policy*: `ScriptHost` hands it to the
@@ -219,6 +249,12 @@ class ActionStore {
   void rescan();
   void write_armed() const;
   void read_armed();
+  // M29. Scans `tmp_root()` into `actions_`, appended after the rows found in
+  // `actions_root()` so a collision (see below) always resolves in the
+  // consented row's favour, and writes `tmp_root()/CLAUDE.md` when its
+  // content changed. `names_taken` is the set of action names already found,
+  // so a temp file whose name collides can be dropped and warned about once.
+  void rescan_tmp(std::vector<Action>& found, const std::set<std::string>& names_taken);
 
   // Only ever resolves a row in `actions_`. `find()` also answers for a policy
   // so that the approval window can draw one; `check()` must not, or a name in
@@ -257,6 +293,19 @@ class ActionStore {
   bool authoring_ = false;
   bool auto_allow_ = false;
   float since_scan_ = 0.0f;
+  // M29. Names of temp/action collisions already logged, so a stray file left
+  // sitting in `tmp\` does not print a line every second for the life of the
+  // run.
+  std::set<std::string> warned_collisions_;
+  // M29. Temp names already pushed into `news_` this launch, so a script that
+  // has already been announced is not announced again on every scan.
+  std::set<std::string> announced_temp_;
+  // M29. The last `CLAUDE.md` content written to `tmp_root()`, so `rescan()`
+  // writes it only when it changed. Empty until the first scan, which then
+  // also compares against whatever is already on disk, so an unchanged folder
+  // costs no write across a restart either.
+  std::string last_tmp_overview_;
+  bool tmp_overview_checked_ = false;
 };
 
 }  // namespace aii

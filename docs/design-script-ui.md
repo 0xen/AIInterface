@@ -225,3 +225,67 @@ increments; `clicked` latches across two `set_results` and clears on `take_resul
 - Menus and popups (`BeginMenuBar`, `BeginPopup`, modal). Popups need per-frame open
   state the replay model handles badly; add when a script needs one.
 - A window per *script*: a window is per key, and any thread may record for any key.
+
+## 9. Node graphs (M30)
+
+**Ask (22 Sep 2026):** the user, having watched M28 land, asked for the obvious next surface
+— boxes with pins the assistant can wire together and the user can drag around, inside the
+same script windows. imnodes is what the user remembered from Prosper, where it was already
+vendored for exactly this.
+
+**The library.** `third_party/imnodes` is a new submodule, `Nelarius/imnodes`, pinned to
+`master` at commit `eb36902c` — a header-and-one-`.cpp` ImGui extension, the same shape as
+ImGui itself, so it builds straight into `aii_core` and `aii_pyhost.dll` alongside it rather
+than needing its own CMake target. Vendored as a submodule rather than copied in, for the
+same reason `third_party/Renderer` is: a pin that moves in its own commit, not silently on
+someone's clone.
+
+**One `ImNodesContext` per script window.** imnodes keeps its own global-ish state (pin and
+link geometry, drag state, the minimap) the way ImGui itself does, and it binds to *the
+current* `ImGui::GetCurrentContext()` the same way — so it is a per-ImGui-context resource,
+not a singleton. `ScriptWindow` already owns one `ImGuiContext` per bridge key (§1.3); it now
+also owns one `ImNodesContext*`, created with `ImNodes::CreateContext()` right after the
+`ImGuiContext` and made current (`ImNodes::SetCurrentContext`) in the same place the window
+already calls `ImGui::SetCurrentContext` before replaying a frame. Skipping this and sharing
+one global imnodes context across windows would let two script windows' graphs corrupt each
+other's drag and link state; the crash from that would show up as a wrong node moving on the
+wrong window, not as an assert, since asserts are compiled out in Release (§3).
+
+**The op table.** Same shape as the `UiOp` table in §3 — `label`/`text`/`f`/`i`/`b`/`items` on
+one `UiCommand`, copied from the header comment in `src/core/ui_bridge.h`:
+
+| op | fields used |
+|---|---|
+| `BeginNodeEditor`, `EndNodeEditor` | — |
+| `BeginNode`, `EndNode` | `i[0]` = node id |
+| `BeginNodeTitleBar`, `EndNodeTitleBar` | — |
+| `BeginInputAttribute`, `EndInputAttribute` | `i[0]` = attr id, `i[1]` = pin shape |
+| `BeginOutputAttribute`, `EndOutputAttribute` | `i[0]` = attr id, `i[1]` = pin shape |
+| `BeginStaticAttribute`, `EndStaticAttribute` | `i[0]` = attr id |
+| `NodeLink` | `i[0]` = link id, `f[0]` = start attr, `f[1]` = end attr |
+| `SetNodePos` | `i[0]` = node id, `f[0]` = x, `f[1]` = y, `i[1]` = force |
+| `NodeMiniMap` | `f[0]` = size fraction, `i[0]` = location |
+| `PushNodeColor`, `PopNodeColor` | `i[0]` = `ImNodesCol`, `f` = rgba |
+
+Results land after `EndNodeEditor`, latched exactly like every other result in §3:
+`link_created:<start>:<end>` and `link_destroyed:<id>` behave like a click (read once, then
+gone); `node_selected:<id>` is a `b`; `node_pos:<id>` is `f[0], f[1]` in grid space, rewritten
+every frame a node is drawn so a script can always ask where the user left it.
+
+**Placement is once-per-node-per-editor.** `SetNodePos` is a no-op on the second and later
+frame it is recorded for the same node id, unless `i[1]` (force) is set. Without this, a
+script that re-records its layout on every tick (the normal case — `Panel` records at a fixed
+rate whether or not anything changed) would snap every node back to its starting position out
+from under a user mid-drag, the identical failure the results-latching design in §2 already
+solved for sliders. `force` exists for the one legitimate case, an explicit "re-arrange this"
+action, not for steady-state redraws.
+
+**What is not done.** Per-link styling (colour, thickness) — only the four `NODE_COL_*`
+push/pop colours in the op table, node-wide; a link always draws in the editor's default
+style. Editor state save/load (imnodes has its own `SaveCurrentEditorStateToIniString` /
+`LoadCurrentEditorStateFromIniString` — not wired up, so panning and zoom reset with the
+window); a graph's node *positions* persist through the ordinary `to_dict()`/state-file
+round trip in `aii_ui.graph`, but pan and zoom do not. Hover results (`IsPinHovered`,
+`IsLinkHovered`, `IsNodeHovered`) are not surfaced as ops or results — add them the way
+`SetTooltip` was added to the plain widget table, if a script needs a hover-driven tooltip on
+a pin or a link.

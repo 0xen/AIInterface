@@ -1501,13 +1501,22 @@ void settings_surface(AvatarUiState& state, const AvatarOptions& options) {
       ImGui::PopStyleColor();
       if (ImGui::IsItemHovered() && !r.description.empty())
         ImGui::SetTooltip("%s", r.description.c_str());
+      // M29. A temp row is armed by location, not by a click: the tag says
+      // where it lives, and there is nothing here for Confirm to do.
+      if (r.temporary) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("temp");
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("scripts\\tmp\\ -- runs without asking, and could be cleared at any "
+                            "point. To keep it, ask for it to be rewritten into scripts\\actions\\.");
+      }
       // An action the app found but will not run is **listed and refused with
       // its own word**, never hidden: the whole hazard of a thing that is
       // quietly not there is that nobody can say how it went missing.
       if (!r.in_digest) {
         ImGui::SameLine();
         ImGui::TextColored(warn(), "(over the limit)");
-      } else if (!r.armed) {
+      } else if (!r.armed && !r.temporary) {
         ImGui::SameLine();
         if (ImGui::SmallButton("Allow")) state.script_arm = r.name;
       }

@@ -2403,7 +2403,7 @@ int main(int /*argc*/, char** /*argv*/) {
             std::vector<aii::VoiceSession::ActionFact> facts;
             facts.reserve(actions.all().size());
             for (const aii::Action& a : actions.all())
-                facts.push_back({a.name, a.armed, a.in_digest});
+                facts.push_back({a.name, a.armed, a.in_digest, a.temporary});
             session->set_actions(std::move(facts), actions.authoring());
             session->note_action_news(actions.take_news());
         } else {
@@ -3279,7 +3279,8 @@ int main(int /*argc*/, char** /*argv*/) {
             avatarOptions.script_status_ok = bus.script_status_ok();
             avatarOptions.scripts.clear();
             for (const aii::Action& a : actions.all())
-                avatarOptions.scripts.push_back({a.name, a.description, a.armed, a.in_digest});
+                avatarOptions.scripts.push_back(
+                    {a.name, a.description, a.armed, a.in_digest, a.temporary});
             avatarOptions.art_status = avatarSource.status();
             avatarOptions.art_status_ok = avatarSource.status_ok();
             // M20.1. The same carry for the file the surface writes to. Before

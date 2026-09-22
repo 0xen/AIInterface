@@ -29,7 +29,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
+#include <vector>
 
 #include "action_store.h"
 #include "core/prompt_store.h"
@@ -132,6 +134,77 @@ int main() {
         "the composed system prompt carries the NOT ARMED mark");
   check(composed.find("run name=") != std::string::npos,
         "the composed system prompt carries the run syntax line");
+
+  // ---- M29: the temporary folder -----------------------------------------
+  //
+  // Armed by location, never by a record: a file dropped in `tmp\` is
+  // callable on the next scan with no click and nothing written about it to
+  // `_armed.json`.
+  const fs::path tmp = aii::ActionStore::tmp_root();
+  check(tmp == root / "AIInterface" / "scripts" / "tmp", "tmp_root() sits beside actions_root()");
+  fs::create_directories(tmp, ec);
+  write_file(tmp / "temp_one.py", "\"\"\"A throwaway thing.\"\"\"\n\ndef run():\n    pass\n", false);
+
+  store.tick(999.0f);  // past kScanEvery, forces a rescan
+
+  const Action* temp_one = store.find("temp_one");
+  check(temp_one != nullptr, "a file dropped in tmp\\ is found");
+  if (temp_one) {
+    check(temp_one->temporary, "it is marked temporary");
+    check(temp_one->armed, "it is armed on sight, by location, with no click");
+    check(store.check("temp_one") == ActionRefusal::None,
+          "check() allows it with authoring on and no consent record");
+  }
+
+  // Nothing about it reaches the consent file.
+  {
+    std::ifstream f(actions / "_armed.json", std::ios::binary);
+    std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    check(body.find("temp_one") == std::string::npos,
+          "a temp row never appears in _armed.json, armed or seen");
+  }
+
+  const std::string digest2 = store.digest();
+  check(digest2.find("temp_one  [temp]") != std::string::npos,
+        "the digest marks a temp row with [temp], after the name");
+
+  // A same-named action wins; the temp file is dropped from the set.
+  write_file(actions / "collide.py", "\"\"\"The action.\"\"\"\n\ndef run():\n    pass\n", false);
+  write_file(tmp / "collide.py", "\"\"\"The temp one, never seen.\"\"\"\n\ndef run():\n    pass\n",
+             false);
+  store.tick(999.0f);
+  {
+    const Action* collide = store.find("collide");
+    check(collide != nullptr && !collide->temporary,
+          "a same-named action wins over a same-named temp file");
+  }
+
+  // `tmp_overview()`: a pure function, no store needed.
+  {
+    std::vector<Action> rows;
+    Action a;
+    a.name = "example";
+    a.description = "Does a thing.";
+    a.temporary = true;
+    rows.push_back(a);
+    const std::string overview = aii::ActionStore::tmp_overview(rows);
+    check(overview.find("example.py -- Does a thing.") != std::string::npos,
+          "tmp_overview lists a file with its docstring line");
+    const std::string empty_overview = aii::ActionStore::tmp_overview({});
+    check(empty_overview.find("(empty)") != std::string::npos,
+          "tmp_overview says (empty) for none");
+  }
+
+  // `CLAUDE.md` lands in tmp\ after load()/rescan(), and describes what is
+  // there right now.
+  {
+    const fs::path claude_md = tmp / "CLAUDE.md";
+    check(fs::exists(claude_md, ec), "CLAUDE.md is written in tmp\\");
+    std::ifstream f(claude_md, std::ios::binary);
+    std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    check(body.find("temp_one.py") != std::string::npos,
+          "CLAUDE.md in tmp\\ lists the file that is there");
+  }
 
   fs::remove_all(root, ec);
   std::printf("%d failure(s)\n", failures);

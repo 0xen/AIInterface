@@ -399,6 +399,10 @@ class VoiceSession {
     std::string name;
     bool armed = false;
     bool in_digest = true;
+    // M29. True for a row found in `scripts\tmp\`: always armed, never asked
+    // about, and worth saying differently in `pending_context()`'s news line
+    // than an action the user actually confirmed.
+    bool temporary = false;
   };
   void set_actions(std::vector<ActionFact> list, bool authoring);
   // One or more actions were created or armed. Reaches the model through
@@ -908,6 +912,7 @@ class VoiceSession {
     std::string name;
     bool armed = false;
     bool in_digest = true;
+    bool temporary = false;
   };
   std::vector<ActionLevel> actions_;
   bool actions_authoring_ = false;

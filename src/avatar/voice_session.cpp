@@ -3587,17 +3587,28 @@ std::string VoiceSession::pending_context() const {
     b += "Scripts that have appeared or been allowed since the last turn:\n";
     for (const std::string& n : news) {
       bool armed = false;
+      bool temp = false;
       bool known = false;
       for (const ActionLevel& a : actions)
         if (a.name == n) {
           armed = a.armed;
+          temp = a.temporary;
           known = true;
         }
       if (!known) continue;
-      b += "- " + n + (armed ? ": allowed, you can run it now.\n"
-                             : ": waiting to be allowed. Tell the user to open the settings "
-                               "panel, find it under Scripts and press Confirm. Do not try to "
-                               "run it until they have.\n");
+      // M29. A temp row was never "allowed" by anyone — it is armed by sitting
+      // in `scripts\tmp\`, not by a decision the user made — so it gets its
+      // own sentence rather than borrowing the word "allowed" from the
+      // consent it never went through.
+      if (temp)
+        b += "- " + n + ": temporary script, ready to run now. It lives in scripts\\tmp\\ and "
+                        "could be cleared at any point; if the user wants to keep it, rewrite it "
+                        "into scripts\\actions\\.\n";
+      else
+        b += "- " + n + (armed ? ": allowed, you can run it now.\n"
+                               : ": waiting to be allowed. Tell the user to open the settings "
+                                 "panel, find it under Scripts and press Confirm. Do not try to "
+                                 "run it until they have.\n");
     }
     b += "\n";
   }
@@ -4280,7 +4291,7 @@ void VoiceSession::set_actions(std::vector<ActionFact> list, bool authoring) {
   actions_.clear();
   actions_.reserve(list.size());
   for (ActionFact& f : list)
-    actions_.push_back(ActionLevel{std::move(f.name), f.armed, f.in_digest});
+    actions_.push_back(ActionLevel{std::move(f.name), f.armed, f.in_digest, f.temporary});
   actions_authoring_ = authoring;
 }
 

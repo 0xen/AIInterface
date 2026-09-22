@@ -116,6 +116,109 @@ ui.end_frame()
 A widget you do not record this frame simply is not drawn this frame -- there
 is no need to clear anything.
 
+### Node graphs
+
+Boxes with pins, wired together, that the user can drag around and connect --
+a diagram of the microphone-to-recogniser-to-Claude pipeline, a wiring view
+of an action's own steps, anything shaped like nodes and links rather than a
+form. This is `aii.ui`'s node editor, one imnodes context per script window.
+
+| Call | What it does |
+|---|---|
+| `ui.begin_node_editor()` / `ui.end_node_editor()` | Wraps the whole graph for this frame |
+| `ui.begin_node(id)` / `ui.end_node()` | One box |
+| `ui.begin_node_title_bar()` / `ui.end_node_title_bar()` | The box's title, drawn first inside it |
+| `ui.begin_input_attribute(id, shape=1)` / `ui.end_input_attribute()` | An input pin |
+| `ui.begin_output_attribute(id, shape=1)` / `ui.end_output_attribute()` | An output pin |
+| `ui.begin_static_attribute(id)` / `ui.end_static_attribute()` | A row with no pin -- widgets only |
+| `ui.link(id, start_attr, end_attr)` | Draw a link between two pins |
+| `ui.set_node_pos(id, x, y, force=False)` | Place a node in grid space |
+| `ui.mini_map(fraction=0.2, location=1)` | An overview corner, called just before `end_node_editor()` |
+| `ui.push_node_color(idx, rgba)` / `ui.pop_node_color()` | `idx` is one of `ui.NODE_COL_*` |
+| `ui.links_created()` -> `[(start_attr, end_attr), ...]` | New links the user dragged, since your last recording |
+| `ui.links_destroyed()` -> `[link_id, ...]` | Links the user deleted |
+| `ui.node_pos(id)` -> `(x, y)` or `None` | Where a node ended up, as of the last render |
+| `ui.selected_nodes()` -> `[id, ...]` | The current node selection |
+| `ui.PIN_CIRCLE` .. `ui.PIN_QUAD_FILLED` | Pin shapes, 0..5, for `shape` |
+| `ui.MINIMAP_BOTTOM_LEFT` .. `ui.MINIMAP_TOP_RIGHT` | Minimap corners, 0..3, for `location` |
+| `ui.NODE_COL_NODE_BACKGROUND`, `ui.NODE_COL_TITLE_BAR`, `ui.NODE_COL_LINK`, `ui.NODE_COL_PIN` | Colour targets for `push_node_color` |
+
+**Ids.** `id` is your own int for a node, an attribute or a link. imnodes
+requires every id inside one editor to be unique across all three kinds --
+a node id and a link id must not collide either -- so hand-rolling them is
+easy to get wrong on a graph that grows. `aii_ui.NodeGraph` (below)
+allocates all of its ids from one counter for exactly this reason; write
+against that rather than calling these ops directly unless you need
+something it does not do.
+
+**Positions are applied once.** `set_node_pos` only moves a node the first
+time you call it for that id in that editor; call it again with `force=True`
+if you really mean to override wherever the node is now. Otherwise a script
+that records every tick would drag every node back to its starting position
+out from under the user mid-drag.
+
+**Everything between `begin_node`/`end_node` is ordinary widgets** -- `text`,
+`slider_float`, `input_text`, and so on -- called exactly as anywhere else,
+just drawn inside the box instead of the window.
+
+**`links_created()` and `links_destroyed()` latch**, the same as a button's
+`clicked`: they report what happened since you last recorded, and reading
+them clears them.
+
+#### `aii_ui.NodeGraph`
+
+The model + renderer built on the calls above -- add nodes and links once,
+call `draw(ui)` every tick, and it folds the user's edits back into itself.
+
+```python
+from aii_ui import NodeGraph, Panel
+
+g = NodeGraph()
+mic = g.add_node("Microphone", outputs=["audio"])
+rec = g.add_node("Recogniser", inputs=["audio"], outputs=["text"])
+g.add_link(g.pin(mic, "audio"), g.pin(rec, "audio"))
+g.layout_grid()
+
+def draw(ui):
+    g.draw(ui)
+
+Panel("pipeline", "Pipeline").run(draw)
+```
+
+`add_node(title, inputs=(), outputs=(), pos=None, color=None, body=None)`
+returns the node id; `inputs`/`outputs` are pin labels or `(label, shape)`
+pairs; `body(ui, node)` draws widgets between the pins -- give each one an
+explicit width with `ui.set_next_item_width(...)`, because ImGui's default width
+is a share of the window and would stretch the node across the whole editor,
+and keep any value it returns on the `node` dict so it survives the next
+recording. `pin(node_id, label)`
+looks up a pin's attribute id. `add_link`/`remove_link`/`remove_node`,
+`links()`, `nodes()`, `selected_nodes()`. `layout_grid(columns=3, dx=220,
+dy=140)` gives a grid position to any node that does not have one, which is
+what turns a graph read from a state file straight into something readable.
+Callbacks: `on_link(start, end) -> bool` (return `False` to refuse a link the
+user just dragged), `on_unlink(link_id)`, `on_select(node_ids)`.
+
+**The state-file hand-off.** `to_dict()`/`from_dict()` round-trip a graph
+through the same JSON shape `aii_ui.state.watch_json` reads:
+
+```json
+{
+  "nodes": [
+    {"title": "Microphone", "inputs": [], "outputs": ["audio"], "pos": [20, 40], "color": null},
+    {"title": "Recogniser", "inputs": ["audio"], "outputs": ["text"], "pos": null, "color": null}
+  ],
+  "links": [
+    {"from": [0, "audio"], "to": [1, "audio"]}
+  ]
+}
+```
+
+A node with no `pos` is left for `layout_grid()`. A link names its endpoints
+by `[node index, pin label]`, not by the internal attribute id, so a graph
+the assistant writes never needs to know what ids the running panel already
+handed out.
+
 ### Rate and latching
 
 **A button answers for the frames since you last recorded, not this exact
@@ -157,6 +260,7 @@ raw `aii.ui` only for something none of this covers.
 | `status.py` | `class StatusPanel` -- a titled window with a status line, fields, a progress bar and a log |
 | `widgets.py` | free functions: `label_value`, `badge`, `status_line`, `log_view`, `key_value_table` |
 | `state.py` | `watch_json(path)`, `path_for(name)`, `STATE_DIR` -- the state-file hand-off (section 3) |
+| `graph.py` | `class NodeGraph` -- a node-graph model and renderer over `aii.ui`'s node editor calls (section 1, "Node graphs") |
 
 ### `Panel`
 
@@ -247,6 +351,13 @@ lines: it opens a `StatusPanel` and watches `scripts\state\status.json`.
 Run it once, then keep writing that file to update the panel -- you do not
 call the action again.
 
+A panel written for one occasion -- to watch this build, to show this one
+check -- belongs in `tmp\`, the same as any other script written for the
+moment: it is armed the instant it is written, and the folder may be cleared
+at any time. A panel worth keeping is promoted into `actions\` the normal
+way, by writing the same file there; the approval window then appears once
+for it.
+
 ## 4. Rate and latching, restated
 
 Two sentences, because they matter more than anything else here: **a button
@@ -263,7 +374,9 @@ package does not have, add it here -- a new file, or a new function in an
 existing one -- with a docstring saying what it is for, the same way every
 file in this package already does. Keep additions small: a few functions or
 one class per file, built out of the `aii.ui` calls in section 1, not a
-second framework beside it.
+second framework beside it. This is reusable code, not a script, so it
+belongs here regardless of whether the panel using it lives in `tmp\` or
+`actions\`.
 
 One thing worth knowing before you do: **a helper module is cached by
 CPython like any other Python import, and stays stale until the app

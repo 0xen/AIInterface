@@ -13,12 +13,14 @@
 #include <windowsx.h>
 
 #include "imgui.h"
+#include "imnodes.h"
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -173,6 +175,22 @@ struct ScriptWindow::Impl : ToolWindowCore {
   // Widget id -> the user's latest edit, kept until the script submits a
   // later generation. `ui_bridge.h`'s "why a slider does not snap back".
   std::map<std::string, UiResult> overrides;
+
+  // M30: this window's own imnodes context -- imnodes' state is one global
+  // (`GImNodes`), exactly like ImGui's own ambient context, so every window
+  // that draws a node editor needs its own and must make it current before
+  // drawing, the same rule `ui`/`make_current()` already follows for ImGui.
+  // Created right after the ImGui layer exists (create()) and destroyed
+  // before it goes (~ScriptWindow()).
+  ImNodesContext* node_ctx = nullptr;
+  // Node ids this window has placed at least once via SetNodePos. A script
+  // re-records every ~100ms; a node already positioned must not be re-pinned
+  // under the user's drag unless the script forces it (SetNodePos's `force`).
+  // Cleared only when the window itself is destroyed, never on a new
+  // generation -- ui_bridge.h's "why a slider does not snap back" applies to
+  // node positions too, and clearing on generation would re-pin every node on
+  // every recording.
+  std::set<int> positioned;
 };
 
 namespace {
@@ -214,6 +232,84 @@ void replay(ScriptWindow::Impl& s, std::vector<std::string>& id_stack,
   int style_color_depth = 0;
   int item_width_depth = 0;
   bool columns_active = false;
+  // M30: node-editor state. `editor_open` caps at 1 (a second BeginNodeEditor
+  // while one is open is ignored, per the header comment); `attr_open` is
+  // 0/1/2/3 for none/input/output/static since imnodes' three attribute kinds
+  // cannot nest inside each other. `nodes_this_frame` is every node id
+  // BeginNode drew since the last BeginNodeEditor, which is what
+  // EndNodeEditor reports positions and selection for.
+  int editor_open = 0;
+  int node_open = 0;
+  int title_bar_open = 0;
+  int attr_open = 0;
+  int node_color_depth = 0;
+  std::vector<int> nodes_this_frame;
+
+  // Closes whatever of a node's pieces are open, innermost first: an
+  // attribute, then the title bar, then the node itself. Used both by the
+  // explicit EndNode/EndNodeEditor handling and by the end-of-frame
+  // balancing, so a script that forgets an End never leaves imnodes with an
+  // unbalanced stack.
+  const auto close_attr = [&] {
+    switch (attr_open) {
+      case 1: ImNodes::EndInputAttribute(); break;
+      case 2: ImNodes::EndOutputAttribute(); break;
+      case 3: ImNodes::EndStaticAttribute(); break;
+      default: break;
+    }
+    attr_open = 0;
+  };
+  const auto close_node = [&] {
+    close_attr();
+    if (title_bar_open) {
+      ImNodes::EndNodeTitleBar();
+      title_bar_open = 0;
+    }
+    if (node_open) {
+      ImNodes::EndNode();
+      node_open = 0;
+    }
+  };
+  // Closes the node editor: whatever node it left open, then the editor
+  // itself, then reads the results the design documents -- node_pos and
+  // node_selected for every node id BeginNode drew this frame, and the one
+  // link_created / link_destroyed pair, if any. Only called while
+  // `editor_open`, so EndNodeEditor() is never called on a context that
+  // never got a matching Begin.
+  const auto close_editor = [&] {
+    close_node();
+    while (node_color_depth-- > 0) ImNodes::PopColorStyle();
+    node_color_depth = 0;
+    ImNodes::EndNodeEditor();
+    editor_open = 0;
+    for (int id : nodes_this_frame) {
+      const ImVec2 pos = ImNodes::GetNodeGridSpacePos(id);
+      UiResult rp;
+      rp.id = "node_pos:" + std::to_string(id);
+      rp.f[0] = pos.x;
+      rp.f[1] = pos.y;
+      results.push_back(rp);
+      UiResult rs;
+      rs.id = "node_selected:" + std::to_string(id);
+      rs.b = ImNodes::IsNodeSelected(id);
+      results.push_back(rs);
+    }
+    nodes_this_frame.clear();
+    int link_start = 0, link_end = 0;
+    if (ImNodes::IsLinkCreated(&link_start, &link_end)) {
+      UiResult r;
+      r.id = "link_created:" + std::to_string(link_start) + ":" + std::to_string(link_end);
+      r.clicked = true;
+      results.push_back(r);
+    }
+    int destroyed_id = 0;
+    if (ImNodes::IsLinkDestroyed(&destroyed_id)) {
+      UiResult r;
+      r.id = "link_destroyed:" + std::to_string(destroyed_id);
+      r.clicked = true;
+      results.push_back(r);
+    }
+  };
   // TreeNode's per-node open state: TreePop must consume the matching entry
   // without calling ImGui::TreePop() when ImGui returned false for the node.
   std::vector<bool> tree_stack;
@@ -638,6 +734,118 @@ void replay(ScriptWindow::Impl& s, std::vector<std::string>& id_stack,
       // ---- meta -------------------------------------------------------
       case UiOp::SetScrollHereY: ImGui::SetScrollHereY(cmd.f[0]); break;
 
+      // ---- node graphs (M30, imnodes) ----------------------------------
+      case UiOp::BeginNodeEditor:
+        if (editor_open == 0) {
+          ImNodes::BeginNodeEditor();
+          editor_open = 1;
+          nodes_this_frame.clear();
+        }
+        break;
+      case UiOp::EndNodeEditor:
+        if (editor_open) close_editor();
+        break;
+      case UiOp::BeginNode:
+        if (editor_open && !node_open) {
+          ImNodes::BeginNode(cmd.i[0]);
+          node_open = 1;
+          nodes_this_frame.push_back(cmd.i[0]);
+        }
+        break;
+      case UiOp::EndNode:
+        if (node_open) close_node();
+        break;
+      case UiOp::BeginNodeTitleBar:
+        if (node_open && !title_bar_open) {
+          ImNodes::BeginNodeTitleBar();
+          title_bar_open = 1;
+        }
+        break;
+      case UiOp::EndNodeTitleBar:
+        if (title_bar_open) {
+          ImNodes::EndNodeTitleBar();
+          title_bar_open = 0;
+        }
+        break;
+      case UiOp::BeginInputAttribute:
+        if (node_open && attr_open == 0) {
+          ImNodes::BeginInputAttribute(cmd.i[0], static_cast<ImNodesPinShape>(cmd.i[1]));
+          attr_open = 1;
+        }
+        break;
+      case UiOp::EndInputAttribute:
+        if (attr_open == 1) {
+          ImNodes::EndInputAttribute();
+          attr_open = 0;
+        }
+        break;
+      case UiOp::BeginOutputAttribute:
+        if (node_open && attr_open == 0) {
+          ImNodes::BeginOutputAttribute(cmd.i[0], static_cast<ImNodesPinShape>(cmd.i[1]));
+          attr_open = 2;
+        }
+        break;
+      case UiOp::EndOutputAttribute:
+        if (attr_open == 2) {
+          ImNodes::EndOutputAttribute();
+          attr_open = 0;
+        }
+        break;
+      case UiOp::BeginStaticAttribute:
+        if (node_open && attr_open == 0) {
+          ImNodes::BeginStaticAttribute(cmd.i[0]);
+          attr_open = 3;
+        }
+        break;
+      case UiOp::EndStaticAttribute:
+        if (attr_open == 3) {
+          ImNodes::EndStaticAttribute();
+          attr_open = 0;
+        }
+        break;
+      case UiOp::NodeLink:
+        if (editor_open)
+          ImNodes::Link(cmd.i[0], static_cast<int>(cmd.f[0]), static_cast<int>(cmd.f[1]));
+        break;
+      case UiOp::SetNodePos: {
+        const int id = cmd.i[0];
+        const bool force = cmd.i[1] != 0;
+        if (editor_open && (force || s.positioned.find(id) == s.positioned.end())) {
+          ImNodes::SetNodeGridSpacePos(id, ImVec2(cmd.f[0], cmd.f[1]));
+          s.positioned.insert(id);
+        }
+        break;
+      }
+      case UiOp::NodeMiniMap:
+        // imnodes wants this called inside the editor, after the nodes and
+        // links, just before EndNodeEditor -- if the script recorded it
+        // anywhere else, `editor_open` is false here and it is ignored.
+        if (editor_open) {
+          const float frac = cmd.f[0] <= 0.0f ? 0.2f : cmd.f[0];
+          ImNodes::MiniMap(frac, static_cast<ImNodesMiniMapLocation>(cmd.i[0]));
+        }
+        break;
+      case UiOp::PushNodeColor: {
+        // Same linearisation every other colour in this replayer gets
+        // (ui_color(), sRGB in -> linear for the swapchain), then packed to
+        // the ImU32 imnodes' own PushColorStyle takes.
+        const ImVec4 c = ui_color(cmd.f[0], cmd.f[1], cmd.f[2], cmd.f[3]);
+        const ImU32 packed =
+            IM_COL32(static_cast<int>(std::clamp(c.x, 0.0f, 1.0f) * 255.0f + 0.5f),
+                     static_cast<int>(std::clamp(c.y, 0.0f, 1.0f) * 255.0f + 0.5f),
+                     static_cast<int>(std::clamp(c.z, 0.0f, 1.0f) * 255.0f + 0.5f),
+                     static_cast<int>(std::clamp(c.w, 0.0f, 1.0f) * 255.0f + 0.5f));
+        ImNodes::PushColorStyle(static_cast<ImNodesCol>(cmd.i[0]), packed);
+        ++node_color_depth;
+        break;
+      }
+      case UiOp::PopNodeColor:
+        if (node_color_depth > 0) {
+          ImNodes::PopColorStyle();
+          --node_color_depth;
+        }
+        break;
+
       case UiOp::Count: break;  // never recorded; ignored if it somehow arrives
     }
   }
@@ -659,6 +867,7 @@ void replay(ScriptWindow::Impl& s, std::vector<std::string>& id_stack,
     tree_stack.pop_back();
   }
   if (columns_active) ImGui::Columns(1);
+  if (editor_open) close_editor();  // attribute -> title bar -> node -> editor
   if (style_color_depth > 0) ImGui::PopStyleColor(style_color_depth);
   while (item_width_depth-- > 0) ImGui::PopItemWidth();
   while (!id_stack.empty()) {
@@ -715,6 +924,13 @@ std::unique_ptr<ScriptWindow> ScriptWindow::create(platform::IPlatformBackend& b
     return fail(err);
   }
 
+  // M30: imnodes' context is bound to an ImGui context the same way ImGui's
+  // own is bound to a window -- create it now, with this window's ImGui
+  // context current (ToolWindowCore::open() leaves it so; see ImGuiLayer's
+  // own comment on why SetCurrentContext is called explicitly).
+  ImNodes::SetImGuiContext(ImGui::GetCurrentContext());
+  s.node_ctx = ImNodes::CreateContext();
+
   s.input = std::make_unique<ScriptInput>();
   if (!s.subclass(scriptProc, s.input.get())) {
     // Not survivable, WorkerWindow's rule again: a close box that reaches
@@ -729,6 +945,16 @@ std::unique_ptr<ScriptWindow> ScriptWindow::create(platform::IPlatformBackend& b
 ScriptWindow::~ScriptWindow() {
   if (!p_) return;
   Impl& s = *p_;
+  // The imnodes context goes before the ImGui layer it is bound to -- the
+  // reverse of create()'s order, and for the same reason ToolWindowCore's own
+  // shutdown() releases `ui` before `renderer`: whatever a context is bound
+  // to must still be alive while it is torn down.
+  if (s.node_ctx) {
+    if (s.ui) s.ui->make_current();
+    ImNodes::SetCurrentContext(s.node_ctx);
+    ImNodes::DestroyContext(s.node_ctx);
+    s.node_ctx = nullptr;
+  }
   s.shutdown();
   log::info("script window: {} torn down", s.key);
 }
@@ -799,6 +1025,7 @@ bool ScriptWindow::draw(float dt, UiBridge& bridge) {
   }
 
   s.ui->make_current();
+  if (s.node_ctx) ImNodes::SetCurrentContext(s.node_ctx);
   ImGuiIO& io = ImGui::GetIO();
 
   POINT cursor{};

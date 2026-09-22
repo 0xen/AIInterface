@@ -540,6 +540,29 @@ if(AII_BUILD_AVATAR)
       "to use the third_party/Renderer submodule, or configure with -DAII_BUILD_AVATAR=OFF.")
   endif()
   include(cmake/FetchImgui.cmake)
+
+  # M30: node graphs from Python, on Nelarius/imnodes (third_party/imnodes, a
+  # submodule pinned to master exactly as third_party/Renderer is pinned to a
+  # commit -- see that block's comment for why a submodule and not a stray
+  # sibling checkout). It needs imgui.h and imgui_internal.h, both of which
+  # the `imgui` target above already publishes on its include path, so this
+  # only has to exist after that include(), not after anything else.
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imnodes/imnodes.h")
+    message(FATAL_ERROR
+      "The imnodes submodule at third_party/imnodes is empty.\n"
+      "This clone was made without it. Fetch it with:\n"
+      "    git submodule update --init --recursive\n"
+      "To build without the window instead, configure with -DAII_BUILD_AVATAR=OFF.")
+  endif()
+  add_library(imnodes STATIC third_party/imnodes/imnodes.cpp)
+  target_include_directories(imnodes SYSTEM PUBLIC third_party/imnodes)
+  target_link_libraries(imnodes PUBLIC imgui)
+  set_target_properties(imnodes PROPERTIES FOLDER "third_party")
+  if(MSVC)
+    # Third-party source; its own warnings should not drown ours under /W4.
+    target_compile_options(imnodes PRIVATE /W0)
+  endif()
+
   set(REND_BUILD_APPS OFF CACHE BOOL "" FORCE)
   # M2.6. The engine's own embedded-CPython host, in process, as the user
   # asked: "just like the viewer application python is ran in our code. Not as
