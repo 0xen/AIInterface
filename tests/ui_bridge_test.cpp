@@ -261,6 +261,26 @@ void test_snapshot_excludes_user_closed_from_open() {
   check(!in_closing, "and it is not in closing either -- the script never asked to close it");
 }
 
+void test_epoch_moves_on_every_open() {
+  std::printf("\n-- takeover: the epoch moves on every open ---------------------\n");
+  aii::UiBridge b;
+  aii::UiWindowSpec spec;
+  spec.key = "k";
+  spec.title = "one";
+  check(b.epoch_of("k") == 0, "unknown key has epoch 0");
+  b.open(spec);
+  check(b.epoch_of("k") == 1, "first open gives epoch 1");
+  spec.title = "two";
+  b.open(spec);
+  check(b.epoch_of("k") == 2, "a second open of the same key moves the epoch on");
+  aii::UiFrame f;
+  b.submit("k", f);
+  check(b.epoch_of("k") == 2, "submitting does not move the epoch");
+  b.mark_closed("k");
+  b.open(spec);
+  check(b.epoch_of("k") == 3, "reopening after the user closed it moves it on too");
+}
+
 }  // namespace
 
 int main() {
@@ -280,6 +300,7 @@ int main() {
   test_close_and_remove();
   test_ui_compose_id();
   test_snapshot_excludes_user_closed_from_open();
+  test_epoch_moves_on_every_open();
   std::printf(failures ? "\n%d failed\n" : "\nall passed\n", failures);
   return failures ? 1 : 0;
 }

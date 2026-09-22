@@ -178,6 +178,10 @@ struct ScriptWindow::Impl : ToolWindowCore {
   // per `UiBridge::frame_for`'s comment.
   UiFrame frame;
   std::uint64_t generation = 0;
+  // The bridge's epoch for this key as of the last frame. Moving on means a
+  // new run of a script took the window over (ui_bridge.h, "Takeover"), and
+  // its node placements and values should land as if the window were new.
+  std::uint64_t epoch = 0;
   // Widget id -> the user's latest edit, kept until the script submits a
   // later generation. `ui_bridge.h`'s "why a slider does not snap back".
   std::map<std::string, UiResult> overrides;
@@ -961,6 +965,11 @@ std::unique_ptr<ScriptWindow> ScriptWindow::create(platform::IPlatformBackend& b
   // Ctrl+click on a pin detaches its link (imnodes then reports it destroyed,
   // which reaches the script as `link_destroyed`). These pointers are into
   // this window's own ImGuiIO, which lives as long as its context does.
+  // Disabled text is ImGui's dim grey, tuned for the widget's dark panel; on
+  // an imnodes node body (mid grey) it is almost invisible, which a user read
+  // as the Japanese font being missing. Lifted here, for this window's own
+  // context only, so `text_disabled` reads as a hint rather than vanishing.
+  ImGui::GetStyle().Colors[ImGuiCol_TextDisabled] = ui_color(0.82f, 0.82f, 0.84f, 1.0f);
   {
     ImNodesIO& nio = ImNodes::GetIO();
     nio.AltMouseButton = ImGuiMouseButton_Right;
@@ -1058,6 +1067,12 @@ bool ScriptWindow::draw(float dt, UiBridge& bridge) {
   // clears the overrides at the right moment: a script that has recorded
   // again has, by the override's contract, already read the previous
   // results and decided what to draw next.
+  const std::uint64_t ep = bridge.epoch_of(s.key);
+  if (ep != s.epoch) {
+    s.epoch = ep;
+    s.overrides.clear();
+    s.positioned.clear();
+  }
   const std::uint64_t gen = bridge.generation_of(s.key);
   if (gen != s.generation) {
     UiFrame nf;

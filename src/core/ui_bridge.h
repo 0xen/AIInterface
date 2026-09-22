@@ -77,6 +77,19 @@
 // `ScriptWindow`'s business, not this header's, but the rule is stated here
 // because it is why `UiResult` carries values as well as flags.
 //
+// ## Takeover (M30.2)
+//
+// The assistant rewrites a script and runs it again while the first run's
+// loop is still recording into the same key. Two loops then alternate frames
+// into one window and it flickers between the old and the new content every
+// other frame — the first user report after node graphs shipped. So every
+// `open()` on a key bumps that entry's **epoch**, and the Python side
+// remembers, per thread, the epoch it opened a key at: a thread whose epoch is
+// stale sees `is_open()` false and has its frames dropped, so the old loop
+// ends on its own and the new run owns the window. The window itself drops
+// its overrides and node placements when the epoch moves, because a new run
+// is a new script and its positions should land.
+//
 // ## Ids
 //
 // A widget's id is what ImGui's would be: its label, under the ids pushed
@@ -222,6 +235,9 @@ class UiBridge {
   // the copy when `generation` matches what it last replayed.
   bool frame_for(const std::string& key, UiFrame* out) const;
   std::uint64_t generation_of(const std::string& key) const;
+  // How many times this key has been open()ed; 0 for an unknown key. See
+  // "Takeover" above. Either side may call it.
+  std::uint64_t epoch_of(const std::string& key) const;
   // Merges this render frame's results into the window's: flags OR in (latch),
   // values replace.
   void set_results(const std::string& key, const std::vector<UiResult>& results);
@@ -245,6 +261,7 @@ class UiBridge {
     std::map<std::string, UiResult> results;
     bool user_closed = false;    // mark_closed()
     bool script_closed = false;  // close(), awaiting remove()
+    std::uint64_t epoch = 0;     // bumped by every open(); see "Takeover"
   };
   mutable std::mutex mutex_;
   std::map<std::string, Entry> entries_;

@@ -77,8 +77,12 @@ class Panel:
         end_frame, sleep 1/hz, until the user closes the window or the app
         is quitting. Call this on its own thread (or use `run_in_thread`) --
         it does not return until the window closes."""
-        if self.key not in ui.windows():
-            self.open()
+        # Always open, even if a window with this key exists: opening an
+        # existing key *takes it over*. A previous run of this script still
+        # looping on the same key then sees is_open() go False and stops, so
+        # the window shows only the new run instead of flickering between the
+        # two. Re-running a rewritten script is the normal case, not an error.
+        self.open()
         period = 1.0 / self.hz if self.hz > 0 else 0.1
         while ui.is_open(self.key) and not aii.should_quit():
             self.frame(draw)

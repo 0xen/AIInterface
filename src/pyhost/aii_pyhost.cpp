@@ -113,6 +113,10 @@ struct UiRecording {
   bool active = false;
 };
 thread_local UiRecording g_rec;
+// Per thread: the epoch at which this thread last open()ed each key. See
+// ui_bridge.h, "Takeover". Thread-local on purpose -- the point is to tell
+// the thread that was superseded apart from the one that superseded it.
+thread_local std::map<std::string, std::uint64_t> g_owned;
 
 // A refusal reaches the log once per distinct message per key, not once per
 // frame: a window host that never appears (an old build, or one the app
@@ -680,6 +684,10 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
         std::string err;
         const bool ok = g_host.ui->open(spec, &err);
         if (!ok) ui_log_once(key, err.empty() ? "open refused" : err);
+        // This thread now owns the key at this epoch. A later open() of the
+        // same key from another thread moves the epoch on, and this thread's
+        // is_open() then answers false -- ui_bridge.h, "Takeover".
+        if (ok) g_owned[key] = g_host.ui->epoch_of(key);
         return ok;
       },
       py::arg("key"), py::arg("title"), py::arg("w") = 360, py::arg("h") = 240,
@@ -694,8 +702,24 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       py::arg("key"), "Ask the app to destroy this window. A later open() makes a fresh one.");
 
   ui.def(
-      "is_open", [](const std::string& key) { return g_host.ui ? g_host.ui->is_open(key) : false; },
-      py::arg("key"), "True while the window exists and the user has not closed it.");
+      "is_open",
+      [](const std::string& key) {
+        if (!g_host.ui || !g_host.ui->is_open(key)) return false;
+        const auto owned = g_owned.find(key);
+        // Superseded: another thread opened this key after we did. Answer
+        // false so the old loop ends by itself; the new run owns the window.
+        if (owned != g_owned.end() && owned->second != g_host.ui->epoch_of(key)) return false;
+        return true;
+      },
+      py::arg("key"),
+      "True while the window exists, the user has not closed it, and no later "
+      "open() of the same key from another thread has taken it over.");
+
+  ui.def(
+      "epoch", [](const std::string& key) { return g_host.ui ? g_host.ui->epoch_of(key) : 0ull; },
+      py::arg("key"),
+      "How many times this key has been opened. Moves on when a newer script "
+      "takes the window over; a loop that records under an old value is stale.");
 
   ui.def(
       "windows", [] { return g_host.ui ? g_host.ui->keys() : std::vector<std::string>{}; },
@@ -725,7 +749,13 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
         if (!g_rec.active) throw std::runtime_error("call begin_frame() first");
         const int count = static_cast<int>(g_rec.frame.cmds.size());
         std::string err;
-        const bool ok = g_host.ui && g_host.ui->submit(g_rec.key, std::move(g_rec.frame), &err);
+        // A frame from a thread whose epoch is stale is dropped, not drawn:
+        // this is the half of the takeover that stops the flicker on the very
+        // frame the new run opens, before the old loop has noticed.
+        const auto owned = g_owned.find(g_rec.key);
+        const bool stale = g_host.ui && owned != g_owned.end() &&
+                           owned->second != g_host.ui->epoch_of(g_rec.key);
+        const bool ok = stale || (g_host.ui && g_host.ui->submit(g_rec.key, std::move(g_rec.frame), &err));
         if (!ok && err.empty()) err = "no window host";
         if (!err.empty()) ui_log_once(g_rec.key, err);
         g_rec.active = false;

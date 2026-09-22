@@ -42,6 +42,22 @@ ui.end_frame()
 | `ui.begin_frame(key)` | Start recording this window's next frame; also collects last frame's results |
 | `ui.end_frame()` | Submit the recording; returns how many commands it held |
 
+### Replacing a window you already opened
+
+Re-running a script whose window is still up is the normal case -- you fixed
+something and want to see it. **Open the same key again** and the window is
+taken over: the earlier run's loop sees `ui.is_open(key)` go `False` and ends
+on its own, its last frames are dropped, and the window shows only the new
+run. Without this, two loops record into one window and it flickers between
+old and new content every other frame. `Panel` does this for you (its `run()`
+always opens); a hand-written loop must use the same key and check
+`is_open()` every pass. Node positions and edited values start fresh after a
+takeover, as they would in a new window. Do not give the rewritten script a
+new key to "avoid" the old one -- that leaves the old window up as well.
+
+`ui.epoch(key)` is the counter behind this, for a loop that wants to know
+explicitly.
+
 ### Text
 
 | Call | What it does |
@@ -122,6 +138,11 @@ Boxes with pins, wired together, that the user can drag around and connect --
 a diagram of the microphone-to-recogniser-to-Claude pipeline, a wiring view
 of an action's own steps, anything shaped like nodes and links rather than a
 form. This is `aii.ui`'s node editor, one imnodes context per script window.
+
+Japanese renders in these windows exactly as in the chat -- the same merged
+font -- so write titles and hints in kana or kanji when that is what the user
+wants. `text_disabled` is a dim hint colour: fine for a footnote, wrong for
+the one line that carries the content of a node. Use `text` for content.
 
 How the user moves around it, so you can say so when you open one: **drag a
 node** by its title bar; **pan** the canvas with a right-button drag (or

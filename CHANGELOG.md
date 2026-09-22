@@ -21,6 +21,14 @@ Every milestone that merges adds an entry here in the same commit.
   back whatever you connected.
 
 ### Fixed
+- **A rewritten window no longer flickers against its old self.** Asking the assistant to
+  change a window it already had open made two copies of the script draw into the same
+  window, alternating every frame. Opening a window that is already open now hands it to
+  the new script, and the old one stops by itself.
+- **Hint text in node graphs is readable.** The dim style the assistant used for the
+  example sentences inside nodes was nearly invisible on the grey node background, which
+  looked like the Japanese font was missing. The font was always there; the colour is
+  brighter now.
 - **Node graphs can be moved around now.** The first one opened could not be panned at all:
   the button that pans was never passed on to the window. Right-drag pans, Alt-drag pans,
   the middle button pans, and a selected link goes with the Delete key. The assistant's

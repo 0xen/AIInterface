@@ -57,7 +57,14 @@ bool UiBridge::open(const UiWindowSpec& spec, std::string* error) {
   entry.spec = spec;
   entry.user_closed = false;
   entry.script_closed = false;
+  ++entry.epoch;
   return true;
+}
+
+std::uint64_t UiBridge::epoch_of(const std::string& key) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = entries_.find(key);
+  return it == entries_.end() ? 0 : it->second.epoch;
 }
 
 bool UiBridge::submit(const std::string& key, UiFrame frame, std::string* error) {
