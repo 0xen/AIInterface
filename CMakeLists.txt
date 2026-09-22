@@ -50,6 +50,7 @@ add_library(aii_core STATIC
   src/core/speech_queue.cpp
   src/core/text_util.cpp
   src/core/tool_policy.cpp
+  src/core/ui_bridge.cpp
   src/core/user_paths.cpp
   src/core/wake_word.cpp
   src/core/worker_pool.cpp)
@@ -395,6 +396,18 @@ if(AII_BUILD_TESTS)
   target_compile_definitions(app_bus_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   if(MSVC)
     target_compile_options(app_bus_test PRIVATE /utf-8 /W4)
+  endif()
+
+  # ---- ui_bridge_test: the script-window store, no ImGui and no Python -----
+  # M28. UiBridge is a mutex-guarded map with bounds applied at submit(); this
+  # checks the bounds, the latch, the window cap and the id composition
+  # without a render loop or an interpreter anywhere near it.
+  add_executable(ui_bridge_test tests/ui_bridge_test.cpp src/core/ui_bridge.cpp
+                                src/core/text_util.cpp)
+  target_include_directories(ui_bridge_test PRIVATE src)
+  target_compile_definitions(ui_bridge_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(ui_bridge_test PRIVATE /utf-8 /W4)
   endif()
 
   # ---- worker_report_test: what a finished worker hands to the speech path ----

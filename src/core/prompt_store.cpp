@@ -975,10 +975,16 @@ std::string substitute_slots(std::string text) {
   // A path, not a digest, and the fallback is prose rather than nothing: an
   // unset one still has to read as a sentence, because a human may be reading
   // this file too.
-  if (const size_t at = text.find("{{scripts_dir}}"); at != std::string::npos)
-    text.replace(at, std::strlen("{{scripts_dir}}"),
-                 g_scripts_dir.empty() ? std::string("%APPDATA%\\AIInterface\\scripts")
-                                       : g_scripts_dir);
+  //
+  // Every occurrence, not the first: until M28 this replaced one and the body
+  // used it once, so nobody noticed. The paragraph about windows names the
+  // directory four times, and `prompt_tools_test` caught the other three
+  // reaching Claude as literal `{{scripts_dir}}`.
+  const std::string scripts_dir =
+      g_scripts_dir.empty() ? std::string("%APPDATA%\\AIInterface\\scripts") : g_scripts_dir;
+  for (size_t at = text.find("{{scripts_dir}}"); at != std::string::npos;
+       at = text.find("{{scripts_dir}}", at + scripts_dir.size()))
+    text.replace(at, std::strlen("{{scripts_dir}}"), scripts_dir);
   return text;
 }
 

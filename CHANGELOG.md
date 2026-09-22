@@ -7,6 +7,11 @@ Every milestone that merges adds an entry here in the same commit.
 
 ## 2026-09-22
 
+### Added
+- **Small windows of its own.** The assistant can now open small windows beside the chat to
+  show you things — a project's build status that goes orange, red or green, a progress bar,
+  a log — and it has a toolkit of ready-made panels it can extend itself.
+
 ### Fixed
 - **Starting the app by double-clicking it works again.** Since the previous day's changes it
   died silently within a blink of being opened from Explorer, though it ran fine from a

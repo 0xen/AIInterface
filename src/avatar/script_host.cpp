@@ -112,7 +112,7 @@ std::vector<std::string> ScriptHost::discover(const std::vector<std::string>& ex
   return out;
 }
 
-bool ScriptHost::start(AppBus& bus, const std::vector<std::string>& scripts) {
+bool ScriptHost::start(AppBus& bus, const std::vector<std::string>& scripts, UiBridge* ui) {
   // M10.2. An empty list is no longer a refusal: the host also carries the
   // action dispatcher, so an install with no policy scripts and one action
   // still wants an interpreter. "Should there be a host at all" is the
@@ -188,6 +188,25 @@ bool ScriptHost::start(AppBus& bus, const std::vector<std::string>& scripts) {
     status_ = "rend_pyhost.dll is unavailable; scripts skipped.";
     status_ok_ = false;
     return false;
+  }
+
+  // M28. Both optional: a missing symbol here means a stale aii_pyhost.dll
+  // beside a newer exe, and that must still start scripts that never touch
+  // `aii.ui` rather than refuse the whole host over a window feature they
+  // do not use.
+  if (const auto set_ui = reinterpret_cast<AiiPySetUiBridgeFn>(
+          GetProcAddress(impl_->aii_dll, "aiiPyHostSetUiBridge"))) {
+    set_ui(ui);
+  } else {
+    std::fprintf(stderr, "[scripts] aii_pyhost.dll has no aiiPyHostSetUiBridge; aii.ui "
+                          "will report no window host.\n");
+  }
+  if (const auto set_lib_dir = reinterpret_cast<AiiPySetLibDirFn>(
+          GetProcAddress(impl_->aii_dll, "aiiPyHostSetLibDir"))) {
+    set_lib_dir((scripts_root() / "lib").string().c_str());
+  } else {
+    std::fprintf(stderr, "[scripts] aii_pyhost.dll has no aiiPyHostSetLibDir; scripts\\lib "
+                          "will not be on sys.path.\n");
   }
 
   // Everything that can fail has been done. Now the bus goes in, immediately

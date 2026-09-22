@@ -14,7 +14,8 @@ add_library(aii_pyhost SHARED
   aii_pyhost.cpp
   aii_pyhost.h
   ../core/app_bus.cpp
-  ../core/text_util.cpp)
+  ../core/text_util.cpp
+  ../core/ui_bridge.cpp)
 target_include_directories(aii_pyhost PRIVATE
   "${CMAKE_SOURCE_DIR}/src"
   "${CMAKE_SOURCE_DIR}/third_party")

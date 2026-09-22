@@ -113,6 +113,7 @@
 #include <iterator>
 #include <memory>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -133,6 +134,7 @@
 #include "core/model_choice.h"
 #include "core/prompt_store.h"
 #include "core/schedule.h"
+#include "core/ui_bridge.h"
 #include "core/user_paths.h"
 #include "core/worker_pool.h"
 #include "imgui_layer.h"
@@ -141,6 +143,7 @@
 #include "approval_window.h"
 #include "inspector_window.h"
 #include "loader_anim.h"
+#include "script_window.h"
 #include "settings.h"
 #include "sidebar_window.h"
 #include "voice_session.h"
@@ -1471,6 +1474,12 @@ int main(int /*argc*/, char** /*argv*/) {
     // the loading screen. See script_host.h for what "a script to run" means
     // and why the shipped example does not count as one.
     aii::ScriptHost scripts;
+    // M28: the one instance, created here and handed to the DLL over the C
+    // ABI the same way the bus pointer is — see `core/ui_bridge.h`. Declared
+    // regardless of `scriptsEnabled` so a script window can never outlive a
+    // bridge that has already gone, and destroyed only after every
+    // `ScriptWindow` is, in the teardown block below.
+    aii::UiBridge uiBridge;
     bool scripting = false;
     if (scriptsEnabled) {
         const std::vector<std::string> found = aii::ScriptHost::discover(scriptArgs);
@@ -1486,7 +1495,7 @@ int main(int /*argc*/, char** /*argv*/) {
         const bool wantHost = !found.empty() || !actions.all().empty();
         if (wantHost) {
             for (const std::string& s : found) log::info("[py] script {}", s);
-            scripting = scripts.start(aii::AppBus::instance(), found);
+            scripting = scripts.start(aii::AppBus::instance(), found, &uiBridge);
             if (!scripting) log::warn("[py] {}", scripts.status());
         }
     }
@@ -1873,6 +1882,43 @@ int main(int /*argc*/, char** /*argv*/) {
         // row sharing a *top* edge would not, because the widget's top moves
         // every time the chat opens.
         g.y = widgetRect.bottom - kWorkerWinH;
+        g.placed = true;
+        return g;
+    };
+
+    // M28. One OS window per `aii::UiBridge` key, opened and closed from the
+    // bridge's own snapshot() rather than from a click — a script may open a
+    // window from any thread, so nothing here decides *whether* one exists,
+    // only where it goes and when its ImGui pass runs.
+    struct OpenScriptWindow {
+        std::string key;
+        std::unique_ptr<aii::ScriptWindow> window;
+    };
+    std::vector<OpenScriptWindow> scriptWindows;
+    // A key whose window failed to create logs once, not at 60 Hz — the
+    // bridge still has the entry, so create() would otherwise be retried and
+    // its failure reported every frame until the script gives up or closes it.
+    std::set<std::string> scriptWindowWarned;
+
+    // Shares the worker windows' row: bottom-aligned to the widget for the
+    // reason `workerSlotGeometry` gives, and packed leftward from whatever is
+    // already open there — a worker window or another script window — using
+    // each window's *real* width. A fixed column width would be wrong here,
+    // because a script chooses its own size; the first run of this placed a
+    // 400 px window in a 360 px column and it overlapped its neighbour.
+    // Placement happens once, at create(); a window is never moved afterwards,
+    // so a user who dragged one keeps it where they put it.
+    const auto scriptPlacement = [&](const aii::UiWindowSpec& spec) {
+        int leftmost = dockEdge;
+        for (const OpenWorker& o : workerWindows)
+            if (o.window) leftmost = std::min(leftmost, o.window->geometry().x);
+        for (const OpenScriptWindow& o : scriptWindows)
+            if (o.window) leftmost = std::min(leftmost, o.window->geometry().x);
+        aii::ScriptWindowGeometry g;
+        g.w = spec.w;
+        g.h = spec.h;
+        g.x = leftmost - kWorkerWinGap - static_cast<int>(spec.w);
+        g.y = widgetRect.bottom - static_cast<int>(spec.h);
         g.placed = true;
         return g;
     };
@@ -2938,6 +2984,65 @@ int main(int /*argc*/, char** /*argv*/) {
                     workerWindows.erase(workerWindows.begin() + static_cast<std::ptrdiff_t>(i));
             }
 
+            // ---- M28: the bridge's windows, one OS window per open key ----
+            //
+            // `snapshot()` is the only thing read from the bridge on this
+            // side of a create/destroy decision: a script may open, close or
+            // resize any key from any thread, so the frame loop's job is to
+            // reconcile what exists against what the bridge says should,
+            // between frames, the same rule every window in this loop follows.
+            {
+                std::vector<aii::UiWindowSpec> openSpecs;
+                std::vector<std::string> closingKeys;
+                uiBridge.snapshot(&openSpecs, &closingKeys);
+
+                for (const std::string& k : closingKeys) {
+                    const auto at = std::find_if(
+                        scriptWindows.begin(), scriptWindows.end(),
+                        [&](const OpenScriptWindow& o) { return o.key == k; });
+                    if (at != scriptWindows.end()) scriptWindows.erase(at);
+                    scriptWindowWarned.erase(k);
+                    uiBridge.remove(k);
+                }
+
+                for (const aii::UiWindowSpec& spec : openSpecs) {
+                    const auto at = std::find_if(
+                        scriptWindows.begin(), scriptWindows.end(),
+                        [&](const OpenScriptWindow& o) { return o.key == spec.key; });
+                    if (at != scriptWindows.end()) {
+                        // A no-op unless the script's title or size actually
+                        // moved on; `retitle_resize` does its own comparison
+                        // against what the window is showing now.
+                        at->window->retitle_resize(spec);
+                        continue;
+                    }
+                    if (static_cast<int>(scriptWindows.size()) >= static_cast<int>(aii::kUiWindowsMax)) {
+                        // Belt and braces: the bridge already refuses a
+                        // seventh open() with a reason the script sees.
+                        continue;
+                    }
+                    std::string scriptError;
+                    auto win = aii::ScriptWindow::create(*backend, *instance, *device, kFontPx,
+                                                         spec, scriptPlacement(spec),
+                                                         &scriptError);
+                    if (!win) {
+                        if (scriptWindowWarned.insert(spec.key).second)
+                            log::warn("no window for script key {}: {}", spec.key, scriptError);
+                    } else {
+                        scriptWindows.push_back({spec.key, std::move(win)});
+                    }
+                }
+
+                for (std::size_t i = 0; i < scriptWindows.size();) {
+                    if (scriptWindows[i].window->draw(dt, uiBridge)) {
+                        ++i;
+                    } else {
+                        uiBridge.mark_closed(scriptWindows[i].key);
+                        scriptWindows.erase(scriptWindows.begin() + static_cast<std::ptrdiff_t>(i));
+                    }
+                }
+            }
+
             // ---- M10.5: "we have created a new script. Would you like to
             //      see it?" -----------------------------------------------
             //
@@ -3452,6 +3557,14 @@ int main(int /*argc*/, char** /*argv*/) {
     // the way out, deliberately: no open-state and no geometry is persisted, so
     // a fresh run starts with the desktop it started with.
     workerWindows.clear();
+    // M28, with them and for the same reason: each is a real window on the
+    // user's desktop. Before `uiBridge` goes out of scope, not after — a
+    // window's destructor waits on its own GPU work but never touches the
+    // bridge, so the order between these two lines is not load-bearing the
+    // way it is against the device below, but the bridge going first would
+    // leave a `ScriptWindow::draw` mid-frame with a dangling reference if
+    // this block is ever reordered, so it is written the safe way round.
+    scriptWindows.clear();
     workerStrip.reset();
     // M11.1, with them and for their reason: another real window on the user's
     // desktop, and an orphan left behind by any exit is the worst outcome it

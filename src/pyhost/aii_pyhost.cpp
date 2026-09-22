@@ -5,17 +5,20 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "core/app_bus.h"
+#include "core/ui_bridge.h"
 
 namespace py = pybind11;
 
@@ -29,6 +32,15 @@ struct Host {
   aii::AppBus* bus = nullptr;
   std::vector<std::string> scripts;
   std::atomic<bool> quit{false};
+  // M28. The window store, handed over the same way as `bus` and for the
+  // same reason (see the header comment on `aiiPyHostSetUiBridge`). Null
+  // until the caller sets it; `aii.ui`'s functions all treat that as "no
+  // window host" rather than a null-pointer fault.
+  aii::UiBridge* ui = nullptr;
+  // M28. `scripts\lib`, the parent of the helper package the bootstrap adds
+  // to `sys.path`. Empty when the caller never set it (an old script_host
+  // against a new DLL), in which case the bootstrap simply does not add it.
+  std::string lib_dir;
 
   // **One queue, several readers.** `AppBus::drain_events()` empties the
   // queue, so whoever calls it first gets everything and everyone else gets
@@ -85,6 +97,69 @@ bool post_line(const std::string& line) {
 // authored length. Writing 0.0 would say the same thing, but only by accident.
 void add_hold(aii::BusLine& line, double hold) {
   if (hold > 0.0) line.num("hold", hold);
+}
+
+// ---- aii.ui (M28) ---------------------------------------------------------
+//
+// One *recording* per thread, matching `ui_bridge.h`'s statement that "any
+// thread may record for any key": nothing here associates a thread with one
+// window, so two threads driving two panels never collide, and the same
+// thread can drive two panels in series as long as it end_frame()s between.
+struct UiRecording {
+  std::string key;
+  aii::UiFrame frame;
+  std::vector<std::string> id_stack;
+  std::map<std::string, aii::UiResult> results;
+  bool active = false;
+};
+thread_local UiRecording g_rec;
+
+// A refusal reaches the log once per distinct message per key, not once per
+// frame: a window host that never appears (an old build, or one the app
+// chose not to give this process) would otherwise fill the log at whatever
+// rate the script records.
+std::mutex g_ui_log_mutex;
+std::map<std::string, std::set<std::string>> g_ui_logged;
+
+void ui_log_once(const std::string& key, const std::string& text) {
+  {
+    std::lock_guard<std::mutex> lock(g_ui_log_mutex);
+    if (!g_ui_logged[key].insert(text).second) return;
+  }
+  post_line(aii::BusLine("script.log").str("text", "ui(" + key + "): " + text).done());
+}
+
+void ui_require_active() {
+  if (!g_rec.active) throw std::runtime_error("call begin_frame() first");
+}
+
+aii::UiCommand& ui_push(aii::UiOp op) {
+  ui_require_active();
+  g_rec.frame.cmds.emplace_back();
+  aii::UiCommand& c = g_rec.frame.cmds.back();
+  c.op = op;
+  return c;
+}
+
+std::string ui_id(const std::string& label) { return aii::ui_compose_id(g_rec.id_stack, label); }
+
+const aii::UiResult* ui_find(const std::string& label) {
+  auto it = g_rec.results.find(ui_id(label));
+  return it == g_rec.results.end() ? nullptr : &it->second;
+}
+
+// `rgba` is any Python sequence of 3 or 4 floats; a missing alpha is 1.0, as
+// in any colour picker. Anything else -- a scalar, a mapping, the wrong
+// length -- is a script bug and raises TypeError rather than silently
+// drawing black or bright magenta.
+void ui_set_rgba(float out[4], const py::object& rgba) {
+  if (!py::isinstance<py::sequence>(rgba))
+    throw py::type_error("rgba must be a sequence of 3 or 4 floats");
+  py::sequence seq = rgba.cast<py::sequence>();
+  const std::size_t n = seq.size();
+  if (n != 3 && n != 4) throw py::type_error("rgba must have 3 or 4 components");
+  for (std::size_t i = 0; i < n; ++i) out[i] = seq[i].cast<float>();
+  if (n == 3) out[3] = 1.0f;
 }
 
 }  // namespace
@@ -579,7 +654,592 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       "the panel rather than off the file, so it is right on the frame before "
       "the debounced write has happened.");
 
+  // ---- windows (M28) ------------------------------------------------------
+  //
+  // `ui_bridge.h`'s "Results latch" and "The override" sections are the
+  // contract these functions read against; `docs/design-script-ui.md` §3-4
+  // is the exact command/result shape per op. Every widget function below
+  // requires an active recording (`begin_frame()`..`end_frame()`); the ones
+  // that start or end one are the two exceptions with their own rules.
+  py::module_ ui = m.def_submodule(
+      "ui", "ImGui-shaped windows, recorded here and replayed by the app. See "
+            "AII-UI.md and docs/design-script-ui.md.");
+
+  ui.def(
+      "open",
+      [](const std::string& key, const std::string& title, unsigned w, unsigned h) {
+        if (!g_host.ui) {
+          ui_log_once(key, "no window host");
+          return false;
+        }
+        aii::UiWindowSpec spec;
+        spec.key = key;
+        spec.title = title;
+        spec.w = w;
+        spec.h = h;
+        std::string err;
+        const bool ok = g_host.ui->open(spec, &err);
+        if (!ok) ui_log_once(key, err.empty() ? "open refused" : err);
+        return ok;
+      },
+      py::arg("key"), py::arg("title"), py::arg("w") = 360, py::arg("h") = 240,
+      "Open, or re-title and re-size, a window. False (and one aii.log line "
+      "per distinct reason) when refused or there is no window host.");
+
+  ui.def(
+      "close",
+      [](const std::string& key) {
+        if (g_host.ui) g_host.ui->close(key);
+      },
+      py::arg("key"), "Ask the app to destroy this window. A later open() makes a fresh one.");
+
+  ui.def(
+      "is_open", [](const std::string& key) { return g_host.ui ? g_host.ui->is_open(key) : false; },
+      py::arg("key"), "True while the window exists and the user has not closed it.");
+
+  ui.def(
+      "windows", [] { return g_host.ui ? g_host.ui->keys() : std::vector<std::string>{}; },
+      "Every key with a window right now.");
+
+  ui.def(
+      "begin_frame",
+      [](const std::string& key) {
+        if (!g_host.ui) throw std::runtime_error("no window host");
+        if (g_rec.active)
+          throw std::runtime_error("begin_frame() already active; call end_frame() first");
+        g_rec.results.clear();
+        for (const aii::UiResult& r : g_host.ui->take_results(key)) g_rec.results[r.id] = r;
+        g_rec.key = key;
+        g_rec.frame = aii::UiFrame{};
+        g_rec.id_stack.clear();
+        g_rec.active = true;
+      },
+      py::arg("key"),
+      "Start recording a frame for this window: takes its latched results, "
+      "then clears the recording. Raises RuntimeError with no window host, "
+      "or if a recording is already active on this thread.");
+
+  ui.def(
+      "end_frame",
+      [] {
+        if (!g_rec.active) throw std::runtime_error("call begin_frame() first");
+        const int count = static_cast<int>(g_rec.frame.cmds.size());
+        std::string err;
+        const bool ok = g_host.ui && g_host.ui->submit(g_rec.key, std::move(g_rec.frame), &err);
+        if (!ok && err.empty()) err = "no window host";
+        if (!err.empty()) ui_log_once(g_rec.key, err);
+        g_rec.active = false;
+        g_rec.frame = aii::UiFrame{};
+        g_rec.id_stack.clear();
+        return count;
+      },
+      "Submit the recording. Returns the number of commands recorded. Raises "
+      "RuntimeError if begin_frame() was not called.");
+
+  ui.def(
+      "push_id",
+      [](const std::string& s) {
+        aii::UiCommand& c = ui_push(aii::UiOp::PushId);
+        c.label = s;
+        g_rec.id_stack.push_back(s);
+      },
+      py::arg("s"), "Push an id onto the stack every later label in this frame is composed under.");
+
+  ui.def(
+      "pop_id",
+      [] {
+        ui_push(aii::UiOp::PopId);
+        if (!g_rec.id_stack.empty()) g_rec.id_stack.pop_back();
+      },
+      "Pop the last id pushed by push_id().");
+
+  ui.def(
+      "text", [](const std::string& s) { ui_push(aii::UiOp::Text).label = s; }, py::arg("s"),
+      "One line of plain text.");
+  ui.def(
+      "text_colored",
+      [](const py::object& rgba, const std::string& s) {
+        aii::UiCommand& c = ui_push(aii::UiOp::TextColored);
+        c.label = s;
+        ui_set_rgba(c.f, rgba);
+      },
+      py::arg("rgba"), py::arg("s"), "One line of text in the given colour.");
+  ui.def(
+      "text_wrapped", [](const std::string& s) { ui_push(aii::UiOp::TextWrapped).label = s; },
+      py::arg("s"), "Text that wraps at the window's edge.");
+  ui.def(
+      "text_disabled", [](const std::string& s) { ui_push(aii::UiOp::TextDisabled).label = s; },
+      py::arg("s"), "Text in the disabled-text colour.");
+  ui.def(
+      "bullet_text", [](const std::string& s) { ui_push(aii::UiOp::BulletText).label = s; },
+      py::arg("s"), "One bulleted line of text.");
+  ui.def(
+      "label_text",
+      [](const std::string& label, const std::string& value) {
+        aii::UiCommand& c = ui_push(aii::UiOp::LabelText);
+        c.label = label;
+        c.text = value;
+      },
+      py::arg("label"), py::arg("value"), "A right-aligned label with a value beside it.");
+
+  ui.def(
+      "separator", [] { ui_push(aii::UiOp::Separator); }, "A thin horizontal line.");
+  ui.def(
+      "separator_text", [](const std::string& s) { ui_push(aii::UiOp::SeparatorText).label = s; },
+      py::arg("s"), "A horizontal line with a label in it.");
+  ui.def(
+      "same_line",
+      [](float offset, float spacing) {
+        aii::UiCommand& c = ui_push(aii::UiOp::SameLine);
+        c.f[0] = offset;
+        c.f[1] = spacing;
+      },
+      py::arg("offset") = 0.0f, py::arg("spacing") = -1.0f,
+      "Keep the next item on the same line as the last.");
+  ui.def(
+      "new_line", [] { ui_push(aii::UiOp::NewLine); }, "Move to the next line.");
+  ui.def(
+      "spacing", [] { ui_push(aii::UiOp::Spacing); }, "A small vertical gap.");
+  ui.def(
+      "dummy",
+      [](float w, float h) {
+        aii::UiCommand& c = ui_push(aii::UiOp::Dummy);
+        c.f[0] = w;
+        c.f[1] = h;
+      },
+      py::arg("w"), py::arg("h"), "An invisible item of the given size, for spacing layouts.");
+  ui.def(
+      "indent", [](float w) { ui_push(aii::UiOp::Indent).f[0] = w; }, py::arg("w") = 0.0f,
+      "Indent the following items.");
+  ui.def(
+      "unindent", [](float w) { ui_push(aii::UiOp::Unindent).f[0] = w; }, py::arg("w") = 0.0f,
+      "Undo the last indent().");
+
+  ui.def(
+      "button",
+      [](const std::string& label, float w, float h) {
+        aii::UiCommand& c = ui_push(aii::UiOp::Button);
+        c.label = label;
+        c.f[0] = w;
+        c.f[1] = h;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->clicked : false;
+      },
+      py::arg("label"), py::arg("w") = 0.0f, py::arg("h") = 0.0f,
+      "A push button. True on the recording after it was clicked.");
+  ui.def(
+      "small_button",
+      [](const std::string& label) {
+        ui_push(aii::UiOp::SmallButton).label = label;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->clicked : false;
+      },
+      py::arg("label"), "A button sized to its label, for inline use.");
+  ui.def(
+      "checkbox",
+      [](const std::string& label, bool value) {
+        aii::UiCommand& c = ui_push(aii::UiOp::Checkbox);
+        c.label = label;
+        c.b = value;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->b : value;
+      },
+      py::arg("label"), py::arg("value"), "A checkbox. Returns the possibly user-changed value.");
+  ui.def(
+      "radio_button",
+      [](const std::string& label, bool active) {
+        aii::UiCommand& c = ui_push(aii::UiOp::RadioButton);
+        c.label = label;
+        c.b = active;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->clicked : false;
+      },
+      py::arg("label"), py::arg("active"), "A radio button. True when clicked.");
+  ui.def(
+      "selectable",
+      [](const std::string& label, bool selected) {
+        aii::UiCommand& c = ui_push(aii::UiOp::Selectable);
+        c.label = label;
+        c.b = selected;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->clicked : false;
+      },
+      py::arg("label"), py::arg("selected") = false, "A selectable row. True when clicked.");
+
+  ui.def(
+      "slider_float",
+      [](const std::string& label, float v, float lo, float hi, const std::string& fmt) {
+        aii::UiCommand& c = ui_push(aii::UiOp::SliderFloat);
+        c.label = label;
+        c.f[0] = v;
+        c.f[1] = lo;
+        c.f[2] = hi;
+        c.text = fmt;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->f[0] : v;
+      },
+      py::arg("label"), py::arg("v"), py::arg("lo"), py::arg("hi"), py::arg("fmt") = "%.3f",
+      "A float slider between lo and hi.");
+  ui.def(
+      "slider_int",
+      [](const std::string& label, int v, int lo, int hi) {
+        aii::UiCommand& c = ui_push(aii::UiOp::SliderInt);
+        c.label = label;
+        c.i[0] = v;
+        c.i[1] = lo;
+        c.f[2] = static_cast<float>(hi);
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->i : v;
+      },
+      py::arg("label"), py::arg("v"), py::arg("lo"), py::arg("hi"),
+      "An int slider between lo and hi.");
+  ui.def(
+      "drag_float",
+      [](const std::string& label, float v, float speed, float lo, float hi,
+         const std::string& fmt) {
+        aii::UiCommand& c = ui_push(aii::UiOp::DragFloat);
+        c.label = label;
+        c.f[0] = v;
+        c.f[1] = lo;
+        c.f[2] = hi;
+        c.f[3] = speed;
+        c.text = fmt;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->f[0] : v;
+      },
+      py::arg("label"), py::arg("v"), py::arg("speed") = 1.0f, py::arg("lo") = 0.0f,
+      py::arg("hi") = 0.0f, py::arg("fmt") = "%.3f",
+      "A float value the user drags rather than slides; lo==hi means unbounded.");
+  ui.def(
+      "drag_int",
+      [](const std::string& label, int v, float speed, int lo, int hi) {
+        aii::UiCommand& c = ui_push(aii::UiOp::DragInt);
+        c.label = label;
+        c.i[0] = v;
+        c.i[1] = lo;
+        c.f[2] = static_cast<float>(hi);
+        c.f[3] = speed;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->i : v;
+      },
+      py::arg("label"), py::arg("v"), py::arg("speed") = 1.0f, py::arg("lo") = 0,
+      py::arg("hi") = 0, "An int value the user drags; lo==hi means unbounded.");
+
+  ui.def(
+      "input_text",
+      [](const std::string& label, const std::string& text, const std::string& hint, int flags) {
+        aii::UiCommand& c = ui_push(aii::UiOp::InputText);
+        c.label = label;
+        c.text = hint;
+        c.i[1] = flags;
+        c.items = {text};
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->s : text;
+      },
+      py::arg("label"), py::arg("text"), py::arg("hint") = "", py::arg("flags") = 0,
+      "A single-line text field. Its current text is the second argument, not a "
+      "default -- the script owns the value between recordings.");
+  ui.def(
+      "input_text_multiline",
+      [](const std::string& label, const std::string& text, float w, float h) {
+        aii::UiCommand& c = ui_push(aii::UiOp::InputTextMultiline);
+        c.label = label;
+        c.f[0] = w;
+        c.f[1] = h;
+        c.items = {text};
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->s : text;
+      },
+      py::arg("label"), py::arg("text"), py::arg("w") = 0.0f, py::arg("h") = 0.0f,
+      "A multi-line text field, sized w by h (0 = auto).");
+  ui.def(
+      "input_int",
+      [](const std::string& label, int v, int step) {
+        aii::UiCommand& c = ui_push(aii::UiOp::InputInt);
+        c.label = label;
+        c.i[0] = v;
+        c.i[1] = step;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->i : v;
+      },
+      py::arg("label"), py::arg("v"), py::arg("step") = 1, "An integer field with +/- steppers.");
+  ui.def(
+      "input_float",
+      [](const std::string& label, float v, float step, const std::string& fmt) {
+        aii::UiCommand& c = ui_push(aii::UiOp::InputFloat);
+        c.label = label;
+        c.f[0] = v;
+        c.f[1] = step;
+        c.text = fmt;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->f[0] : v;
+      },
+      py::arg("label"), py::arg("v"), py::arg("step") = 0.0f, py::arg("fmt") = "%.3f",
+      "A float field with +/- steppers when step > 0.");
+
+  ui.def(
+      "combo",
+      [](const std::string& label, int index, const std::vector<std::string>& items) {
+        aii::UiCommand& c = ui_push(aii::UiOp::Combo);
+        c.label = label;
+        c.i[0] = index;
+        c.items = items;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->i : index;
+      },
+      py::arg("label"), py::arg("index"), py::arg("items"),
+      "A drop-down over items. Returns the selected index.");
+  ui.def(
+      "list_box",
+      [](const std::string& label, int index, const std::vector<std::string>& items,
+         int height_in_items) {
+        aii::UiCommand& c = ui_push(aii::UiOp::ListBox);
+        c.label = label;
+        c.i[0] = index;
+        c.i[1] = height_in_items;
+        c.items = items;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->i : index;
+      },
+      py::arg("label"), py::arg("index"), py::arg("items"), py::arg("height_in_items") = -1,
+      "A scrolling list over items. Returns the selected index.");
+  ui.def(
+      "color_edit",
+      [](const std::string& label, const py::object& rgba, int flags) {
+        aii::UiCommand& c = ui_push(aii::UiOp::ColorEdit);
+        c.label = label;
+        ui_set_rgba(c.f, rgba);
+        c.i[1] = flags;
+        const aii::UiResult* r = ui_find(label);
+        const float* f = r ? r->f : c.f;
+        return py::make_tuple(f[0], f[1], f[2], f[3]);
+      },
+      py::arg("label"), py::arg("rgba"), py::arg("flags") = 0,
+      "A colour swatch that opens a picker. Returns a 4-tuple.");
+
+  ui.def(
+      "progress_bar",
+      [](float fraction, float w, float h, const std::string& overlay) {
+        aii::UiCommand& c = ui_push(aii::UiOp::ProgressBar);
+        c.f[0] = fraction;
+        c.f[1] = w;
+        c.f[2] = h;
+        c.text = overlay;
+      },
+      py::arg("fraction"), py::arg("w") = -1.0f, py::arg("h") = 0.0f, py::arg("overlay") = "",
+      "A fraction-filled bar. Not interactive; no result.");
+  ui.def(
+      "plot_lines",
+      [](const std::string& label, const std::vector<float>& values, float lo, float hi, float w,
+         float h, const std::string& overlay) {
+        aii::UiCommand& c = ui_push(aii::UiOp::PlotLines);
+        c.label = label;
+        c.f[0] = lo;
+        c.f[1] = hi;
+        c.f[2] = w;
+        c.f[3] = h;
+        c.text = overlay;
+        c.values = values;
+      },
+      py::arg("label"), py::arg("values"), py::arg("lo") = FLT_MAX, py::arg("hi") = FLT_MAX,
+      py::arg("w") = 0.0f, py::arg("h") = 0.0f, py::arg("overlay") = "",
+      "A line plot over values; lo/hi default to the data's own range.");
+  ui.def(
+      "plot_histogram",
+      [](const std::string& label, const std::vector<float>& values, float lo, float hi, float w,
+         float h, const std::string& overlay) {
+        aii::UiCommand& c = ui_push(aii::UiOp::PlotHistogram);
+        c.label = label;
+        c.f[0] = lo;
+        c.f[1] = hi;
+        c.f[2] = w;
+        c.f[3] = h;
+        c.text = overlay;
+        c.values = values;
+      },
+      py::arg("label"), py::arg("values"), py::arg("lo") = FLT_MAX, py::arg("hi") = FLT_MAX,
+      py::arg("w") = 0.0f, py::arg("h") = 0.0f, py::arg("overlay") = "",
+      "A bar histogram over values; lo/hi default to the data's own range.");
+
+  ui.def(
+      "collapsing_header",
+      [](const std::string& label, bool default_open, int flags) {
+        aii::UiCommand& c = ui_push(aii::UiOp::CollapsingHeader);
+        c.label = label;
+        c.b = default_open;
+        c.i[1] = flags;
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->b : default_open;
+      },
+      py::arg("label"), py::arg("default_open") = false, py::arg("flags") = 0,
+      "A collapsible section header. Returns whether it is open; the script "
+      "decides what to record after it, exactly as ImGui does.");
+  ui.def(
+      "tree_node",
+      [](const std::string& label) {
+        ui_push(aii::UiOp::TreeNode).label = label;
+        // `b`, not `clicked`: ImGui's TreeNode answers "is it open", and a
+        // script records the children only when this says so.
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->b : false;
+      },
+      py::arg("label"), "A tree node. True when open; pair with tree_pop() when it is.");
+  ui.def(
+      "tree_pop", [] { ui_push(aii::UiOp::TreePop); }, "Close a tree_node() that was open.");
+
+  ui.def(
+      "begin_child",
+      [](const std::string& id, float w, float h, bool border, int flags) {
+        aii::UiCommand& c = ui_push(aii::UiOp::BeginChild);
+        c.label = id;
+        c.f[0] = w;
+        c.f[1] = h;
+        c.i[1] = flags;
+        c.b = border;
+        return true;  // as begin_tab_bar(): ImGui-shaped, always yes while recording
+      },
+      py::arg("id"), py::arg("w") = 0.0f, py::arg("h") = 0.0f, py::arg("border") = false,
+      py::arg("flags") = 0, "Begin a scrolling child region. Always True while recording.");
+  ui.def(
+      "end_child", [] { ui_push(aii::UiOp::EndChild); }, "End a begin_child() region.");
+  ui.def(
+      "begin_group", [] { ui_push(aii::UiOp::BeginGroup); },
+      "Group the following items as one for layout purposes.");
+  ui.def(
+      "end_group", [] { ui_push(aii::UiOp::EndGroup); }, "End a begin_group().");
+  ui.def(
+      "begin_disabled", [](bool disabled) { ui_push(aii::UiOp::BeginDisabled).b = disabled; },
+      py::arg("disabled") = true, "Grey out and block input to the following items.");
+  ui.def(
+      "end_disabled", [] { ui_push(aii::UiOp::EndDisabled); }, "End a begin_disabled().");
+
+  ui.def(
+      "begin_tab_bar",
+      [](const std::string& id) {
+        ui_push(aii::UiOp::BeginTabBar).label = id;
+        // True, as ImGui's returns a bool and a script written from ImGui
+        // habit puts this in an `if`. Recording cannot know whether the bar
+        // will draw, so it always says yes; the replayer balances the end.
+        return true;
+      },
+      py::arg("id"), "Begin a row of tabs. Always True while recording.");
+  ui.def(
+      "end_tab_bar", [] { ui_push(aii::UiOp::EndTabBar); }, "End a begin_tab_bar().");
+  ui.def(
+      "begin_tab_item",
+      [](const std::string& label) {
+        ui_push(aii::UiOp::BeginTabItem).label = label;
+        // `b`: the selected tab, which the first one is by default. A click
+        // answer here left the first recording with no tab ever selected.
+        const aii::UiResult* r = ui_find(label);
+        return r ? r->b : false;
+      },
+      py::arg("label"), "One tab. True while it is the selected tab.");
+  ui.def(
+      "end_tab_item", [] { ui_push(aii::UiOp::EndTabItem); },
+      "End a begin_tab_item() that returned True.");
+
+  ui.def(
+      "begin_table",
+      [](const std::string& id, int columns, int flags, float w, float h) {
+        aii::UiCommand& c = ui_push(aii::UiOp::BeginTable);
+        c.label = id;
+        c.i[0] = columns;
+        c.i[1] = flags;
+        c.f[0] = w;
+        c.f[1] = h;
+        return true;
+      },
+      py::arg("id"), py::arg("columns"), py::arg("flags") = 0, py::arg("w") = 0.0f,
+      py::arg("h") = 0.0f, "Begin a table. Always True in a recording; a real refusal is the app's.");
+  ui.def(
+      "end_table", [] { ui_push(aii::UiOp::EndTable); }, "End a begin_table().");
+  ui.def(
+      "table_next_row", [] { ui_push(aii::UiOp::TableNextRow); }, "Start the next table row.");
+  ui.def(
+      "table_next_column", [] { ui_push(aii::UiOp::TableNextColumn); },
+      "Move to the next table column.");
+  ui.def(
+      "table_setup_column",
+      [](const std::string& label, int flags, float width) {
+        aii::UiCommand& c = ui_push(aii::UiOp::TableSetupColumn);
+        c.label = label;
+        c.i[1] = flags;
+        c.f[0] = width;
+      },
+      py::arg("label"), py::arg("flags") = 0, py::arg("width") = 0.0f,
+      "Declare one table column before table_headers_row().");
+  ui.def(
+      "table_headers_row", [] { ui_push(aii::UiOp::TableHeadersRow); },
+      "Draw the header row from the declared columns.");
+
+  ui.def(
+      "columns",
+      [](int count, bool border) {
+        aii::UiCommand& c = ui_push(aii::UiOp::Columns);
+        c.i[0] = count;
+        c.b = border;
+      },
+      py::arg("count") = 1, py::arg("border") = true, "The old-style column layout.");
+  ui.def(
+      "next_column", [] { ui_push(aii::UiOp::NextColumn); }, "Move to the next old-style column.");
+
+  ui.def(
+      "push_style_color",
+      [](int idx, const py::object& rgba) {
+        aii::UiCommand& c = ui_push(aii::UiOp::PushStyleColor);
+        c.i[0] = idx;
+        ui_set_rgba(c.f, rgba);
+      },
+      py::arg("idx"), py::arg("rgba"), "Override one ImGuiCol_ for the following items.");
+  ui.def(
+      "pop_style_color", [](int count) { ui_push(aii::UiOp::PopStyleColor).i[0] = count; },
+      py::arg("count") = 1, "Undo the last count push_style_color() calls.");
+
+  ui.def(
+      "push_item_width", [](float w) { ui_push(aii::UiOp::PushItemWidth).f[0] = w; }, py::arg("w"),
+      "Set the width of the following widgets.");
+  ui.def(
+      "pop_item_width", [] { ui_push(aii::UiOp::PopItemWidth); }, "End a push_item_width().");
+  ui.def(
+      "set_next_item_width", [](float w) { ui_push(aii::UiOp::SetNextItemWidth).f[0] = w; },
+      py::arg("w"), "Set the width of the very next widget only.");
+
+  ui.def(
+      "set_tooltip", [](const std::string& s) { ui_push(aii::UiOp::SetTooltip).label = s; },
+      py::arg("s"), "A tooltip over the item recorded just before this call.");
+  ui.def(
+      "set_scroll_here_y", [](float center) { ui_push(aii::UiOp::SetScrollHereY).f[0] = center; },
+      py::arg("center") = 0.5f, "Scroll the current window so this point is at center (0..1).");
+
+  // ImGuiCol_ / ImGuiInputTextFlags_ / ImGuiTreeNodeFlags_ / ImGuiTableFlags_
+  // values, mirrored by hand because this DLL does not include imgui.h (only
+  // `script_window.cpp` does). Dear ImGui v1.91.8, the tag `FetchImgui.cmake`
+  // pins; these are the ordinal / bit values from `imgui.h`'s `ImGuiCol_` and
+  // flag enums as of that tag, and only change if the pin moves and the enum
+  // changed under it.
+  ui.attr("COL_TEXT") = 0;
+  ui.attr("COL_TEXT_DISABLED") = 1;
+  ui.attr("COL_WINDOW_BG") = 2;
+  ui.attr("COL_CHILD_BG") = 3;
+  ui.attr("COL_BORDER") = 5;
+  ui.attr("COL_FRAME_BG") = 7;
+  ui.attr("COL_BUTTON") = 21;
+  ui.attr("COL_BUTTON_HOVERED") = 22;
+  ui.attr("COL_BUTTON_ACTIVE") = 23;
+  ui.attr("COL_HEADER") = 24;
+  ui.attr("COL_SEPARATOR") = 27;
+  ui.attr("COL_PLOT_LINES") = 40;
+  ui.attr("COL_PLOT_HISTOGRAM") = 42;
+  ui.attr("INPUT_TEXT_READ_ONLY") = 1 << 9;
+  ui.attr("INPUT_TEXT_PASSWORD") = 1 << 10;
+  ui.attr("TREE_DEFAULT_OPEN") = 1 << 5;
+  ui.attr("TABLE_BORDERS") = (1 << 7) | (1 << 8) | (1 << 9) | (1 << 10);
+  ui.attr("TABLE_ROW_BG") = 1 << 6;
+  ui.attr("TABLE_RESIZABLE") = 1 << 0;
+
   m.attr("scripts") = g_host.scripts;
+  m.attr("lib_dir") = g_host.lib_dir;
 
   // The two calls a script actually uses are parsed JSON, not lines. Written
   // in Python because `json` already does it and a second parser in C++ would
@@ -623,6 +1283,15 @@ namespace {
 constexpr const char* kBootSource = R"PY(# Generated by AIInterface each run. Edits here are overwritten.
 import runpy, sys, threading, time, traceback
 import aii
+
+# M28. `aii.lib_dir` is `scripts\lib`, seeded beside `scripts\examples`; this
+# is what makes `import aii_ui` work from a script or an action without every
+# one of them repeating the path. As with the `import` a helper module gets
+# below (see `_run_action`'s comment on caching): once CPython has imported a
+# module from here, that module is cached in sys.modules until this process
+# restarts, same as any other import.
+if aii.lib_dir and aii.lib_dir not in sys.path:
+    sys.path.insert(0, aii.lib_dir)
 
 # M19.3, finding 33. **A report that the bus refuses is retried, and what is
 # still lost is counted into the next one that gets through.**
@@ -812,6 +1481,10 @@ void aiiPyHostUnregister(void) {
 }
 
 void aiiPyHostQuit(void) { g_host.quit.store(true); }
+
+void aiiPyHostSetUiBridge(aii::UiBridge* bridge) { g_host.ui = bridge; }
+
+void aiiPyHostSetLibDir(const char* dir) { g_host.lib_dir = dir ? dir : ""; }
 
 const char* aiiPyHostBootName(void) { return "_aii_boot.py"; }
 

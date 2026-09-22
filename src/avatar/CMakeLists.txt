@@ -35,6 +35,8 @@ add_executable(avatar
   pixel_icons.h
   script_host.cpp
   script_host.h
+  script_window.cpp
+  script_window.h
   settings.cpp
   settings.h
   sidebar_window.cpp

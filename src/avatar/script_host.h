@@ -81,6 +81,7 @@
 namespace aii {
 
 class AppBus;
+class UiBridge;
 
 class ScriptHost {
  public:
@@ -100,7 +101,17 @@ class ScriptHost {
   // Loads the two DLLs and starts the interpreter on its own thread. Only
   // called when `discover()` returned something. False with `status()` set
   // when a DLL is missing or the host refused; the app then runs unscripted.
-  bool start(AppBus& bus, const std::vector<std::string>& scripts);
+  //
+  // M28. `ui` is the frame loop's `UiBridge`, handed to `aii_pyhost.dll`
+  // before the interpreter starts so `aii.ui` can reach it (see
+  // `aiiPyHostSetUiBridge`'s header comment for why it goes over the DLL
+  // boundary this way rather than through `bus`). Null is legal — a caller
+  // that has not built a window store yet gets a host where every `aii.ui`
+  // call reports "no window host" instead of failing to start. Missing the
+  // `aiiPyHostSetUiBridge`/`aiiPyHostSetLibDir` symbols in the DLL is logged
+  // and skipped, not fatal, so a stale DLL beside a newer exe still runs
+  // scripts that do not touch `aii.ui`.
+  bool start(AppBus& bus, const std::vector<std::string>& scripts, UiBridge* ui = nullptr);
 
   // Frame loop. The engine's host is wired to a `rend::renderer::MessageQueue`
   // that nothing here consumes — this app has no scene — so it is drained and

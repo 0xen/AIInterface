@@ -6,6 +6,8 @@ It is seeded here by the app; edits are overwritten when a newer copy ships.
 A script is a `.py` file **directly in this folder** — one level up from
 `actions\` and `examples\`. It runs for the life of the app, on its own thread.
 An *action* lives in `actions\`, defines `run()`, and is called by name instead.
+`lib\` is neither: it holds helper packages such as `aii_ui` that a script or
+action can `import`, and it is never scanned for scripts of its own.
 
 ```python
 import aii
@@ -102,6 +104,15 @@ while not aii.should_quit():
 
 Events worth knowing: `session.state`, `session.level` (mic and speaker
 loudness), `session.usage`, `worker.state`, `turn.text`, `settings.info`.
+
+## Windows
+
+A script can open a small ImGui window beside the chat -- a project's build
+status, a progress bar, a log, anything you would otherwise only be able to
+say. That is `aii.ui`, plus a Python toolkit (`aii_ui`, seeded in
+`scripts\lib\`) built on top of it with a ready-made status panel. It is
+enough to be its own document: read `AII-UI.md`, next to this file, before
+you open one.
 
 ## Two things that are deliberately missing
 

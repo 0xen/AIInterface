@@ -23,6 +23,7 @@
 
 namespace aii {
 class AppBus;
+class UiBridge;
 }
 
 extern "C" {
@@ -48,6 +49,31 @@ void aiiPyHostUnregister(void);
 // on its own rather than on a KeyboardInterrupt.
 void aiiPyHostQuit(void);
 
+// M28. Points the `aii.ui` submodule at this process's `UiBridge`, the same
+// way `aiiPyHostRegister` hands over the `AppBus` and for the same reason:
+// `ui_bridge.cpp` is compiled into both halves (`ui_bridge.h`'s header
+// comment), so the frame loop's instance and a second one linked into this
+// DLL would be two stores that never see each other's windows. Null is
+// legal and means "no window host" — every `aii.ui` call then either raises
+// (the two that start or require a recording) or fails quietly with one
+// logged line, never a crash, because a build without this call (an old
+// main.cpp against a new DLL) must still run scripts that never open a
+// window.
+//
+// **Call before the interpreter is initialised**, same rule as
+// `aiiPyHostRegister`.
+void aiiPyHostSetUiBridge(aii::UiBridge* bridge);
+
+// M28. The directory `aii.lib_dir` reports to scripts — the parent of the
+// scripts root's helper package (`scripts\lib\`) — so the bootstrap can put
+// it on `sys.path` before any user script imports. Passed the same way as
+// the bridge above rather than folded into `aiiPyHostRegister`'s signature,
+// so a stale DLL beside a new exe still resolves every other symbol and
+// only this one call (and the bridge one) is missing.
+//
+// **Call before the interpreter is initialised.**
+void aiiPyHostSetLibDir(const char* dir);
+
 // Path of the generated bootstrap, written by the caller, that the host
 // actually runs. Here only so the two halves cannot disagree about the name.
 const char* aiiPyHostBootName(void);
@@ -64,4 +90,6 @@ using AiiPyRegisterFn = bool (*)(AppBus*, const char* const*, int);
 using AiiPyQuitFn = void (*)(void);
 using AiiPyUnregisterFn = void (*)(void);
 using AiiPyTextFn = const char* (*)(void);
+using AiiPySetUiBridgeFn = void (*)(UiBridge*);
+using AiiPySetLibDirFn = void (*)(const char*);
 }  // namespace aii

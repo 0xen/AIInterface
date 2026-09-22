@@ -115,7 +115,9 @@ int main() {
       ++p;
     const std::string name = sheet.substr(start, p - start);
     at = p;
-    if (name.empty() || name == "scripts") continue;  // `aii.scripts` is an attribute
+    // `aii.scripts` and `aii.lib_dir` are attributes; `aii.ui` is the window
+    // submodule (M28), documented in its own sheet, AII-UI.md.
+    if (name.empty() || name == "scripts" || name == "lib_dir" || name == "ui") continue;
     if (!verbs.count(name)) {
       std::printf("      the sheet names a call the module does not define: aii.%s\n",
                   name.c_str());
