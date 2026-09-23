@@ -142,8 +142,38 @@ ui.text("back to normal")
 | `ui.begin_child(id, w=0.0, h=0.0, border=False, flags=0)` -> `True` / `ui.end_child()` | A scrollable sub-region |
 | `ui.begin_disabled(disabled=True)` / `ui.end_disabled()` | Grey out and block input for what follows |
 | `ui.begin_tab_bar(id)` -> `True` / `ui.end_tab_bar()` / `ui.begin_tab_item(label)` -> `bool` / `ui.end_tab_item()` | `begin_tab_item` is `True` for the selected tab (the first one, until a click); only put content inside a tab that returned `True` |
-| `ui.begin_table(id, columns, flags=0, w=0.0, h=0.0)` -> `bool` | `ui.table_next_row()`, `ui.table_next_column()`, `ui.table_setup_column(label, flags=0, width=0.0)`, `ui.table_headers_row()`, `ui.end_table()` |
+| `ui.begin_table(id, columns, flags=0, w=0.0, h=0.0)` -> `True` | `ui.table_next_row()`, `ui.table_next_column()`, `ui.table_setup_column(label, flags=0, width=0.0)`, `ui.table_headers_row()`, `ui.end_table()` |
 | `ui.columns(count=1, border=True)` / `ui.next_column()` | The older, simpler column layout |
+
+**Opening and closing, the one rule.** Every `begin_*`, `tree_node` and `push_*` has a
+closing call, and you make the closing call exactly when the opening one returned `True`,
+the same as in ImGui itself. The calls that always return `True` while you are recording
+(`begin_child`, `begin_tab_bar`, `begin_table`) and the ones that return nothing
+(`begin_disabled`, `begin_group`, `begin_node_editor`, every `push_*`) are always closed.
+The ones that return a real answer (`begin_tab_item`, `tree_node`, `collapsing_header`)
+are closed only inside the `if`:
+
+```python
+if ui.begin_tab_bar("##tabs"):            # always True: always end it
+    if ui.begin_tab_item("First"):        # True only for the selected tab
+        ui.text("content")
+        ui.end_tab_item()                 # so this is inside the if
+    if ui.begin_tab_item("Second"):
+        ui.text("other content")
+        ui.end_tab_item()
+    ui.end_tab_bar()
+```
+
+Two things follow from how the window works, and neither needs anything from you. The
+real answers are the *window's* answers from the frame it last drew, so on the very first
+frame after a window opens every tab and tree reports `False` and draws empty; the next
+frame catches up. And a tab or tree that is not selected skips whatever you recorded
+inside it, up to the next tab or the end of its tab bar, so content recorded under a
+stale `True` never leaks out as loose widgets. Anything still open when your frame ends
+is closed for you, and a `Panel` whose `draw()` raised part-way closes what it had opened,
+innermost first, before drawing its footer. A window that shows a red "message from Dear
+ImGui" box about a missing or mismatched end is therefore a fault in the app, not in your
+script: report it rather than working around it.
 
 ### Ids and style
 
