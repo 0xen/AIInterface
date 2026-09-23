@@ -102,6 +102,11 @@ int main() {
     check(buttons == 1, "and the handler it was given saw it exactly once");
   }
   {
+    // `clearchat` carries no fields at all, so it must get past the name guard.
+    const std::vector<Command> c = aii::parse_commands(block("clearchat"), nullptr, {});
+    check(c.size() == 1 && c[0].verb == "clearchat", "a bare clearchat line is returned");
+  }
+  {
     // With no handler the line is still dropped rather than handed back. A
     // caller that did not ask to apply buttons has nothing it could do with one.
     const std::vector<Command> c =

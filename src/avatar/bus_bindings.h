@@ -63,6 +63,7 @@
 //
 //   {"t":"session.mic","on":true}      {"t":"session.mute","on":true}
 //   {"t":"session.stop"}               {"t":"session.reset"}
+//   {"t":"session.clear_chat"}
 //   {"t":"session.say","text":"hello"} {"t":"session.get"}
 //   {"t":"settings.model","name":"haiku"}
 //   {"t":"settings.model_worker","name":"sonnet"}
@@ -81,6 +82,7 @@
 //   {"t":"session.said","ok":true,"echo":"x"}
 //   {"t":"session.stopped","echo":"x"}
 //   {"t":"session.resetting","ok":true,"echo":"x"}
+//   {"t":"session.chat_cleared","ok":true,"echo":"x"}
 //   {"t":"session.refused","verb":"say","reason":"the microphone is open"}
 //   {"t":"session.info","state":"idle","mic":false,"muted":true,...}
 //   {"t":"settings.changed","key":"model","value":"haiku","echo":"x"}

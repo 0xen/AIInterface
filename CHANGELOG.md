@@ -8,6 +8,8 @@ Every milestone that merges adds an entry here in the same commit.
 ## 2026-09-23
 
 ### Added
+- **The assistant can clear the chat.** Ask it to clear the chat or the log and the panel
+  empties, while the conversation itself carries on and nothing it knows is forgotten.
 - **A toolbar button can run one of the assistant's scripts.** A window or a check it
   built for you is now one click away, instead of asking for it again each time.
 - **Ring gauges in its windows.** The small windows the assistant opens can now draw real

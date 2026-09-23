@@ -138,8 +138,10 @@ std::vector<Command> parse_commands(const std::string& text,
       // M14 adds `remember` and `forget`, which address a memory by text or by
       // id and have no name. Same rule: their handler is the one that can say
       // "that is full" or "there is no memory numbered that".
+      // `clearchat` takes no fields at all; it is applied by the session.
       if (c.verb == "schedule" || c.verb == "cancel" || c.verb == "setting" ||
-          c.verb == "remember" || c.verb == "forget" || !c.name.empty())
+          c.verb == "remember" || c.verb == "forget" || c.verb == "clearchat" ||
+          !c.name.empty())
         out.push_back(std::move(c));
     }
   }

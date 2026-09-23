@@ -531,6 +531,18 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       "takes a second or so; wait for `session.state` to come back.");
 
   m.def(
+      "clear_chat",
+      [](const std::string& echo) {
+        return post_line(aii::BusLine("session.clear_chat").str("echo", echo).done());
+      },
+      py::arg("echo") = "",
+      "Clear the chat panel's transcript. Display only: unlike `reset()` the "
+      "conversation and Claude's context are kept, and workers and schedules "
+      "are untouched. A reply still streaming keeps its own line.\n"
+      "\n"
+      "Answered by `session.chat_cleared` with ok=True.");
+
+  m.def(
       "handoff",
       [](const std::string& echo) {
         return post_line(aii::BusLine("session.handoff").str("echo", echo).done());

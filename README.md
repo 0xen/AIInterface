@@ -186,7 +186,11 @@ and is removed from the transcript once it has run:
 spawn name=build cwd=C:\myrepo task=Run the test suite and report what failed.
 pause name=build
 stop name=build
+clearchat
 ```
+
+`clearchat` empties the chat panel's transcript without touching the conversation, workers or
+schedules; scripts have the same thing as `aii.clear_chat()`.
 
 Workers run with `--permission-mode bypassPermissions`, because nothing in this app can answer a
 permission prompt and a worker that asked would hang forever. That means a worker can read, write

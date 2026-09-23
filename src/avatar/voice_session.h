@@ -284,6 +284,12 @@ class VoiceSession {
   // `resetting()` is true and update() hands the session over: nothing on the
   // frame loop touches `turn_` or `eng_.llm` until it clears.
   void reset();
+  // Clear the text shown in the chat panel and nothing else (John, 23 Sep
+  // 2026). Never a reset or restart: the `claude` child and its context,
+  // memories, settings, workers and schedules are all untouched, and Reset
+  // stays available because the conversation still exists. A reply still streaming keeps its
+  // own line so its remaining text has somewhere to land. Any thread.
+  void clear_chat();
   // M3.12: a changed model or tool grant, taken up **now** (user, 19 Sep 2026:
   // "restart immediately, lose context"). **Frame loop only.**
   //
@@ -1243,6 +1249,9 @@ class VoiceSession {
   unsigned listen_timeout_seq_ = 0;  // M1f.1; see Snapshot::listen_timeout_seq
   float mic_level_ = 0.0f;
   std::vector<Line> lines_;
+  // clear_chat() emptied `lines_` of a conversation that still exists; keeps
+  // `resettable` true until a restart really ends it. Under `mutex_`.
+  bool chat_cleared_ = false;
   // Worker reports waiting for a gap in which to be spoken.
   std::vector<std::string> pending_announce_;
   // M2b.4. Reports waiting for a gap in which a *turn* can be run. One string

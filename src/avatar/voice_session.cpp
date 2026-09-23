@@ -2167,6 +2167,23 @@ void VoiceSession::stop_reply_and_mic(const std::string& stopped_status) {
 
 bool VoiceSession::quitting_ok() const { return !turn_running_ && !resetting(); }
 
+void VoiceSession::clear_chat() {
+  std::lock_guard<std::mutex> l(mutex_);
+  // A turn in flight is still appending to the last line (and strips its aii
+  // block from it at the end), so that one line survives; everything above it
+  // goes. A `clearchat` line in a reply lands here with its own reply as that
+  // line, which leaves the confirmation on screen and nothing else.
+  // The conversation is still there, so Reset must stay live even though the
+  // panel it reads `resettable` from is now empty.
+  if (!lines_.empty()) chat_cleared_ = true;
+  if (turn_running_ && !lines_.empty() && !lines_.back().user) {
+    lines_.erase(lines_.begin(), lines_.end() - 1);
+  } else {
+    lines_.clear();
+  }
+  log("[chat] transcript cleared");
+}
+
 void VoiceSession::reset() {
   // Nothing to reset before there is a client, and nothing that could be
   // rebuilt after the load has failed: a failed load may never have reached
@@ -2338,6 +2355,7 @@ void VoiceSession::run_reset() {
     // what it costs before it is touched (its tooltip), while it is being
     // applied (the amber line under it) and after (the status line below).
     lines_.clear();
+    chat_cleared_ = false;
     partial_.clear();
     // `usage_` is deliberately kept: the subscription window is an account
     // fact, not a conversation one, and a reset does not give any of it back.
@@ -4176,6 +4194,11 @@ void VoiceSession::run_commands(const std::string& reply_text) {
       apply_run(c);
       continue;
     }
+    // Not a worker verb: the transcript belongs to the session.
+    if (c.verb == "clearchat") {
+      clear_chat();
+      continue;
+    }
     // M14. Not a worker verb either: a memory is a line in a file, and the
     // session owns the file.
     if (c.verb == "remember" || c.verb == "forget") {
@@ -4544,7 +4567,7 @@ VoiceSession::Snapshot VoiceSession::snapshot() const {
   // "Is there anything to throw away", answered from the one thing the user
   // can see. Reset clears `lines_`, so this is false on a fresh session and
   // false again the moment a reset finishes, with no counter to keep in step.
-  s.resettable = !lines_.empty();
+  s.resettable = !lines_.empty() || chat_cleared_;
   // Not quitting_ok(): `busy` above is this snapshot's reading of resetting(),
   // taken under the same lock, and calling the accessor again here could
   // answer from a later moment than the rest of the fields were filled from.

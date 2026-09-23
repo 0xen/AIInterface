@@ -545,6 +545,16 @@ void BusBindings::on_session(const BusMessage& m, std::string* error) {
     return;
   }
 
+  // Clear the chat panel's transcript. Display only: the conversation, its
+  // context, workers and schedules are untouched, so nothing here is refused
+  // for being mid-turn -- a reply in flight keeps its own line.
+  if (m.verb == "clear_chat") {
+    if (!ctx_.session) return refuse("no voice in this run");
+    ctx_.session->clear_chat();
+    bus.publish(BusLine("session.chat_cleared").flag("ok", true).str("echo", echo).done());
+    return;
+  }
+
   // M3.15. The script half of the handover, and the whole of it that could be
   // built honestly today.
   //

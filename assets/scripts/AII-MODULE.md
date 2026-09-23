@@ -44,6 +44,7 @@ contained, and its last error line appears in the settings panel under Scripts.
 | `aii.listen_timeout(seconds, echo="")` | How long a latched mic waits before closing; 0 never closes |
 | `aii.stop(echo="")` | Cancel the reply in flight, close the mic, pause every worker |
 | `aii.reset(echo="")` | Throw the conversation away and start a new one |
+| `aii.clear_chat(echo="")` | Empty the text shown in the chat panel; the conversation, memories and settings are untouched |
 | `aii.handoff(echo="")` | Hand this session over to a fresh one, carrying a summary |
 
 ## The avatar
