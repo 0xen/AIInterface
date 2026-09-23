@@ -135,7 +135,13 @@ The design notes in `docs/` describe how the larger pieces are built: the script
 the script windows, and the inline directive channel the assistant uses to control the app
 from inside a reply.
 
-## Licences
+## Licence
+
+This repository is published to show the work. It is under the
+[PolyForm Strict License 1.0.0](LICENSE): you are welcome to read the code and build
+and run it for noncommercial purposes, but not to distribute it, modify it or build
+products on it. Pull requests are not being taken. The rendering engine it uses is
+published under the same terms.
 
 The components the setup script downloads each carry their own licence: sherpa-onnx and
 Kokoro are Apache-2.0, the Nemotron recogniser is under NVIDIA's OpenMDW licence,
