@@ -1,5 +1,5 @@
 """`NodeGraph` -- boxes with pins, wired together, drawn with `aii.ui`'s node
-editor ops (`begin_node_editor` .. `end_node_editor`, M30).
+editor ops (`begin_node_editor` .. `end_node_editor`).
 
 This is a small model of a node graph (nodes, their input/output pins, links
 between pins) plus a `draw(ui)` that renders it and folds the user's edits
@@ -38,16 +38,15 @@ gets a new method here, not a second implementation inline in a panel.
 # They come from one counter, kept on the `aii` module so it survives this
 # module being reloaded. That makes them unique for the whole session, not
 # just within one graph. The window reports each node's position under its
-# id, and a window closed and reopened used to be handed the old window's
-# reports. A new graph that reused the same ids then took every node as
-# already placed and piled them all at the origin (user, 23 Sep).
+# id, and a window closed and reopened would otherwise be handed the old
+# window's reports; a new graph that reused the same ids would then take
+# every node as already placed and pile them all at the origin.
 #
 # They also stay below 2**24. The app carries a link's two pin ids as 32-bit
 # floats (`ui.link` -> UiCommand::f), and a float holds a whole number exactly
 # only up to 16,777,216. Past that, the pin ids are rounded, the link names
-# pins that do not exist, and imnodes draws no line. An earlier fix of the
-# pile-up gave each graph a block of ids up to two billion, and every edge
-# vanished (user, 23 Sep).
+# pins that do not exist, and imnodes draws no line -- so ids are kept well
+# under that limit rather than given a much larger range.
 ID_LIMIT = 1 << 24
 
 
@@ -75,9 +74,9 @@ class NodeGraph:
         # any node overlapping an earlier one is pushed right or down (the
         # shorter move) until nothing overlaps, with `spacing` pixels between.
         # It runs once per node, on its first frames, and never again -- so a
-        # user who drags two nodes together afterwards is left alone. The
-        # first graphs the assistant drew put hint-heavy nodes on a grid sized
-        # for bare titles and they sat on top of each other (user, 22 Sep).
+        # user who drags two nodes together afterwards is left alone. Without
+        # it, nodes with hint-heavy bodies laid out on a grid sized for bare
+        # titles can end up sitting on top of each other.
         self.minimap = minimap
         self.auto_space = auto_space
         self.spacing = float(spacing)
@@ -231,12 +230,12 @@ class NodeGraph:
             node = self._nodes[node_id]
             # Positions are sent every frame until the app reports the node
             # drawn there (the loop after end_node_editor). Marking them sent
-            # on the first *recording* lost them whenever that recording was
-            # not drawn -- the study dashboard records its map tab while the
-            # tab is closed, so a freshly opened window stacked every node
-            # at the origin and then saved those zeros as the model's
-            # positions (user, 23 Sep). Re-sending is free: the app applies a
-            # non-forced SetNodePos once per node id and ignores the rest.
+            # on the first *recording* would lose them whenever that
+            # recording is not drawn -- a panel can record a tab while it is
+            # closed, so a freshly opened window would stack every node at
+            # the origin and then save those zeros as the model's positions.
+            # Re-sending is free: the app applies a non-forced SetNodePos
+            # once per node id and ignores the rest.
             if node_id in moves:
                 node["pos"] = moves[node_id]
                 self._force[node_id] = moves[node_id]

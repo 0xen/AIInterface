@@ -33,6 +33,9 @@ Every milestone that merges adds an entry here in the same commit.
   yourself to see one appear; pressing the Workers button still closes it.
 
 ### Fixed
+- **A window with tabs no longer trips an error message from the UI toolkit.** A tab that was
+  not selected made the window skip the rest of what the script had drawn, which left the
+  tab bar and the footer region unclosed; the skip now stops at the next tab.
 - **A node map keeps its layout when you reopen its window.** Closing a window and opening
   it again could pile every box of its map on top of each other until you changed the
   view, because the new window was handed the old one's positions. A reopened window

@@ -1,61 +1,21 @@
-"""M3.15 -- the handover, with the policy moved into Python.
+"""A handover policy, written in Python instead of the app's built-in rule.
 
 Copy this one level up (into %APPDATA%\\AIInterface\\scripts) to have it run,
 or pass it with --script. Set `handoff.threshold` to 0 in settings.json first,
 or the app's own rule will fire before this one does; two policies racing is
 not a demonstration of either.
 
-----------------------------------------------------------------------------
-Why this is an example and not a skill
-----------------------------------------------------------------------------
+The handover is the app's feature for replacing a session that is running out
+of context with a fresh one, mid-conversation, without losing the thread: the
+outgoing session leaves a note, the app speaks a short line while it swaps the
+child process, and the new session opens with that note as its first turn.
 
-The user asked for the handover "as a Python skill too". **M10.1 -- what a
-skill even is in this app -- has not been decided**, and inventing an answer
-here to get one feature shipped is how a framework ends up shaped by its first
-customer's accident. So the C++ side was built properly and this is what the
-Python side can honestly be today: a plain script, against the bus that
-already existed, doing the whole job in twenty lines.
-
-That it *is* twenty lines is the useful finding. The app publishes the
-trigger (`session.usage` carries `ctx`, the CLI's own context fraction, and
-has since M2.9) and now accepts the act (`aii.handoff()`), so nothing about
-this feature needed a skill framework to be scriptable. What a skill would
-add is not capability.
-
-----------------------------------------------------------------------------
-What M10.1 has to decide, with this as the worked example
-----------------------------------------------------------------------------
-
-Every one of these is a real fork this script had to walk past:
-
- 1. **Does a skill own a decision, or offer one?** This script cannot stop the
-    C++ rule firing -- it has to be switched off in settings.json by hand.
-    Either a skill can claim a decision (and the built-in policy stands down
-    while it is loaded, and something has to say so on screen), or it cannot,
-    and every scripted policy ships with "first, turn the real one off".
-
- 2. **What happens when two skills claim the same decision?** Two scripts both
-    watching `ctx` is two handovers. The bus refuses the second, which is the
-    right *mechanism* and no answer at all to the question of which script was
-    supposed to win.
-
- 3. **Is a skill loaded, or installed?** Scripts run because a `.py` file sits
-    in one directory. A skill the assistant can be asked to use needs a name,
-    a description the model reads, and somewhere for both to live -- which is
-    the same problem `PromptKind::Skill` and its `triggers` field were parked
-    against in M3.3 and never resolved.
-
- 4. **Does the model know it is there?** If the assistant is to say "I can
-    hand over early if you like", the skill's existence has to reach the
-    system prompt, which is a launch argument. A skill loaded mid-session is
-    then invisible to the model until the next restart -- or the act of
-    loading one restarts the child, which for *this* skill would throw away
-    the conversation it exists to preserve.
-
- 5. **What does a skill get that a script does not?** Today: nothing. If the
-    answer is still nothing when M10.1 is written, the honest shipping form of
-    "as a Python skill" is this file with a better home, and M10 is about
-    discovery and naming rather than about a new surface.
+The app publishes the trigger (`session.usage` carries `ctx`, the CLI's own
+context fraction) and accepts the act (`aii.handoff()`), so the whole policy
+is watch `ctx`, and call `handoff()` once it crosses a threshold -- twenty
+lines below, with nothing this script has to work around. This is a script
+rather than a built-in setting so the threshold, the logging and the arming
+behaviour can be changed without touching the app itself.
 """
 import aii
 

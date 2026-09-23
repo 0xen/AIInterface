@@ -1,6 +1,5 @@
-"""M28 -- the user's own example, worked: a project status window that goes
-orange while building, green when done, then keeps itself up to date from a
-state file.
+"""A worked example: a project status window that goes orange while
+building, green when done, then keeps itself up to date from a state file.
 
 Copy this one level up (into %APPDATA%\\AIInterface\\scripts) to have it run,
 or pass it with --script. It is a *policy* -- started once at launch, on its
@@ -11,9 +10,8 @@ What it shows, in order:
 
   1. A `StatusPanel` titled "Example Project" opens, coloured orange
      ("Building"), then after a couple of seconds turns green ("Done") with
-     a couple of extra fields and a log line -- the shape the design's own
-     ask described: "X Project Name" / "Status: Building" going red on
-     failure and green on success.
+     a couple of extra fields and a log line: the title, a status line that
+     goes red on failure and green on success, plus room for extra fields.
   2. It then calls `watch("...\\scripts\\state\\example.json")` and runs:
      from that point on, editing that file (with a Write tool, or by hand)
      changes what the window shows on the next tick, without restarting the

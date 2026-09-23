@@ -9,6 +9,8 @@ Everything that hears and speaks runs on your own CPU. Claude runs through the C
 command-line tool on your own subscription, so there is no API key, and nothing you say
 goes anywhere except to Claude. No audio is ever written to disk.
 
+<p align="center"><img src="docs/images/avatar.png" width="360" alt="The assistant's window: a pixel avatar over the desktop, a transcript with one exchange, and the Talk, Silence and Pause buttons"></p>
+
 What it can do:
 
 - Hold a spoken conversation in English, Japanese or a mix of both, and answer in kind.
@@ -18,6 +20,11 @@ What it can do:
   a folder you name, and report back when they are done.
 - Open small windows of its own, built from Python scripts it writes, to show you things.
 - Drive your Chrome browser, if you turn that on.
+
+The windows it draws come from a small Python toolkit: buttons, sliders, tables, plots,
+tabs, node graphs and more, each a one-line call. These two are the shipped examples.
+
+<p align="center"><img src="docs/images/widgets_demo.png" width="380" alt="A script window showing a button, slider, checkbox, text input, combo box, progress bar, plot, tabs and a table"> <img src="docs/images/node_graph_demo.png" width="480" alt="A script window showing a node graph with three linked nodes and a minimap"></p>
 
 ## What you need
 

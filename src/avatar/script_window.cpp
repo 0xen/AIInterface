@@ -470,6 +470,31 @@ void replay(ScriptWindow::Impl& s, std::vector<std::string>& id_stack,
     }
     --i;  // ran off the end; the loop's ++ finishes it
   };
+  // A closed tab item is the case skip_to cannot serve: a script written from
+  // ImGui habit records EndTabItem only when begin_tab_item() answered true,
+  // so for a tab that is not selected there is no end to find, and running
+  // to the frame's end would swallow the tab bar's EndTabBar and whatever
+  // encloses it (the body region a Panel draws its footer under). So the
+  // skip also stops, without consuming it, at the next sibling tab item or
+  // at the EndTabBar that closes this bar, counting nested tab bars so a bar
+  // inside the skipped tab is passed over whole.
+  const auto skip_tab_item = [&](std::size_t& i) {
+    int bars = 0;
+    for (++i; i < s.frame.cmds.size(); ++i) {
+      const UiOp op = s.frame.cmds[i].op;
+      if (op == UiOp::BeginTabBar) {
+        ++bars;
+      } else if (op == UiOp::EndTabBar) {
+        if (bars == 0) break;  // this bar's own end: leave it for the loop
+        --bars;
+      } else if (bars == 0 && op == UiOp::EndTabItem) {
+        return;  // the script did record an end: consumed
+      } else if (bars == 0 && op == UiOp::BeginTabItem) {
+        break;  // the next tab: leave it for the loop
+      }
+    }
+    --i;  // the loop's ++ lands on the command that stopped the skip
+  };
   for (std::size_t ci = 0; ci < s.frame.cmds.size(); ++ci) {
     const UiCommand& cmd = s.frame.cmds[ci];
     switch (cmd.op) {
@@ -803,7 +828,7 @@ void replay(ScriptWindow::Impl& s, std::vector<std::string>& id_stack,
         if (open)
           ++tabitem_open;
         else
-          skip_to(ci, UiOp::BeginTabItem, UiOp::EndTabItem);
+          skip_tab_item(ci);
         break;
       }
       case UiOp::EndTabItem:

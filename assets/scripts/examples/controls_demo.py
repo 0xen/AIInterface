@@ -1,9 +1,9 @@
-"""M2.9 -- working the app's own controls from a script.
+"""Working the app's own controls from a script.
 
 Copy this one level up (into %APPDATA%\\AIInterface\\scripts) to have it run,
 or pass it with --script.
 
-The four the user named, in order: mute and unmute, change the model, send a
+Four controls, in order: mute and unmute, change the model, send a
 prompt and get the reply, reset the context. Every call here lands on the same
 C++ the control lands on -- `mic` is `toggle_mic()`, `mute` writes the flag the
 mute button and the S key write, `say` is the message field, `reset` is the

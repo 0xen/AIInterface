@@ -1,4 +1,4 @@
-"""M30 -- a node graph drawn with `aii_ui.NodeGraph`, in one window.
+"""a node graph drawn with `aii_ui.NodeGraph`, in one window.
 
 Copy this one level up (into %APPDATA%\\AIInterface\\scripts) to have it run,
 or pass it with --script. It is a *policy*: started once at launch, on its

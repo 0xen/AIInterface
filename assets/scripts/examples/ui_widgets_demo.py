@@ -1,4 +1,4 @@
-"""M28 -- one of everything `aii.ui` can draw, in one window.
+"""one of everything `aii.ui` can draw, in one window.
 
 Copy this one level up (into %APPDATA%\\AIInterface\\scripts) to have it run,
 or pass it with --script. It is a *policy*: started once at launch, on its

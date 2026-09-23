@@ -1,4 +1,4 @@
-"""M2b.2 -- scheduling from a script, with no conversational instance involved.
+"""scheduling from a script, with no conversational instance involved.
 
 Copy this one level up (into %APPDATA%\\AIInterface\\scripts) to have it run,
 or pass it with --script.
