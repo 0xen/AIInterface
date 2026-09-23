@@ -96,6 +96,8 @@ any `##`/`###` suffix passed through); `id` for results is `ui_compose_id(stack,
 | PopStyleColor | | | | i[0]=count (1 default) | | |
 | PushItemWidth, SetNextItemWidth | | | f[0]=width | | | |
 | PopItemWidth | | | | | | |
+| PushFontScale | | | f[0]=scale multiplier (1.0 normal) | | | |
+| PopFontScale | | | | | | |
 | SetTooltip | the text (shown only while the previous item is hovered) | | | | | |
 | SetScrollHereY | | | f[0]=center ratio | | | |
 
@@ -109,7 +111,7 @@ Checkbox/RadioButton → `b`, `changed`; sliders/drags/InputFloat/ColorEdit → 
 SliderInt/DragInt/InputInt/Combo/ListBox → `i`, `changed`; InputText* → `s`, `changed`.
 
 **Balancing.** The replayer tracks its own depth for every Begin/End pair, PushId/PopId,
-PushStyleColor/PopStyleColor, PushItemWidth/PopItemWidth, TreeNode/TreePop, Columns. At
+PushStyleColor/PopStyleColor, PushItemWidth/PopItemWidth, PushFontScale/PopFontScale, TreeNode/TreePop, Columns. At
 the end of a frame it closes whatever is still open, and it ignores an End with nothing
 open. ImGui asserts are compiled out in Release, so an unbalanced stack would otherwise be
 a silent crash. CollapsingHeader and TreeNode work exactly as in ImGui: the Python call
@@ -169,6 +171,7 @@ ui.end_table(); ui.table_next_row(); ui.table_next_column(); ui.table_setup_colu
 ui.columns(count=1, border=True); ui.next_column()
 ui.push_style_color(idx, rgba); ui.pop_style_color(count=1)
 ui.push_item_width(w); ui.pop_item_width(); ui.set_next_item_width(w)
+ui.push_font_scale(scale); ui.pop_font_scale(); ui.text_scaled(s, scale)
 ui.set_tooltip(s); ui.set_scroll_here_y(center=0.5)
 ui.COL_TEXT, ui.COL_BUTTON, ... (the ImGuiCol_ values a script is likely to want, as ints)
 ```

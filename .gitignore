@@ -33,3 +33,9 @@ spikes/**/*.log
 
 # Agent worktrees: isolated checkouts, never part of the repo
 .claude/worktrees/
+
+# Local build-and-launch helper, per machine
+run.bat
+
+# Agent instructions for this checkout; kept locally, never committed
+CLAUDE.md

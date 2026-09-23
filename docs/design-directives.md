@@ -368,7 +368,7 @@ configured**. That is the mechanism for "only paid when it matters", and the bla
 
 ### 6.2 What the measurements forbid
 
-- `MANAGER-HANDOFF.md:263-265`: *"Prompt length is not free. Every attempt to add prose for a
+- `personal/MANAGER-HANDOFF.md:263-265`: *"Prompt length is not free. Every attempt to add prose for a
   residual case bought hallucinated readings or spurious queries."*
 - `docs/MILESTONES.md:1936-1937`: three prompt wordings written and measured against the `cwd`
   hallucination, *"none of them moved it"*.
