@@ -62,6 +62,13 @@ enum class ButtonActionKind {
   // learns that it exists. It does not widen what a *registered* button may
   // do, because the untrusted entry point (add_path_button) cannot produce it.
   Invoke,
+  // M33. Runs a named action — the same thing a `run name=` line does. The
+  // click never runs anything itself: it is handed to
+  // `VoiceSession::run_action_click`, which is the same gate `apply_run`
+  // already is, so a button reaches nothing a spoken or written `run` line
+  // could not already reach. Registered through add_run_button(), the second
+  // untrusted door beside add_path_button().
+  RunAction,
 };
 
 struct ButtonAction {
@@ -73,6 +80,12 @@ struct ButtonAction {
   // Invoke only. Called on the frame loop's thread, from whichever surface
   // drew the button.
   std::function<void()> callback;
+  // RunAction only. The action's *name*, never a path and never a body —
+  // exactly what a `run name=` line carries. Registration checks only that it
+  // is shaped like a name; whether it resolves, is armed, or is temporary is
+  // ActionStore::check()'s decision at click time, made again then because
+  // that is where the authoritative store lives.
+  std::string action;
 };
 
 // Which glyph a button draws. `Label` is short text; everything else names a
@@ -87,8 +100,11 @@ struct ButtonAction {
 // letting it pick from the built-in ones would only produce two cogs.
 // M5.1 adds `Prompts`, the inspector's page-of-text icon. A glyph is a name
 // here and a grid in src/avatar/pixel_icons.cpp; nothing in this header draws.
-// M9.1 adds `Workers`, the worker strip's figure.
-enum class ButtonGlyph { Label, Cog, Folder, Prompts, Workers };
+// M9.1 adds `Workers`, the worker strip's figure. M33 adds `Script`, the
+// play/run mark a registered `run=` button draws on the strip; on the
+// toolbar row that same button still draws its label, exactly as a `path=`
+// button does — see bar_button() in avatar_ui.cpp.
+enum class ButtonGlyph { Label, Cog, Folder, Prompts, Workers, Script };
 
 struct ToolbarButton {
   std::string id;
@@ -111,6 +127,11 @@ constexpr std::size_t kButtonsMax = 4;         // registered buttons, built-ins 
 constexpr std::size_t kButtonLabelMax = 8;     // in characters, not bytes
 constexpr std::size_t kButtonTooltipMax = 96;  // ditto; a tooltip is one line
 constexpr std::size_t kButtonIdMax = 32;
+// The `run=` action name a registered button may carry. Matches the shape
+// `apply_run` already accepts from a spoken or written `run name=` line —
+// this does not widen it, it only says how long a name may be before the
+// button is refused at registration rather than at the click.
+constexpr std::size_t kActionNameMax = 64;
 // The sidebar's own cap, and it is a physical one: the strip is as tall as its
 // buttons and it is docked to the top of the panel, which at its shortest is
 // ~168 px. Eight 40 px buttons plus their gaps is 356 px, taller than the
@@ -138,6 +159,19 @@ class ButtonRegistry {
   bool add_path_button(const std::string& id, const std::string& label,
                        const std::string& tooltip, const std::string& path,
                        std::string* error);
+
+  // M33. The alternative untrusted entry point beside add_path_button: a
+  // button that runs a named action instead of opening a directory. Only the
+  // *shape* of `action` is validated here — non-empty, at most
+  // kActionNameMax characters, `[A-Za-z0-9_.-]` — because whether it
+  // resolves, is armed, or is temporary is ActionStore::check()'s decision at
+  // click time, exactly as it is for a `run name=` line. This does not widen
+  // what a registered button may do beyond what a `run` line may already do:
+  // the click goes through the same apply_run gate
+  // (VoiceSession::run_action_click).
+  bool add_run_button(const std::string& id, const std::string& label,
+                      const std::string& tooltip, const std::string& action,
+                      std::string* error);
 
   // M4.4. Registers a button from *inside this process*: a panel, a window or
   // the frame loop, never a script and never a reply. That is why it may carry

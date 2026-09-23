@@ -16,10 +16,12 @@
 //                     exactly this)
 //   theme.colour   -> the colour picker's own wish, so a scripted colour and a
 //                     dragged one are the same code path and persist alike
-//   toolbar.button -> ButtonRegistry::add_path_button, the existing untrusted
-//                     door: validated paths, no command strings, caps on count
-//                     and label. `ButtonActionKind::Invoke` is not reachable
-//                     from here and there is no verb that could produce one.
+//   toolbar.button -> ButtonRegistry::add_path_button or, with `run` instead
+//                     of `path` (M33), add_run_button: the existing untrusted
+//                     doors, validated paths or action names, no command
+//                     strings, caps on count and label. `ButtonActionKind::
+//                     Invoke` is not reachable from here and there is no verb
+//                     that could produce one.
 //   toolbar.clear  -> ButtonRegistry::clear_registered
 //   script.status  -> the Scripts line in the settings surface (M2.6)
 //   script.log     -> one [py] line in the app's log

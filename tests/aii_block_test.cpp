@@ -108,6 +108,39 @@ int main() {
         aii::parse_commands(block("button id=repo label=Repo path=C:\\github"), nullptr, {});
     check(c.empty(), "with no handler at all, a button line is dropped and not returned");
   }
+  {
+    // M33. `run=` in place of `path=`: still applied and not returned, exactly
+    // as a path button is.
+    int buttons = 0;
+    std::vector<Command> got;
+    aii::parse_commands(block("button id=go label=Go tip=\"runs a thing\" run=tidy_downloads"),
+                        nullptr, [&](const Command& c) {
+                          ++buttons;
+                          got.push_back(c);
+                        });
+    check(buttons == 1 && got.size() == 1 && got[0].run == "tidy_downloads" && got[0].path.empty(),
+          "run= is read into Command::run, and path stays empty");
+  }
+  {
+    // Both path= and run= on one line: refused, and logged, and the handler
+    // never sees it.
+    std::vector<std::string> problems;
+    int buttons = 0;
+    aii::parse_commands(
+        block("button id=go label=Go path=\"C:\\github\" run=tidy_downloads"), &problems,
+        [&](const Command&) { ++buttons; });
+    check(buttons == 0, "a button with both path= and run= is refused before the handler sees it");
+    check(!problems.empty(), "and the refusal is recorded for the log");
+  }
+  {
+    // Neither path= nor run=: the same refusal.
+    std::vector<std::string> problems;
+    int buttons = 0;
+    aii::parse_commands(block("button id=go label=Go tip=nothing"), &problems,
+                        [&](const Command&) { ++buttons; });
+    check(buttons == 0, "a button with neither path= nor run= is refused the same way");
+    check(!problems.empty(), "and it is logged too");
+  }
 
   // ---- 2. quoting, and the fields that run to the end of the line -------
   std::printf("quoting and end-of-line values\n");

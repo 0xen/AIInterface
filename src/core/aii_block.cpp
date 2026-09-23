@@ -88,6 +88,7 @@ std::vector<Command> parse_commands(const std::string& text,
         else if (key == "label") c.label = value;
         else if (key == "tip") c.tip = value;
         else if (key == "path") c.path = value;
+        else if (key == "run") c.run = value;
         else if (key == "in") c.in = value;
         else if (key == "say") c.say = value;
         else if (key == "grade") c.grade = value;
@@ -109,6 +110,15 @@ std::vector<Command> parse_commands(const std::string& text,
       // button" aloud would spend a spoken sentence on something the user
       // never asked for. It is recorded for the log instead.
       if (c.verb == "button") {
+        // M33. Exactly one of `path=`/`run=`: a button that does not say what
+        // it does is not one to add, and one that says both is ambiguous in
+        // a way that is cheaper to refuse here than to guess about at the
+        // registry. Like every other refusal in this block, it is not spoken
+        // -- see the paragraph above.
+        if (c.path.empty() == c.run.empty()) {
+          note(problems, "button '" + c.id + "' needs exactly one of path= or run=");
+          continue;
+        }
         if (on_button) on_button(c);
         continue;
       }

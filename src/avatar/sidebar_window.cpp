@@ -331,6 +331,9 @@ SidebarResult SidebarWindow::draw(float dt, bool loading) {
       case ButtonActionKind::Invoke:
         if (b.action.callback) b.action.callback();
         break;
+      case ButtonActionKind::RunAction:
+        out.run_action = b.action.action;
+        break;
     }
   }
 

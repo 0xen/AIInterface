@@ -223,8 +223,23 @@ void BusBindings::on_toolbar(const BusMessage& m, std::string* error) {
     // closed set of action kinds — is enforced there, once, for this and for
     // the assistant's ```aii``` block alike. There is deliberately no verb here
     // that could produce a ButtonActionKind::Invoke.
-    ButtonRegistry::instance().add_path_button(m.str("id"), m.str("label"), m.str("tip"),
-                                               m.str("path"), error);
+    //
+    // M33. `run` is the same alternative the ```aii``` block's `button` verb
+    // takes: exactly one of `path`/`run`, and a line with both or neither is
+    // refused here the same way that one is refused in the parser, because
+    // this door has no parser in front of it to have made the call already.
+    const std::string path = m.str("path");
+    const std::string run = m.str("run");
+    if (path.empty() == run.empty()) {
+      if (error) *error = "button needs exactly one of path or run";
+      return;
+    }
+    if (!run.empty())
+      ButtonRegistry::instance().add_run_button(m.str("id"), m.str("label"), m.str("tip"), run,
+                                                error);
+    else
+      ButtonRegistry::instance().add_path_button(m.str("id"), m.str("label"), m.str("tip"), path,
+                                                 error);
     return;
   }
   if (m.verb == "clear") {

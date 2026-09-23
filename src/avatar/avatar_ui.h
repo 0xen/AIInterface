@@ -708,6 +708,11 @@ struct AvatarUiResult {
   std::string send_text;
   // Total window height the layout wants, avatar area included.
   std::uint32_t desired_height = 0;
+  // M33. A `run=` toolbar button was clicked: the action's name, for
+  // main.cpp to hand to VoiceSession::run_action_click(). button_bar() is
+  // the only thing that sets it, on the fallback surface (no strip) or on
+  // the toolbar row it draws whether or not there is one.
+  std::string run_action;
 };
 
 // Builds the panel for this frame. `top` is where the panel starts, i.e. the

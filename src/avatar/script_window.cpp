@@ -250,6 +250,13 @@ struct ScriptWindow::Impl : ToolWindowCore {
   std::string key;
   ScriptWindowGeometry remembered;
   std::string title;
+  // The size the *script* last asked for. `retitle_resize` compares the spec
+  // against this, not against the live client size: comparing against the
+  // live size undid every drag of the window's edge within a frame, because
+  // a resized window differs from the spec on every frame after. The user's
+  // resize wins until the script asks for a different size (M33).
+  unsigned spec_w = 0;
+  unsigned spec_h = 0;
 
   // The last frame copied from the bridge, and the generation it was copied
   // at — copying is skipped when the bridge's generation has not moved on,
@@ -1018,6 +1025,8 @@ std::unique_ptr<ScriptWindow> ScriptWindow::create(platform::IPlatformBackend& b
   Impl& s = *self->p_;
   s.key = spec.key;
   s.title = spec.title;
+  s.spec_w = spec.w;
+  s.spec_h = spec.h;
   s.remembered = g;
 
   // Decorated, resizable, opaque: a script window is a page of information,
@@ -1118,7 +1127,9 @@ void ScriptWindow::retitle_resize(const UiWindowSpec& spec) {
   // Through setSize()/resize(), never a raw SetWindowPos — the rule every
   // window on ToolWindowCore follows, stated at agent_menu_window.cpp's own
   // content-driven resize and worker_window.h's header comment.
-  if (spec.w != s.w || spec.h != s.h) {
+  if (spec.w != s.spec_w || spec.h != s.spec_h) {
+    s.spec_w = spec.w;
+    s.spec_h = spec.h;
     s.w = spec.w;
     s.h = spec.h;
     if (s.target) s.target->setSize({s.w, s.h});

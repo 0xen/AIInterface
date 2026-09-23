@@ -157,6 +157,22 @@ if(AII_BUILD_TESTS)
     target_compile_options(aii_block_test PRIVATE /utf-8 /W4)
   endif()
 
+  # ---- button_registry_test: the registry's own untrusted doors ------------
+  # M33. add_run_button() is checked directly here, the way aii_block_test
+  # cannot: that file counts button lines rather than registering them,
+  # because button_registry.cpp opens folders through <shellapi.h> and
+  # dragging that into a parser-only test would cost it the property it was
+  # split out to gain. shell32 is linked explicitly because nothing else here
+  # pulls it in.
+  add_executable(button_registry_test tests/button_registry_test.cpp
+                                      src/core/button_registry.cpp src/core/text_util.cpp)
+  target_include_directories(button_registry_test PRIVATE src)
+  target_link_libraries(button_registry_test PRIVATE shell32)
+  target_compile_definitions(button_registry_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(button_registry_test PRIVATE /utf-8 /W4)
+  endif()
+
   # ---- json_shape_test: a line from the CLI that is not the shape expected --
   # M15.2. Links aii_core because it drives a real ClaudeCodeClient -- one that
   # is constructed and never started, so no `claude` process and no engine is

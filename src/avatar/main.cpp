@@ -1830,6 +1830,13 @@ int main(int /*argc*/, char** /*argv*/) {
     // no longer exists.
     bool workersToggle = workersOpen;  // --workers: the same latch the click sets
     std::unique_ptr<aii::WorkerStripWindow> workerStrip;
+    // M33. The pool's size last frame, so a spawn (the count rising) can open
+    // the strip on its own -- the user's words: when a subagent spins up, the
+    // strip should show up showing it, not wait for a click. Never a level:
+    // a fresh spawn opens it once and a manual close afterwards stays closed
+    // for the rest of that same growth, exactly as the button next to it
+    // still opens and closes on demand.
+    std::size_t prevWorkerCount = 0;
     // The rows the strip was sized and docked with at the top of *this* frame,
     // rebuilt from the session's snapshot at the bottom of it. One frame of lag
     // on a worker appearing, deliberately: the snapshot is taken well after the
@@ -2842,6 +2849,11 @@ int main(int /*argc*/, char** /*argv*/) {
                     uiState.refusal = sb.refusal;
                     uiState.refusal_left = 2.5f;
                 }
+                // M33. A `run=` button on the strip: the same door
+                // VoiceSession::run_action_click gives the toolbar's own copy
+                // below, so a refusal (unarmed, unknown, past the cap) is
+                // announced the same way whichever surface the button was on.
+                if (!sb.run_action.empty() && session) session->run_action_click(sb.run_action);
             }
             // ---- M9: the worker strip and the worker windows ----
             //
@@ -2878,6 +2890,18 @@ int main(int /*argc*/, char** /*argv*/) {
                     break;
                 }
             }
+            // M33. Shared by the button's own open and the auto-open below,
+            // so there is one creation path and not two that could drift.
+            const auto openWorkerStrip = [&] {
+                std::string stripError;
+                workerStrip = aii::WorkerStripWindow::create(*backend, *instance, *device,
+                                                             kFontPx, &stripError);
+                // Survivable: the button stays and the next click tries
+                // again. It is shown by the next frame's dock(), which is
+                // also the first thing that knows where it belongs — one
+                // frame hidden rather than one frame in SDL's corner.
+                if (!workerStrip) log::warn("no worker strip: {}", stripError);
+            };
             if (workersToggle) {
                 workersToggle = false;
                 if (workerStrip) {
@@ -2887,16 +2911,18 @@ int main(int /*argc*/, char** /*argv*/) {
                     // Closing the index is not a statement about the documents.
                     workerStrip.reset();
                 } else {
-                    std::string stripError;
-                    workerStrip = aii::WorkerStripWindow::create(*backend, *instance, *device,
-                                                                 kFontPx, &stripError);
-                    // Survivable: the button stays and the next click tries
-                    // again. It is shown by the next frame's dock(), which is
-                    // also the first thing that knows where it belongs — one
-                    // frame hidden rather than one frame in SDL's corner.
-                    if (!workerStrip) log::warn("no worker strip: {}", stripError);
+                    openWorkerStrip();
                 }
             }
+            // M33 (user, 23 Sep 2026): a spawn opens the strip on its own, so
+            // the subagent is visible without a click. Only on the *rise* and
+            // only when it is not already up — a second spawn while it is open
+            // does nothing extra, and the Workers button's own close a moment
+            // later is not fought by this on the next frame, because the count
+            // has not risen again.
+            const std::size_t workerCount = snap.workers.size();
+            if (workerCount > prevWorkerCount && !workerStrip) openWorkerStrip();
+            prevWorkerCount = workerCount;
             if (workerStrip) {
                 const aii::WorkerStripResult ws = workerStrip->draw(dt);
                 if (!ws.toggled.empty()) toggleWorker = ws.toggled;
@@ -3377,6 +3403,9 @@ int main(int /*argc*/, char** /*argv*/) {
                 if (r.talk_pressed) session->talk_pressed();
                 if (r.talk_released) session->talk_released(r.talk_over_button, r.talk_held);
                 if (r.stop) session->stop();
+                // M33. A `run=` toolbar button, the fallback-surface twin of
+                // the strip's own check above.
+                if (!r.run_action.empty()) session->run_action_click(r.run_action);
                 // The second press of the transport row's confirm, never the
                 // first: the panel does the arming and only tells us when the
                 // user has said yes twice. reset() returns straight away and

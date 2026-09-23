@@ -368,18 +368,23 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
 
   m.def(
       "button",
-      [](const std::string& id, const std::string& label, const std::string& path,
-         const std::string& tip) {
+      [](const std::string& id, const std::string& label, const std::string& tip,
+         const std::string& path, const std::string& run) {
         return post_line(aii::BusLine("toolbar.button")
                              .str("id", id)
                              .str("label", label)
                              .str("tip", tip)
                              .str("path", path)
+                             .str("run", run)
                              .done());
       },
-      py::arg("id"), py::arg("label"), py::arg("path"), py::arg("tip") = "",
-      "Add a toolbar button that opens a directory. The path must exist and "
-      "be a directory; there is deliberately no way to register a command.");
+      py::arg("id"), py::arg("label"), py::arg("tip"), py::arg("path") = "",
+      py::arg("run") = "",
+      "Add a toolbar button: exactly one of `path=` (opens a directory, which "
+      "must exist and be one) or `run=` (runs one of your actions by name -- "
+      "the same door a `run name=` line already opens; whether it resolves "
+      "or is armed is checked at the click, not here). There is deliberately "
+      "no way to register a command string.");
 
   m.def(
       "clear_buttons", [] { return post_line(aii::BusLine("toolbar.clear").done()); },

@@ -85,6 +85,26 @@ constexpr IconRows kIconWorkers = {
     "....##.##....",
 };
 
+// M33: a registered `run=` button. A play mark — the idiom this app already
+// has for "runs something" (the transport row's own play triangle) — in the
+// same negative-space-free solid-block style as the folder, because a
+// 1-cell outline is 2 px at this scale and reads as a smudge.
+constexpr IconRows kIconScript = {
+    ".............",
+    "..#..........",
+    "..##.........",
+    "..###........",
+    "..####.......",
+    "..#####......",
+    "..######.....",
+    "..#####......",
+    "..####.......",
+    "..###........",
+    "..##.........",
+    "..#..........",
+    ".............",
+};
+
 }  // namespace
 
 void draw_icon(ImDrawList* dl, const char* const* rows, ImVec2 p, ImU32 ink, ImU32 mark,
@@ -106,6 +126,7 @@ const char* const* icon_for_glyph(ButtonGlyph glyph) {
     case ButtonGlyph::Folder: return kIconFolder;
     case ButtonGlyph::Prompts: return kIconPrompts;
     case ButtonGlyph::Workers: return kIconWorkers;
+    case ButtonGlyph::Script: return kIconScript;
     default: return nullptr;
   }
 }

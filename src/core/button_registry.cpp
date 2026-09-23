@@ -42,6 +42,16 @@ bool valid_id(const std::string& id) {
   });
 }
 
+// The same alphabet a `run name=` line is held to: a name, never a path and
+// never a body. Shape only — whether it resolves is ActionStore::check()'s
+// job at click time, not this one's.
+bool valid_action_name(const std::string& action) {
+  if (action.empty() || action.size() > kActionNameMax) return false;
+  return std::all_of(action.begin(), action.end(), [](unsigned char c) {
+    return std::isalnum(c) || c == '_' || c == '-' || c == '.';
+  });
+}
+
 }  // namespace
 
 ButtonRegistry& ButtonRegistry::instance() {
@@ -200,6 +210,54 @@ bool ButtonRegistry::add_path_button(const std::string& id, const std::string& l
   b.tooltip = truncate_chars(tip, kButtonTooltipMax) + "\n" + p.string();
   b.action.kind = ButtonActionKind::OpenPath;
   b.action.path = p.string();
+
+  for (auto& existing : buttons_) {
+    if (existing.id != b.id) continue;
+    if (existing.builtin)
+      return refuse("button '" + b.id + "' is a built-in and cannot be replaced");
+    existing = std::move(b);  // in place: the row keeps its order across turns
+    return true;
+  }
+  std::size_t registered = 0;
+  for (const auto& e : buttons_)
+    if (!e.builtin) ++registered;
+  if (registered >= kButtonsMax)
+    return refuse("button '" + b.id + "' refused: the bar already holds " +
+                  std::to_string(kButtonsMax));
+  buttons_.push_back(std::move(b));
+  return true;
+}
+
+bool ButtonRegistry::add_run_button(const std::string& id, const std::string& label,
+                                    const std::string& tooltip, const std::string& action,
+                                    std::string* error) {
+  // Same lock discipline as add_path_button: validation and registration
+  // under one lock, so a refusal records itself in `status_` at the point it
+  // happens.
+  std::lock_guard<std::mutex> l(mutex_);
+  const auto refuse = [&](std::string why) {
+    if (error) *error = why;
+    status_.push_back(std::move(why));
+    return false;
+  };
+  const std::string clean_id = trim(id);
+  if (!valid_id(clean_id)) return refuse("button id '" + id + "' is not a plain short name");
+
+  const std::string clean_label = trim(label);
+  if (clean_label.empty()) return refuse("button '" + clean_id + "' has no label");
+
+  const std::string clean_action = trim(action);
+  if (!valid_action_name(clean_action))
+    return refuse("button '" + clean_id + "': '" + action + "' is not a plain action name");
+
+  ToolbarButton b;
+  b.id = clean_id;
+  b.glyph = ButtonGlyph::Script;
+  b.label = truncate_chars(clean_label, kButtonLabelMax);
+  const std::string tip = trim(tooltip).empty() ? clean_label : trim(tooltip);
+  b.tooltip = truncate_chars(tip, kButtonTooltipMax) + "\nrun " + clean_action;
+  b.action.kind = ButtonActionKind::RunAction;
+  b.action.action = clean_action;
 
   for (auto& existing : buttons_) {
     if (existing.id != b.id) continue;

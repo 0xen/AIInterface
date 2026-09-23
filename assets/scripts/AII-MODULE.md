@@ -63,7 +63,7 @@ contained, and its last error line appears in the settings panel under Scripts.
 
 | Call | What it does |
 |---|---|
-| `aii.button(id, label, tip, path)` | Add a toolbar button that opens a folder |
+| `aii.button(id, label, tip, path="", run="")` | Add a toolbar button that opens a folder, or, with `run=`, runs one of your scripts by name |
 | `aii.clear_buttons()` | Remove the ones a script added |
 | `aii.open_settings(on=True, echo="")` | Open or close the settings surface |
 

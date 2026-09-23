@@ -488,7 +488,12 @@ void visibility_button(AvatarUiState& state, float size) {
 // registry's caps are sized for this font, and this holds even if it is not.
 bool bar_button(const ToolbarButton& b, float size, float& avail, bool& first) {
   const ImGuiStyle& style = ImGui::GetStyle();
-  const float w = b.glyph == ButtonGlyph::Label
+  // M33: a `run=` button keeps its label on this row even though it carries
+  // the Script glyph, the same as a `path=` button always has — the glyph is
+  // what the sidebar draws with, the toolbar row is where the (already
+  // truncated) label is the only place its full name is one hover away.
+  const bool as_label = b.glyph == ButtonGlyph::Label || b.action.kind == ButtonActionKind::RunAction;
+  const float w = as_label
                       ? ImGui::CalcTextSize(b.label.c_str()).x + 2.0f * style.FramePadding.x
                       : size;
   const float gap = first ? 0.0f : style.ItemSpacing.x;
@@ -498,7 +503,7 @@ bool bar_button(const ToolbarButton& b, float size, float& avail, bool& first) {
   first = false;
 
   bool clicked = false;
-  if (b.glyph == ButtonGlyph::Label) {
+  if (as_label) {
     clicked = ImGui::Button(b.label.c_str(), ImVec2(w, size));
   } else {
     const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -527,7 +532,7 @@ bool bar_button(const ToolbarButton& b, float size, float& avail, bool& first) {
 // like the avatar-mode button beside it: none of these route into an engine,
 // and the row has to occupy its height from the first frame or the window
 // would change size the moment loading ended.
-void button_bar(AvatarUiState& state, bool loading, float width) {
+void button_bar(AvatarUiState& state, bool loading, float width, AvatarUiResult& out) {
   const ImGuiStyle& style = ImGui::GetStyle();
   const float size = ImGui::GetFrameHeight();
   float avail = width - 2.0f * style.WindowPadding.x;
@@ -569,6 +574,13 @@ void button_bar(AvatarUiState& state, bool loading, float width) {
         // M4.4: a window that registered itself. Only reachable here in the
         // fallback (no strip), and it does exactly what the strip would do.
         if (b.action.callback) b.action.callback();
+        break;
+      case ButtonActionKind::RunAction:
+        // M33. The panel cannot call VoiceSession::run_action_click() itself
+        // — it does not have a session — so this is reported up through
+        // AvatarUiResult exactly as talk_pressed and reset are, and main.cpp
+        // makes the call.
+        out.run_action = b.action.action;
         break;
     }
   }
@@ -3086,7 +3098,7 @@ AvatarUiResult draw_avatar_ui(AvatarUiState& state, const VoiceSession::Snapshot
   // calls for it "above the status line", and the status row (usage, the
   // avatar-mode button, the chat arrow) is the first thing the panel draws, so
   // above it is the top of the panel.
-  button_bar(state, loading, w);
+  button_bar(state, loading, w, out);
 
   status_bar(state, snap, loading, w, out);
 

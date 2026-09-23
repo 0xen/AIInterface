@@ -64,6 +64,12 @@ struct SidebarResult {
   // Why a click did nothing, for the panel's reserved refusal row. A path
   // button whose folder has gone away since it was registered is the case.
   std::string refusal;
+  // M33. A `run=` button was clicked: the action's name, for the panel to
+  // hand to VoiceSession::run_action_click(). The strip cannot call it
+  // itself — it does not have a session, only whichever surfaces do — so
+  // this is the third thing (with open_settings and refusal) it can only
+  // report.
+  std::string run_action;
 };
 
 class SidebarWindow {

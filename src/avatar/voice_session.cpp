@@ -4371,13 +4371,20 @@ void VoiceSession::note_action_news(const std::vector<std::string>& names) {
 // an invented reason is what the user hears. The unarmed case in particular
 // does not merely refuse — it is the user's own instruction that the model be
 // told to send them to arm it, and the sentence it speaks carries that step.
-void VoiceSession::apply_run(const Command& c) {
+void VoiceSession::apply_run(const Command& c) { run_named_action(c.name); }
+
+// M33. A clicked button and no reply in flight: run_named_action() is the
+// same check and the same refusal apply_run() makes, just called from the
+// frame loop's thread instead of the turn thread. See the header.
+void VoiceSession::run_action_click(const std::string& name) { run_named_action(name); }
+
+void VoiceSession::run_named_action(const std::string& name) {
   Msg say = Msg::Count;
   {
     std::lock_guard<std::mutex> l(mutex_);
     const ActionLevel* found = nullptr;
     for (const ActionLevel& a : actions_)
-      if (a.name == c.name) found = &a;
+      if (a.name == name) found = &a;
     // A name, never a path and never a body: resolved against the set the app
     // built by looking at a directory, and anything else is the model having
     // invented one.
@@ -4387,8 +4394,8 @@ void VoiceSession::apply_run(const Command& c) {
     else if (!found->armed) say = Msg::ScriptNotArmed;
   }
   if (say != Msg::Count) {
-    log("[action] refused run name=" + c.name);
-    announce(app_text(say, c.name));
+    log("[action] refused run name=" + name);
+    announce(app_text(say, name));
     return;
   }
 
@@ -4397,13 +4404,14 @@ void VoiceSession::apply_run(const Command& c) {
   // speech. This lands in `apply_pending()` on the frame loop, which resolves
   // the name to a path against the authoritative store and publishes the
   // dispatch the Python side is waiting on. Fire and forget by design: the
-  // model does not get a return value in the turn that asked.
+  // model does not get a return value in the turn that asked, and a click has
+  // no return value to give either.
   std::string err;
-  if (!AppBus::instance().post(BusLine("script.run").str("name", c.name).done(), &err)) {
-    log("[action] could not post run name=" + c.name + ": " + err);
+  if (!AppBus::instance().post(BusLine("script.run").str("name", name).done(), &err)) {
+    log("[action] could not post run name=" + name + ": " + err);
     return;
   }
-  log("[action] run name=" + c.name);
+  log("[action] run name=" + name);
 }
 
 void VoiceSession::apply_memory(const Command& c) {

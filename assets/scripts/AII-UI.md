@@ -42,6 +42,10 @@ ui.end_frame()
 | `ui.begin_frame(key)` | Start recording this window's next frame; also collects last frame's results |
 | `ui.end_frame()` | Submit the recording; returns how many commands it held |
 
+The user may resize any window you open, and it sticks: `w`/`h` are the
+opening size, not a constraint held to on every frame, so re-opening the same
+key with the same `w`/`h` does not undo their resize.
+
 ### Replacing a window you already opened
 
 Re-running a script whose window is still up is the normal case -- you fixed
@@ -323,7 +327,9 @@ the window is closed or `aii.should_quit()`. An exception inside `draw` is
 caught, reported once with `aii.status(f"{key}: {last line}", False)`, and
 the loop keeps going -- a typo in one frame does not take the window down.
 `run_in_thread(draw)` starts `run` on a daemon thread and returns it, which
-is the usual way to call this from an action.
+is the usual way to call this from an action. A toolbar button that reopens
+a `Panel` for the user is `aii.button(id, label, tip, run="<the script's
+name>")`.
 
 ### `StatusPanel`
 

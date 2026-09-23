@@ -8,6 +8,8 @@ Every milestone that merges adds an entry here in the same commit.
 ## 2026-09-23
 
 ### Added
+- **A toolbar button can run one of the assistant's scripts.** A window or a check it
+  built for you is now one click away, instead of asking for it again each time.
 - **Ring gauges in its windows.** The small windows the assistant opens can now draw real
   progress rings — smooth circles filled clockwise, in one colour or several, with a label
   in the middle and a caption underneath — instead of rings pieced together from text.
@@ -16,12 +18,18 @@ Every milestone that merges adds an entry here in the same commit.
   moment its current step finishes. It can also ask a worker that has already reported
   back a follow-up question, and get an answer that remembers everything that came before.
 
+### Changed
+- **The workers strip opens by itself when a worker starts.** You no longer have to open it
+  yourself to see one appear; pressing the Workers button still closes it.
+
 ### Fixed
 - **Tooltips in its windows only appear when you point at something.** Before, a tooltip
   the assistant added to a window showed all the time, whatever the pointer was over.
 - **A worker coming home no longer loops for minutes.** Reusing a worker's name for a new
   job could leave the little animation for "a worker just finished" playing over and over;
   it now plays once, as it should.
+- **The assistant's windows can be resized now.** Before, they snapped back to the size the
+  script asked for every time it redrew, so a resize never stuck.
 
 ## 2026-09-22
 

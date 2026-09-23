@@ -214,6 +214,14 @@ class VoiceSession {
   // callers this had were the app replacing its own child, and for those the
   // second half was a bug — see `stop_reply_and_mic()`.
   void stop();
+  // M33. A registered `run=` button was clicked: the same door `apply_run`
+  // opens for a `run name=` line, called from the frame loop instead of the
+  // turn thread because the click has no reply to have arrived inside. It
+  // checks the name against the level this session was handed and speaks the
+  // refusal the same way — an unarmed action still says "waiting to be
+  // allowed" aloud, because the user asked for the button and the app owes
+  // them the same answer a spoken `run` would have gotten.
+  void run_action_click(const std::string& name);
   // Reset: throw the conversation away and start a fresh one (user, 19 Sep
   // 2026). **Frame loop only**, and a no-op until the engines are up.
   //
@@ -778,6 +786,12 @@ class VoiceSession {
   // posts one inbound bus line — which `apply_pending()` applies on the frame
   // loop, where the authoritative store lives and the check is made again.
   void apply_run(const Command& c);
+  // M33. The shared body of apply_run() and the public run_action_click():
+  // checks `name` against the level this session was handed, speaks the
+  // refusal if there is one, and otherwise posts the `script.run` bus line.
+  // Split out so a clicked button and a spoken/written `run name=` line are
+  // one code path with one set of refusals, not two that could drift.
+  void run_named_action(const std::string& name);
   // M14. The `remember text=` and `forget id=` verbs. Applied here and now,
   // on the turn thread, because the store is a few kilobytes of file and the
   // write is cheaper than a bus round trip; then the prompt store's digest

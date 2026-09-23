@@ -52,6 +52,11 @@ struct Command {
   std::string label;
   std::string tip;
   std::string path;
+  // M33. The `button` verb's alternative to `path=`: the name of an action to
+  // run on click, instead of a directory to open. Exactly one of `path`/`run`
+  // must be present on a `button` line -- both or neither is refused, because
+  // a button that does not say what it does is not one to add.
+  std::string run;
   // The `setting` verb's fields (M3.14). `key` is a dotted `section.key` of
   // `settings.json` -- the file's own vocabulary rather than a second one, so
   // that the words the model uses are the words the user reads.

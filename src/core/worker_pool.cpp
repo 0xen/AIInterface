@@ -521,7 +521,12 @@ size_t WorkerPool::running() const {
 
 std::vector<Command> parse_commands(const std::string& text, std::vector<std::string>* problems) {
   return parse_commands(text, problems, [](const Command& c) {
-    ButtonRegistry::instance().add_path_button(c.id, c.label, c.tip, c.path, nullptr);
+    // M33. The parser has already refused a line with both or neither; here
+    // it is only ever one or the other.
+    if (!c.run.empty())
+      ButtonRegistry::instance().add_run_button(c.id, c.label, c.tip, c.run, nullptr);
+    else
+      ButtonRegistry::instance().add_path_button(c.id, c.label, c.tip, c.path, nullptr);
   });
 }
 
