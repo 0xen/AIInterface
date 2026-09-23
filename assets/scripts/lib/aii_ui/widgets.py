@@ -11,6 +11,8 @@ its own state (a counter, a history), it probably belongs in `panel.py` or
 a new file instead.
 """
 
+import contextlib
+
 from . import colors
 
 
@@ -57,3 +59,30 @@ def key_value_table(ui, id_, pairs):
         ui.table_next_column()
         ui.text(str(value))
     ui.end_table()
+
+
+@contextlib.contextmanager
+def font_scale(ui, scale):
+    """Draw everything inside the `with` block `scale` times the normal text
+    size (1.0 = normal), e.g. `with font_scale(ui, 3.0): ui.text("漢")`.
+    Nested blocks compound. On a build without `ui.push_font_scale` the block
+    is simply drawn at the normal size."""
+    has = hasattr(ui, "push_font_scale")
+    if has:
+        ui.push_font_scale(scale)
+    try:
+        yield
+    finally:
+        if has:
+            ui.pop_font_scale()
+
+
+def big_text(ui, text, scale=2.0, color=None):
+    """One line of text at `scale` times the normal size, optionally
+    coloured -- a large kanji, a headline number. Falls back to normal size
+    on a build without `ui.push_font_scale`."""
+    with font_scale(ui, scale):
+        if color is not None:
+            ui.text_colored(color, str(text))
+        else:
+            ui.text(str(text))

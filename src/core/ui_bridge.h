@@ -154,6 +154,11 @@ enum class UiOp : std::uint8_t {
   PushStyleColor, PopStyleColor,
   PushItemWidth, PopItemWidth,
   SetNextItemWidth,
+  // f[0] = a multiplier on the font size of what follows (1.0 = normal),
+  // compounding with any scale already pushed. Backed by SetWindowFontScale,
+  // so the glyphs are the atlas's own, magnified: large text is softer than
+  // text baked at that size. PopFontScale undoes the last push.
+  PushFontScale, PopFontScale,
   SetTooltip,  // applies to the item before it, as ImGui's does
   // meta
   SetScrollHereY,

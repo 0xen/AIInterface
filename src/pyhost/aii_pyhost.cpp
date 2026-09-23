@@ -1344,6 +1344,23 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       py::arg("w"), "Set the width of the very next widget only.");
 
   ui.def(
+      "push_font_scale", [](float scale) { ui_push(aii::UiOp::PushFontScale).f[0] = scale; },
+      py::arg("scale"),
+      "Draw the following items with the font scaled by `scale` (1.0 = normal); compounds "
+      "with an outer push. Pair with pop_font_scale().");
+  ui.def(
+      "pop_font_scale", [] { ui_push(aii::UiOp::PopFontScale); }, "End a push_font_scale().");
+  ui.def(
+      "text_scaled",
+      [](const std::string& s, float scale) {
+        ui_push(aii::UiOp::PushFontScale).f[0] = scale;
+        ui_push(aii::UiOp::Text).label = s;
+        ui_push(aii::UiOp::PopFontScale);
+      },
+      py::arg("s"), py::arg("scale"),
+      "One line of text at `scale` times the normal size: push_font_scale, text, pop_font_scale.");
+
+  ui.def(
       "set_tooltip", [](const std::string& s) { ui_push(aii::UiOp::SetTooltip).label = s; },
       py::arg("s"), "A tooltip shown while the item recorded just before this call is hovered.");
   ui.def(

@@ -70,6 +70,27 @@ explicitly.
 | `ui.text_colored(rgba, s)` | Coloured text; `rgba` is 3 or 4 floats, 0..1 sRGB |
 | `ui.bullet_text(s)` | A bulleted line |
 | `ui.label_text(label, value)` | `"label: value"`, ImGui's own layout for it |
+| `ui.text_scaled(s, scale)` | One line of text at `scale` times the normal size -- shorthand for `push_font_scale(scale)`, `text(s)`, `pop_font_scale()` |
+
+**Bigger (or smaller) text.** `ui.push_font_scale(scale)` makes everything
+recorded after it -- text, buttons, input labels, anything -- `scale` times
+the normal size, until the matching `ui.pop_font_scale()`. `scale` is a
+multiplier: `1.0` is normal, `3.0` a large kanji, `0.8` a small footnote.
+Pushes nest and compound (a `2.0` inside a `1.5` is `3.0`), and a child
+region started inside a push inherits it. The scale is clamped to 0.25..8.
+It magnifies the one font the app loads rather than loading a bigger one, so
+very large text is a little soft at the edges; around 2 to 4 times looks
+fine. Anything left pushed at the end of a frame is popped for you. Check
+`hasattr(ui, "push_font_scale")` if the script may run on an older build --
+`aii_ui.widgets.big_text` and `font_scale` (section 2) already do.
+
+```python
+ui.text_scaled("漢", 4.0)               # one big character
+ui.push_font_scale(2.0)
+ui.text_colored((1, 0.6, 0.2), "かんじ")  # any widget, scaled
+ui.pop_font_scale()
+ui.text("back to normal")
+```
 
 ### Layout
 
@@ -131,6 +152,7 @@ explicitly.
 | `ui.push_id(s)` / `ui.pop_id()` | Disambiguate two widgets with the same label |
 | `ui.push_style_color(idx, rgba)` / `ui.pop_style_color(count=1)` | `idx` is one of `ui.COL_*` |
 | `ui.push_item_width(w)` / `ui.pop_item_width()` / `ui.set_next_item_width(w)` | |
+| `ui.push_font_scale(scale)` / `ui.pop_font_scale()` | Scale the text size of what follows; `1.0` is normal. See "Bigger (or smaller) text" under Text |
 | `ui.set_scroll_here_y(center=0.5)` | Scroll the enclosing child/window to here |
 | `ui.COL_TEXT`, `ui.COL_BUTTON`, ... | The `ImGuiCol_*` values, as ints, for `push_style_color` |
 
@@ -366,7 +388,11 @@ changes and apply it -- see section 3. `open()`/`close()`/`run()`/
 Free functions, `ui` first, for the pieces used inside `StatusPanel` and
 reusable anywhere else: `label_value(ui, label, value, color=None)`,
 `badge(ui, text, color)`, `status_line(ui, label, state)`, `log_view(ui, id,
-lines, h=150.0)`, `key_value_table(ui, id, pairs)`.
+lines, h=150.0)`, `key_value_table(ui, id, pairs)`,
+`big_text(ui, text, scale=2.0, color=None)` (one line of larger text), and
+`font_scale(ui, scale)`, a `with` block that scales everything drawn inside
+it (`with font_scale(ui, 3.0): ui.text("漢")`). Both draw at the normal size
+on a build without `ui.push_font_scale` instead of raising.
 
 ## 3. The state-file hand-off
 

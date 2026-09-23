@@ -13,6 +13,7 @@
 #include <windowsx.h>
 
 #include "imgui.h"
+#include "imgui_internal.h"  // ImGuiWindow, for PushFontScale's per-window restore
 #include "imnodes.h"
 
 #include <algorithm>
@@ -331,6 +332,25 @@ void replay(ScriptWindow::Impl& s, std::vector<std::string>& id_stack,
   int table_open = 0;
   int style_color_depth = 0;
   int item_width_depth = 0;
+  // PushFontScale: each entry is the window the push was applied to and the
+  // FontWindowScale it had before, so a pop restores exactly that window --
+  // even when the script pushed inside a child and popped after end_child().
+  // ImGui keeps FontWindowScale on the window across frames, so anything
+  // still pushed at the end of the frame is restored here too, or the next
+  // frame would start already scaled.
+  struct FontScaleEntry {
+    ImGuiWindow* window;
+    float prev;
+  };
+  std::vector<FontScaleEntry> font_scale_stack;
+  const auto pop_font_scale = [&] {
+    const FontScaleEntry e = font_scale_stack.back();
+    font_scale_stack.pop_back();
+    if (e.window == ImGui::GetCurrentWindow())
+      ImGui::SetWindowFontScale(e.prev);  // also refreshes the current font size
+    else
+      e.window->FontWindowScale = e.prev;  // not current: nothing cached to refresh
+  };
   bool columns_active = false;
   // M30: node-editor state. `editor_open` caps at 1 (a second BeginNodeEditor
   // while one is open is ignored, per the header comment); `attr_open` is
@@ -853,6 +873,22 @@ void replay(ScriptWindow::Impl& s, std::vector<std::string>& id_stack,
         }
         break;
       case UiOp::SetNextItemWidth: ImGui::SetNextItemWidth(cmd.f[0]); break;
+      case UiOp::PushFontScale: {
+        // Relative to the window's current scale, which a child region
+        // already inherits from its parents, so nested pushes compound.
+        // Clamped: a zero or NaN would trip ImGui's assert in Debug and
+        // divide by zero in Release; past 8x the atlas glyphs are mush.
+        float scale = cmd.f[0];
+        if (!(scale > 0.0f)) scale = 1.0f;
+        scale = std::clamp(scale, 0.25f, 8.0f);
+        ImGuiWindow* w = ImGui::GetCurrentWindow();
+        font_scale_stack.push_back({w, w->FontWindowScale});
+        ImGui::SetWindowFontScale(std::clamp(w->FontWindowScale * scale, 0.25f, 8.0f));
+        break;
+      }
+      case UiOp::PopFontScale:
+        if (!font_scale_stack.empty()) pop_font_scale();
+        break;
       // Only while the item before it is hovered, as ImGui's own idiom has it;
       // before this it showed on every frame whatever the pointer was over.
       case UiOp::SetTooltip:
@@ -999,6 +1035,7 @@ void replay(ScriptWindow::Impl& s, std::vector<std::string>& id_stack,
   if (editor_open) close_editor();  // attribute -> title bar -> node -> editor
   if (style_color_depth > 0) ImGui::PopStyleColor(style_color_depth);
   while (item_width_depth-- > 0) ImGui::PopItemWidth();
+  while (!font_scale_stack.empty()) pop_font_scale();
   while (!id_stack.empty()) {
     id_stack.pop_back();
     ImGui::PopID();
