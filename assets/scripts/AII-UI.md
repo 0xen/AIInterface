@@ -304,6 +304,50 @@ until your next recording. This is also why a dragged slider does not snap
 back between recordings: the window keeps your last-submitted value as an
 override until you record a newer one.
 
+**A value widget can echo your own old value back.** `combo`, `list_box`,
+`slider_*`, `checkbox` and the other value widgets return the value the
+window *last rendered*, and the window renders a recording you submitted one
+or more passes ago. So just after you switch to a new value, the widget can
+still return the old one. That is an echo of your own earlier frame, not
+something the user did. The user's edit is only held until your next submit
+replaces it. If the value decides what you draw and you treat every
+difference as a user choice, the echo switches you back. The next pass then
+reads the newer value and switches you forward again, and the two states
+alternate forever. A slow pass makes it worse, for example rebuilding a
+node graph on the switch, because the window falls further behind. This hit
+a study dashboard whose Levels `combo` chose which grammar graph to build:
+picking the second level range made the graph bounce between the two.
+
+The fix is to keep the widget and ignore the echo. After you switch, wait
+until the widget returns the new value, which shows the window has drawn a
+frame carrying it. Until then, a returned value you recorded yourself before
+the switch is stale and must be ignored. Any other value is still a real
+pick:
+
+```python
+sent, pending = {scope}, False       # values recorded since the widget settled
+
+def picked(shown):
+    global scope, sent, pending
+    if pending:
+        if shown == scope:           # the window caught up
+            pending, sent = False, {scope}
+            return scope
+        if shown in sent:            # an echo of one of our older frames
+            return scope
+    if shown != scope:               # a real change
+        sent |= {scope, shown}
+        pending = True
+    return shown
+
+scope = picked(ui.combo("Levels##scope", scope, names))
+```
+
+A widget whose value you only store and show, like a slider setting a
+number, does not need this. The echo matters only when the value decides
+what you draw or rebuild. Do not switch to `radio_button` to get around it:
+on current builds it never reports a click, so a radio button does nothing.
+
 **Never call `aii.poll()` or `aii.wait()` from the thread that draws a
 panel.** A panel's inputs are the window's own widget results and whatever
 a state file says (section 3) -- not the event bus. See `AII-MODULE.md` and
@@ -332,9 +376,10 @@ raw `aii.ui` only for something none of this covers.
 | `colors.py` | `ORANGE`, `RED`, `GREEN`, `GREY`, `WHITE`, `BLUE`, `YELLOW`; `for_state(state)` |
 | `panel.py` | `class Panel` -- the run loop every window in this package uses |
 | `status.py` | `class StatusPanel` -- a titled window with a status line, fields, a progress bar and a log |
-| `widgets.py` | free functions: `label_value`, `badge`, `status_line`, `log_view`, `key_value_table` |
+| `widgets.py` | free functions: `label_value`, `badge`, `status_line`, `log_view`, `key_value_table`, `big_text`, `font_scale` |
 | `state.py` | `watch_json(path)`, `path_for(name)`, `STATE_DIR` -- the state-file hand-off (section 3) |
 | `graph.py` | `class NodeGraph` -- a node-graph model and renderer over `aii.ui`'s node editor calls (section 1, "Node graphs") |
+| `gauges.py` | free functions: `ring` (a ring gauge, native `ui.progress_ring` where the build has it, a glyph fallback otherwise), `timeline` and `x_of` (date bars along one axis), `shade`, `text_width`, `native` |
 
 ### `Panel`
 
@@ -358,6 +403,15 @@ the loop keeps going -- a typo in one frame does not take the window down.
 is the usual way to call this from an action. A toolbar button that reopens
 a `Panel` for the user is `aii.button(id, label, tip, run="<the script's
 name>")`.
+
+**Every `Panel` window gets a footer automatically**, and so does every
+`StatusPanel` and anything else built on `Panel`: a dim line at the bottom
+saying when that window was opened ("Opened Wed 23 Sep 03:52:10"). It shows
+whether the window on screen is the fresh copy after a fix or one left from
+before. Scripts do nothing for it. Your `draw(ui)` content is drawn in a
+region above the footer and scrolls there. If `draw` raises part-way, the
+panel closes whatever it had opened (tabs, tables, node editors) before
+drawing the footer.
 
 ### `StatusPanel`
 

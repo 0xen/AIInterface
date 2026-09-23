@@ -20,6 +20,10 @@ Every milestone that merges adds an entry here in the same commit.
   moment its current step finishes. It can also ask a worker that has already reported
   back a follow-up question, and get an answer that remembers everything that came before.
 
+- **Its windows say when they were opened.** A dim line at the bottom of each of the
+  assistant's windows gives the date and time it was opened, so after a fix you can tell
+  at a glance whether you are looking at the new copy or an old one.
+
 ### Changed
 - **The workers strip opens by itself when a worker starts.** You no longer have to open it
   yourself to see one appear; pressing the Workers button still closes it.
