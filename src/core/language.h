@@ -57,7 +57,7 @@ std::string language_spec(LanguageSelection sel);
 // What the recogniser's `language` option should be set to.
 //
 // `auto` is not the safe default it looks like. Measured 16 Sep 2026
-// (docs/research-multilingual-input.md): Nemotron's `auto` is inertial and
+// (on a code-switched test corpus): Nemotron's `auto` is inertial and
 // asymmetric — it switches English to Japanese and never back, and a short
 // Japanese insert inside an English sentence is *silently deleted*, byte-for-
 // byte identical to the same audio with the Japanese cut out. Pinning removes

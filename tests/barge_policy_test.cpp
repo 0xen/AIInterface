@@ -1,5 +1,5 @@
 // M18.1. When the user talking over the reply becomes a barge-in, checked
-// against synthetic frame sequences drawn from `docs/bargein-measurements.md`
+// against synthetic frame sequences drawn from the barge-in measurements
 // rather than by sitting in a room with the speakers on.
 //
 // Every level and every duration in this file is a number out of that

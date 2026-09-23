@@ -184,8 +184,8 @@ Every milestone that merges adds an entry here in the same commit.
 ### Investigated
 - **The recogniser's own language tag** was recovered by patching sherpa-onnx and measured. It
   is useless: it never appears on the utterances where it would matter. The pinned build stays.
-- **Talking over the assistant on this machine:** the app's own voice never reaches the webcam
-  microphone through the headset, so echo cancellation is probably unnecessary here.
+- **Talking over the assistant through a headset:** the app's own voice never reaches the webcam
+  microphone through the headset, so echo cancellation is probably unnecessary there.
   Loudspeakers were not measured.
 
 ### Known

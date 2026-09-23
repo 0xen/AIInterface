@@ -1,6 +1,6 @@
 <!-- aii-prompt-format: 3 -->
 <!--
-M3.15. The note the outgoing session writes to the one that replaces it.
+The note the outgoing session writes to the one that replaces it.
 
 **This file is not a system prompt, and it is deliberately not in graph.json.**
 It sits here because the prompt store seeds this whole tree into
@@ -13,7 +13,7 @@ Edit the prose below freely. Two things about it are load-bearing rather than
 stylistic, and the app cannot enforce either:
 
   * It must ask for **direction, not wording**. Replaying the conversation is
-    M3.6 and was declined as too costly; what carries over here is what we are
+    considered and rejected as too costly; what carries over here is what we are
     doing, what is settled and what is outstanding.
   * It must not ask for anything spoken. This reply is never read out and
     never reaches the transcript — the user has already been told, in the

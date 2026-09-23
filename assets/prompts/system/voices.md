@@ -13,7 +13,7 @@
   wording, edit the block built in `src/avatar/main.cpp`.
 
   Do not name the slot's token anywhere in this comment. Only the first
-  occurrence in the file is substituted, and although M16.2 now strips every
+  occurrence in the file is substituted, and although the composer now strips every
   comment out of a body before it is composed — so this whole block costs no
   tokens and Claude never reads a word of it — a second occurrence outside the
   comment would still survive into Claude's context as a literal, which is

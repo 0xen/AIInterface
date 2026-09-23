@@ -1,10 +1,9 @@
-# Design: script windows (M28)
+# Design: script windows
 
-**Ask (22 Sep 2026):** the assistant should be able to make ImGui windows from Python to
-show things to the user — a panel beside the chat saying `X Project Name` / `Status:
-Building` in orange, going red on failure and green on success — and, more generally,
-"a dynamic way for the AI to make any ImGui window and display information on it", with
-"a shared set of imgui window helper python files that it can use and expand upon itself".
+The assistant can make ImGui windows from Python to show things to the user — a panel
+beside the chat with a status line and a colour that changes with state, or any other
+window a script chooses to draw — and a shared helper package it can use and extend
+itself rather than reinventing per script.
 
 ## 1. Shape
 
@@ -116,7 +115,7 @@ the end of a frame it closes whatever is still open, and it ignores an End with 
 open. ImGui asserts are compiled out in Release, so an unbalanced stack would otherwise be
 a silent crash. CollapsingHeader and TreeNode work exactly as in ImGui: the Python call
 returns the latched open state and the script decides what to record after it. The app
-replays what was recorded — with one exception, found on the first run: a TreeNode or
+replays what was recorded — with one exception: a TreeNode or
 BeginTabItem that ImGui reports *closed* skips the recorded commands up to its matching
 TreePop/EndTabItem. The script's answer is one recording old, so on the frame the user
 switches tabs the old tab's children would otherwise be drawn below the bar as loose
@@ -190,7 +189,7 @@ Small, plain, documented at the top of each file.
 | `__init__.py` | re-exports the below; docstring is the one-paragraph orientation |
 | `colors.py` | named rgba tuples: `ORANGE`, `RED`, `GREEN`, `GREY`, `WHITE`, `BLUE`, `YELLOW`; `for_state(state)` mapping `pending/building/running → ORANGE`, `failed/error → RED`, `done/ok/complete → GREEN`, else GREY |
 | `panel.py` | `class Panel(key, title, w=360, h=240, hz=10)`: `open()`, `close()`, `run(draw)` loops `begin_frame`/`draw(ui)`/`end_frame` at `hz` until the window is closed or `aii.should_quit()`; `run_in_thread(draw)`; `frame(draw)` for one recording |
-| `status.py` | `class StatusPanel(title, key=None)`: `set(field, text, color=None)`, `set_status(text)` (colour from `for_state`), `progress(fraction, text="")`, `log(line)` (bounded scrollback), `run()`. **This is the user's example**: `StatusPanel("X Project Name").set_status("Building")` |
+| `status.py` | `class StatusPanel(title, key=None)`: `set(field, text, color=None)`, `set_status(text)` (colour from `for_state`), `progress(fraction, text="")`, `log(line)` (bounded scrollback), `run()`. Typical use: `StatusPanel("Build").set_status("Building")`, going orange while pending, red on failure, green on success |
 | `widgets.py` | free functions over a `ui` module: `label_value(label, value, color=None)`, `badge(text, color)`, `status_line(label, state)`, `log_view(id, lines, h)`, `key_value_table(id, pairs)` |
 | `state.py` | `watch_json(path)`: returns the parsed dict when the file's mtime changed, else `None`. The **hand-off from the assistant to a running panel**: the assistant writes `%APPDATA%\AIInterface\scripts\state\<key>.json` with its Write tool, the panel's draw reads it |
 
@@ -198,8 +197,8 @@ An action that shows a panel is long-running (its `run()` loops); it runs on its
 thread and *never polls the bus* (the bootstrap's rule), so its inputs are the state file
 and the window's own widget results.
 
-Shipped examples (`assets/scripts/examples/`, not scanned): `ui_status_panel.py` (the user's
-example, driven by `state\build.json`) and `ui_widgets_demo.py` (one of everything, so a
+Shipped examples (`assets/scripts/examples/`, not scanned): `ui_status_panel.py` (a status
+panel driven by `state\build.json`) and `ui_widgets_demo.py` (one of everything, so a
 person can see what the toolkit draws). Shipped action (`assets/scripts/actions/`):
 `show_status_panel.py` — opens a status panel whose name and state come from
 `scripts\state\status.json`, the shape the assistant is told to write.
@@ -212,7 +211,7 @@ person can see what the toolkit draws). Shipped action (`assets/scripts/actions/
   `scripts\lib\aii_ui\` and should prefer extending it over inlining.
 - `assets/prompts/system/scripts.md`: one paragraph — scripts can open windows, read
   `AII-UI.md` first. Prose only; no format bump.
-- `CHANGELOG.md` entry; `docs/MILESTONES.md` M28 entry with what was measured.
+- `CHANGELOG.md` entry.
 
 ## 7. Tests
 
@@ -223,28 +222,25 @@ increments; `clicked` latches across two `set_results` and clears on `take_resul
 `closing` and `remove` forgets it; reopen after user close clears the flag;
 `ui_compose_id` composition.
 
-## 8. What is not in this milestone
+## 8. What is not built
 
 - Images and fonts. No `Image` op; the ImGui contexts share one font.
 - Docking a script window *inside* the widget. Every extra surface in this app is its own
-  OS window (spike-two-windows.md), and this follows that.
+  OS window, and this follows that.
 - Menus and popups (`BeginMenuBar`, `BeginPopup`, modal). Popups need per-frame open
   state the replay model handles badly; add when a script needs one.
 - A window per *script*: a window is per key, and any thread may record for any key.
 
-## 9. Node graphs (M30)
+## 9. Node graphs
 
-**Ask (22 Sep 2026):** the user, having watched M28 land, asked for the obvious next surface
-— boxes with pins the assistant can wire together and the user can drag around, inside the
-same script windows. imnodes is what the user remembered from Prosper, where it was already
-vendored for exactly this.
+Beyond plain widgets, a script window can also draw a node graph: boxes with pins the
+assistant can wire together and the user can drag around, inside the same script windows.
 
-**The library.** `third_party/imnodes` is a new submodule, `Nelarius/imnodes`, pinned to
-`master` at commit `eb36902c` — a header-and-one-`.cpp` ImGui extension, the same shape as
-ImGui itself, so it builds straight into `aii_core` and `aii_pyhost.dll` alongside it rather
-than needing its own CMake target. Vendored as a submodule rather than copied in, for the
-same reason `third_party/Renderer` is: a pin that moves in its own commit, not silently on
-someone's clone.
+**The library.** `third_party/imnodes` is a submodule (`Nelarius/imnodes`), pinned the
+same way `third_party/Renderer` is — a pin that moves in its own commit, not silently on
+someone's clone. It is a header-and-one-`.cpp` ImGui extension, the same shape as ImGui
+itself, so it builds straight into `aii_core` and `aii_pyhost.dll` alongside it rather
+than needing its own CMake target.
 
 **One `ImNodesContext` per script window.** imnodes keeps its own global-ish state (pin and
 link geometry, drag state, the minimap) the way ImGui itself does, and it binds to *the

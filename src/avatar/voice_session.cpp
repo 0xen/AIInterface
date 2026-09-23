@@ -205,7 +205,7 @@ constexpr float kWakePrerollSec = 0.5f;
 // ever *trimmed back* to the onset run's start before it is used. The extra
 // 0.2 s is slack for a frame that arrives long, not audio anyone intends to
 // decode -- everything earlier than the run is the reply's own leakage and the
-// room, and `docs/bargein-measurements.md` shows the recogniser inventing
+// room, and the barge-in measurements showed the recogniser inventing
 // words ("Sorry") out of exactly that. So it is bounded here and trimmed
 // there, and the two together are why a barge cannot put the app's own voice
 // into the user's next turn.
@@ -1640,7 +1640,7 @@ void VoiceSession::tick_wake() {
 // The microphone stays up while the app speaks, and what it hears decides one
 // thing only: whether to stop speaking. It is never decoded, never shown and
 // never sent. `core/barge_policy.h` owns the arithmetic and
-// `docs/bargein-measurements.md` owns the numbers in it; what is here is the
+// the measurements behind its numbers are summarised there; what is here is the
 // wiring, and the wiring has three jobs the policy cannot do for itself.
 //
 //  1. **Be a third owner of one capture device, without breaking the other
@@ -1854,7 +1854,7 @@ void VoiceSession::tick_barge() {
 
   // M18.3. The onset run, and only the onset run, goes to the fresh stream:
   // everything before it is the reply's own leakage and the room, and
-  // `docs/bargein-measurements.md` has the recogniser decoding "Sorry" out of
+  // the barge-in measurements had the recogniser decoding "Sorry" out of
   // exactly that. `end_barge_watch(true)` hands the device over without
   // stopping it, so the audio between this frame and begin_listening()'s first
   // one is not lost.

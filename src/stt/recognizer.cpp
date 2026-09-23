@@ -17,7 +17,7 @@ namespace {
 // ---------------------------------------------------------------------------
 //
 // The failure this exists for, measured twice (16 Sep 2026 and 18 Sep 2026,
-// 192 code-switched utterances, `docs/research-multilingual-input.md`): with
+// 192 code-switched utterances): with
 // the language left at "auto", a short Japanese word inside an English
 // sentence is **silently deleted** — 78% of the time when any English precedes
 // it — and the output is byte-identical to the same sentence with the Japanese

@@ -315,8 +315,8 @@ difference as a user choice, the echo switches you back. The next pass then
 reads the newer value and switches you forward again, and the two states
 alternate forever. A slow pass makes it worse, for example rebuilding a
 node graph on the switch, because the window falls further behind. This hit
-a study dashboard whose Levels `combo` chose which grammar graph to build:
-picking the second level range made the graph bounce between the two.
+a dashboard whose `combo` chose which graph to build: picking
+the second option made the graph bounce between the two.
 
 The fix is to keep the widget and ignore the echo. After you switch, wait
 until the widget returns the new value, which shows the window has drawn a

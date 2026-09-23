@@ -11,7 +11,7 @@
 // file is not wired into it yet; M18.2 does that, after M17.
 //
 // ---------------------------------------------------------------------------
-// Every number below was measured, and the document is `docs/bargein-measurements.md`
+// Every number below was measured; the measurements are summarised in this header
 // ---------------------------------------------------------------------------
 //
 // One desktop, 21 Sep 2026, five runs through a probe program (the barge-in
@@ -40,7 +40,7 @@
 //    most load-bearing guard in the file and it is also the cheapest.
 //
 //  * **The learned leakage margin is a clamp, never a threshold.** The plan in
-//    `docs/bargein-investigation.md` proposed learning the mic level during the
+//    the barge-in investigation proposed learning the mic level during the
 //    first second of a reply and requiring a multiple of it. On the machine that
 //    was measured that learned value is about **0.0002** — twenty times *below*
 //    `kGateAbsMin`. Used as a threshold it would contribute nothing but
@@ -333,7 +333,7 @@ class BargePolicy {
 //
 // The trim is the whole of the decision and the reason it is here rather than
 // inline at the call site is that it is the one part of the pre-roll anybody
-// can be wrong about. `docs/bargein-measurements.md` has the recogniser
+// can be wrong about. The measurements had the recogniser
 // emitting the word "Sorry" from a silence control with nobody in the room, so
 // audio from before the user started talking is not neutral padding -- it is a
 // source of words the user did not say, arriving at the front of their turn

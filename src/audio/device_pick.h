@@ -4,7 +4,7 @@
 //
 // The app opens the default capture and playback devices, and on the machine
 // it is developed on the default capture device is a headset microphone that
-// returns digital silence (`docs/bargein-measurements.md`, run 1). Tuning
+// returns digital silence (found while tuning barge-in). Tuning
 // barge-in means capturing through the webcam microphone that actually hears
 // the room, and measuring the loudspeaker configuration means *playing* through
 // the loudspeakers while the default output stays the headset -- neither of

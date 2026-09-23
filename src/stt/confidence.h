@@ -3,8 +3,8 @@
 //
 // sherpa-onnx's C result struct carries text, tokens and timestamps and nothing
 // else, but `SherpaOnnxOnlineRecognizerResult::json` also carries `ys_probs` --
-// the per-token log-probability the greedy decoder came out with. The research
-// document (`docs/research-multilingual-input.md`) measured clean English at
+// the per-token log-probability the greedy decoder came out with. A
+// corpus of code-switched utterances measured clean English at
 // -0.001 to -0.15 per token, and a Japanese insert garbled into invented
 // English ("Fall to D") at a run of three tokens averaging about -0.55, and
 // proposed -0.5 on that worst run as the flag for "this is not the word it
