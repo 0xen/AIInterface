@@ -33,6 +33,9 @@ Every milestone that merges adds an entry here in the same commit.
   yourself to see one appear; pressing the Workers button still closes it.
 
 ### Fixed
+- **Setup fetches the Japanese voice again.** On some PCs the setup script's answer to the
+  voice's licence question arrived garbled, so the voice was never downloaded and the build
+  stopped on a missing file.
 - **A window with tabs no longer trips an error message from the UI toolkit.** A tab that was
   not selected made the window skip the rest of what the script had drawn, which left the
   tab bar and the footer region unclosed; the skip now stops at the next tab.

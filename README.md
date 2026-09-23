@@ -38,8 +38,8 @@ tabs, node graphs and more, each a one-line call. These two are the shipped exam
 To build it you also need, each installed the normal way from its own site:
 
 - [Git](https://git-scm.com/download/win)
-- [Visual Studio 2022](https://visualstudio.microsoft.com/) with the "Desktop development
-  with C++" workload
+- [Visual Studio](https://visualstudio.microsoft.com/) 2022 or 2026 with the "Desktop
+  development with C++" workload
 - [CMake](https://cmake.org/download/) 3.24 or newer
 - [Vulkan SDK](https://vulkan.lunarg.com/sdk/home), for its shader compiler
 
@@ -80,6 +80,10 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
+That first line names Visual Studio 2022. With Visual Studio 2026 the generator is
+`"Visual Studio 18 2026"` instead, and it needs a CMake new enough to list it under
+`cmake --help`. The setup script ends by printing the line for the Visual Studio it found.
+
 **4. Run.**
 
 ```
@@ -96,6 +100,9 @@ pipeline and speaks the reply:
 ```
 build\bin\Release\avatar.exe --say "Hello, what can you do?"
 ```
+
+The microphone still opens on startup during this check, so anything said in the room
+is heard and answered too.
 
 ## Using it
 
@@ -123,6 +130,19 @@ Settings such as the model, the languages, the voice and whether it listens on s
 live in the settings panel inside the app, and in `%APPDATA%\AIInterface\settings.json`.
 The assistant's own instructions are text files under `%APPDATA%\AIInterface\prompts\`
 and can be read and edited there.
+
+## If something goes wrong
+
+- **The build stops on a missing file** such as `voicevox_core.h`: a component did not
+  download. Run `powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -CheckOnly`
+  to see what is missing, then run the script again without `-CheckOnly` to fetch it.
+- **The app closes on its own**: its log is `%APPDATA%\AIInterface\logs\avatar.log`. If it
+  crashed, the last entry starts `[diag] crashed:` and lists where, function by function.
+  A crash inside a graphics driver (`nvwgf2umx.dll` for NVIDIA, `amdxc64.dll` for AMD)
+  is worth reporting along with that entry and your graphics card.
+- **Updating over an older install**: prompts and scripts you had edited under
+  `%APPDATA%\AIInterface` are kept, and the new shipped version is placed beside each one
+  with `.new` on the end, for you to compare and merge.
 
 ## Going further
 

@@ -44,6 +44,7 @@ $VvDir = Join-Path $Root 'spikes\tts_cpu\voicevox'
 $VvCore = Join-Path $VvDir 'voicevox_core'
 
 $script:Problems = @()
+$script:Generator = 'Visual Studio 17 2022'  # replaced when a newer Visual Studio is found
 
 function Step([string]$Title) {
   Write-Host ''
@@ -86,12 +87,16 @@ function Check-Prerequisites {
   if (Test-Path $vswhere) {
     $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property displayName 2>$null
     if ([string]::IsNullOrWhiteSpace($vs)) {
-      Bad 'Visual Studio 2022 with the C++ workload ("Desktop development with C++") was not found.'
+      Bad 'Visual Studio 2022 or newer with the C++ workload ("Desktop development with C++") was not found.'
     } else {
       Ok "$vs (C++ toolchain present)"
+      # The CMake generator is named after the Visual Studio major version, and
+      # asking for one that is not installed fails the configure outright.
+      $version = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion 2>$null
+      if ("$version".StartsWith('18.')) { $script:Generator = 'Visual Studio 18 2026' }
     }
   } else {
-    Bad 'Visual Studio Installer not found. Install VS 2022 with "Desktop development with C++".'
+    Bad 'Visual Studio Installer not found. Install Visual Studio 2022 or newer with "Desktop development with C++".'
   }
 
   # dxc from the Vulkan SDK compiles the shaders. The engine hard-fails without it,
@@ -300,7 +305,9 @@ function Install-Voicevox {
   Info 'running the VOICEVOX downloader (it prints its licence terms; a panic from its pager is harmless)'
   Push-Location $VvDir
   try {
-    'y' | & $downloader -o .\voicevox_core --models-pattern 0.vvm --exclude additional-libraries
+    # The 'y' goes through cmd: a PowerShell pipe can prefix it with a UTF-8 BOM, which
+    # the downloader rejects as an invalid answer and then downloads nothing.
+    cmd /c "echo y| `"$downloader`" -o .\voicevox_core --models-pattern 0.vvm --exclude additional-libraries"
   } catch {
     Warn "the VOICEVOX downloader reported: $($_.Exception.Message)"
   } finally {
@@ -401,7 +408,7 @@ if ($script:Problems.Count -gt 0) {
 }
 
 Write-Host 'Ready. Next:' -ForegroundColor Green
-Write-Host '    cmake -S . -B build -G "Visual Studio 17 2022" -A x64'
+Write-Host "    cmake -S . -B build -G `"$script:Generator`" -A x64"
 Write-Host '    cmake --build build --config Release'
 Write-Host '    build\bin\Release\avatar.exe'
 exit 0

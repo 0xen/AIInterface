@@ -12,7 +12,7 @@ Contents: [Building](#building) · [The window](#the-window) · [Interrupting](#
 
 ## Building
 
-Requires Visual Studio 2022 with the C++ workload, CMake 3.24+, the Vulkan SDK (its `dxc`
+Requires Visual Studio 2022 or 2026 with the C++ workload, CMake 3.24+, the Vulkan SDK (its `dxc`
 compiles the shaders), and the Claude Code CLI signed in to your subscription. The engine
 comes with the repository as a submodule; the engines and models — about 1.27 GB, none of
 it in git — are fetched by the setup script.
@@ -24,6 +24,9 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
+
+On Visual Studio 2026 the generator is `"Visual Studio 18 2026"`, which only a CMake new
+enough to list it under `cmake --help` knows; the setup script prints the right one.
 
 If you already cloned without `--recurse-submodules`, run `git submodule update --init
 --recursive` first — `third_party\Renderer` is otherwise empty and the configure step
@@ -242,7 +245,7 @@ the Open JTalk dictionary and the voice model, and shows the licence terms (answ
 mkdir spikes\tts_cpu\voicevox
 curl.exe -L -o spikes\tts_cpu\voicevox\download-windows-x64.exe https://github.com/VOICEVOX/voicevox_core/releases/download/0.17.0/download-windows-x64.exe
 cd spikes\tts_cpu\voicevox
-echo y | .\download-windows-x64.exe -o .\voicevox_core --models-pattern 0.vvm --exclude additional-libraries
+cmd /c "echo y| .\download-windows-x64.exe -o .\voicevox_core --models-pattern 0.vvm --exclude additional-libraries"
 cd ..\..\..
 mkdir models\voicevox
 move spikes\tts_cpu\voicevox\voicevox_core\dict models\voicevox\dict
@@ -257,8 +260,11 @@ Expected after the move:
 - `models\voicevox\models\vvms\0.vvm` (四国めたん, ずんだもん, 春日部つむぎ, 雨晴はう)
 
 `--exclude additional-libraries` skips the DirectML and CUDA builds; the app runs VOICEVOX on
-CPU. The downloader's pager may print a panic when stdout is not a terminal; the download still
-completes. More voices: drop further `.vvm` files from
+CPU. The `y` goes through `cmd` on purpose: piped from PowerShell it can arrive with a
+byte-order mark in front, and the downloader rejects it with `received invalid input:
+"\u{feff}y"` and downloads nothing. The downloader's pager may also print a panic when
+stdout is not a terminal; that one is harmless, so if nothing arrived, look for the
+invalid-input line below it instead. More voices: drop further `.vvm` files from
 https://github.com/VOICEVOX/voicevox_vvm/releases into `models\voicevox\models\vvms\`
 (the app currently loads only `0.vvm`).
 
@@ -294,8 +300,8 @@ After each reply a timing line and a usage line (five-hour and seven-day subscri
 Scripted modes, useful for testing without a microphone:
 
 ```
-build\Release\voiceloop.exe --say "Hello, what can you do?"      # one turn through Claude, spoken
-build\Release\voiceloop.exe --speak "Text to speak. 日本語も。"    # synthesis only, no Claude
+build\bin\Release\voiceloop.exe --say "Hello, what can you do?"      # one turn through Claude, spoken
+build\bin\Release\voiceloop.exe --speak "Text to speak. 日本語も。"    # synthesis only, no Claude
 ```
 
 ## Configuration (environment variables)
