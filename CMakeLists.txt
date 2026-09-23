@@ -618,5 +618,17 @@ if(AII_BUILD_AVATAR)
       target_compile_options(avatar_children_test PRIVATE /utf-8 /W4 /wd4996)
     endif()
     aii_copy_runtime_dlls(avatar_children_test)
+
+    # ---- node_context_test: each script window's own imnodes settings --------
+    # imgui + imnodes only, no window and no GPU. The second node-graph window
+    # opened used to keep imnodes' default (middle-button) panning because its
+    # settings were written into the first window's context.
+    add_executable(node_context_test tests/node_context_test.cpp
+                                     src/avatar/node_context.cpp)
+    target_include_directories(node_context_test PRIVATE src/avatar)
+    target_link_libraries(node_context_test PRIVATE imgui imnodes)
+    if(MSVC)
+      target_compile_options(node_context_test PRIVATE /utf-8 /W4)
+    endif()
   endif()
 endif()

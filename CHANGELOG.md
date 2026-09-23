@@ -25,6 +25,13 @@ Every milestone that merges adds an entry here in the same commit.
   yourself to see one appear; pressing the Workers button still closes it.
 
 ### Fixed
+- **A node map keeps its layout when you reopen its window.** Closing a window and opening
+  it again could pile every box of its map on top of each other until you changed the
+  view, because the new window was handed the old one's positions. A reopened window
+  now starts clean, and the boxes appear where the map puts them.
+- **Right-drag moves every node map, not just the first one opened.** With two of the
+  assistant's diagram windows open, the second only moved with the middle button, and
+  Alt-drag did nothing there. Now each window gets its own settings.
 - **Tooltips in its windows only appear when you point at something.** Before, a tooltip
   the assistant added to a window showed all the time, whatever the pointer was over.
 - **A worker coming home no longer loops for minutes.** Reusing a worker's name for a new

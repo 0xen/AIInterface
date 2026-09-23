@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "imgui_layer.h"
+#include "node_context.h"
 #include "tool_window_core.h"
 #include "win_text_input.h"
 
@@ -1058,26 +1059,14 @@ std::unique_ptr<ScriptWindow> ScriptWindow::create(platform::IPlatformBackend& b
   // own is bound to a window -- create it now, with this window's ImGui
   // context current (ToolWindowCore::open() leaves it so; see ImGuiLayer's
   // own comment on why SetCurrentContext is called explicitly).
-  ImNodes::SetImGuiContext(ImGui::GetCurrentContext());
-  s.node_ctx = ImNodes::CreateContext();
-  // How a graph is navigated (M30.1, from the first user report: "I cannot
-  // navigate it"). imnodes pans with one configurable button, middle by
-  // default; the user reached for the right button, so that is the pan
-  // button here, and Alt+left drag pans as well for a mouse without one.
-  // Ctrl+click on a pin detaches its link (imnodes then reports it destroyed,
-  // which reaches the script as `link_destroyed`). These pointers are into
-  // this window's own ImGuiIO, which lives as long as its context does.
+  // Its navigation settings (right-drag pans) are set in create_node_context,
+  // which also makes it current first -- node_context.h says why that matters.
+  s.node_ctx = create_node_context(ImGui::GetCurrentContext());
   // Disabled text is ImGui's dim grey, tuned for the widget's dark panel; on
   // an imnodes node body (mid grey) it is almost invisible, which a user read
   // as the Japanese font being missing. Lifted here, for this window's own
   // context only, so `text_disabled` reads as a hint rather than vanishing.
   ImGui::GetStyle().Colors[ImGuiCol_TextDisabled] = ui_color(0.82f, 0.82f, 0.84f, 1.0f);
-  {
-    ImNodesIO& nio = ImNodes::GetIO();
-    nio.AltMouseButton = ImGuiMouseButton_Right;
-    nio.EmulateThreeButtonMouse.Modifier = &ImGui::GetIO().KeyAlt;
-    nio.LinkDetachWithModifierClick.Modifier = &ImGui::GetIO().KeyCtrl;
-  }
 
   s.input = std::make_unique<ScriptInput>();
   if (!s.subclass(scriptProc, s.input.get())) {

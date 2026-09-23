@@ -33,6 +33,33 @@ gets a new method here, not a second implementation inline in a panel.
 """
 
 
+# Node, pin and link ids, for every NodeGraph in this app session.
+#
+# They come from one counter, kept on the `aii` module so it survives this
+# module being reloaded. That makes them unique for the whole session, not
+# just within one graph. The window reports each node's position under its
+# id, and a window closed and reopened used to be handed the old window's
+# reports. A new graph that reused the same ids then took every node as
+# already placed and piled them all at the origin (user, 23 Sep).
+#
+# They also stay below 2**24. The app carries a link's two pin ids as 32-bit
+# floats (`ui.link` -> UiCommand::f), and a float holds a whole number exactly
+# only up to 16,777,216. Past that, the pin ids are rounded, the link names
+# pins that do not exist, and imnodes draws no line. An earlier fix of the
+# pile-up gave each graph a block of ids up to two billion, and every edge
+# vanished (user, 23 Sep).
+ID_LIMIT = 1 << 24
+
+
+def _session_id():
+    import aii
+    n = getattr(aii, "_nodegraph_next_id", 1)
+    if n >= ID_LIMIT:
+        n = 1   # after 16.7 million ids: start again rather than lose links
+    aii._nodegraph_next_id = n + 1
+    return n
+
+
 class NodeGraph:
     """A node graph: nodes with labelled input/output pins, links between
     pins, drawn and edited through `aii.ui`'s node editor calls.
@@ -56,12 +83,19 @@ class NodeGraph:
         self.spacing = float(spacing)
         self._size = {}       # id -> (w, h) as last drawn
         self._settle = set()  # node ids still owed a spacing pass
-        self._next_id = 1
+        # None: ids come from the session counter above. A test may pin
+        # them by setting an int here; it must stay below ID_LIMIT.
+        self._next_id = None
         self._nodes = {}      # id -> node dict
         self._node_order = []
         self._links = {}      # id -> (start_attr, end_attr)
         self._pin_of = {}     # (node_id, "in"/"out", label) -> attr id
-        self._placed = set()  # node ids whose pos has been sent once
+        # Node ids the app has confirmed it drew at their position. A position
+        # is re-sent every frame until then (see draw()), because a recording
+        # is not a render: a node inside a closed tab or collapsed header is
+        # recorded but never drawn, and its SetNodePos never reaches imnodes.
+        self._placed = set()
+        self._force = {}      # id -> (x, y) forced move not yet confirmed drawn
         self._selected = []
         self.on_link = None       # (start, end) -> bool | None
         self.on_unlink = None     # (link_id) -> None
@@ -70,7 +104,12 @@ class NodeGraph:
     # ---- building -----------------------------------------------------
 
     def _alloc(self):
+        if self._next_id is None:
+            return _session_id()
         i = self._next_id
+        if i >= ID_LIMIT:
+            raise ValueError("node graph id %d is not below %d: the app carries link ends as "
+                             "32-bit floats, so the link would be lost" % (i, ID_LIMIT))
         self._next_id += 1
         return i
 
@@ -120,6 +159,7 @@ class NodeGraph:
             return
         self._node_order.remove(node_id)
         self._placed.discard(node_id)
+        self._force.pop(node_id, None)
         attrs = {p["id"] for p in node["inputs"]} | {p["id"] for p in node["outputs"]}
         for key in [k for k in self._pin_of if k[0] == node_id]:
             del self._pin_of[key]
@@ -189,14 +229,22 @@ class NodeGraph:
 
         for node_id in self._node_order:
             node = self._nodes[node_id]
+            # Positions are sent every frame until the app reports the node
+            # drawn there (the loop after end_node_editor). Marking them sent
+            # on the first *recording* lost them whenever that recording was
+            # not drawn -- the study dashboard records its map tab while the
+            # tab is closed, so a freshly opened window stacked every node
+            # at the origin and then saved those zeros as the model's
+            # positions (user, 23 Sep). Re-sending is free: the app applies a
+            # non-forced SetNodePos once per node id and ignores the rest.
             if node_id in moves:
-                x, y = moves[node_id]
-                node["pos"] = (x, y)
+                node["pos"] = moves[node_id]
+                self._force[node_id] = moves[node_id]
+            if node_id in self._force:
+                x, y = self._force[node_id]
                 ui.set_node_pos(node_id, x, y, force=True)
-                self._placed.add(node_id)
             elif node["pos"] is not None and node_id not in self._placed:
                 ui.set_node_pos(node_id, node["pos"][0], node["pos"][1])
-                self._placed.add(node_id)
 
             pushed_color = node["color"] is not None
             if pushed_color:
@@ -236,9 +284,20 @@ class NodeGraph:
 
         # Grid-space positions as of this render, for next frame's model and
         # for to_dict() -- store them now while ui.node_pos still has them.
+        # A node the app has not drawn yet has no reported position, and its
+        # model position is kept; one still owed a position is not read back
+        # until the report shows it landed, so an origin never overwrites it.
         for node_id in self._node_order:
             pos = ui.node_pos(node_id)
             if pos is not None:
+                target = self._force.get(node_id)
+                if target is not None:
+                    if abs(pos[0] - target[0]) > 0.5 or abs(pos[1] - target[1]) > 0.5:
+                        continue   # the forced move has not been drawn yet
+                    del self._force[node_id]
+                # Reported means drawn, and SetNodePos came before BeginNode
+                # in that same frame, so this is where the node landed.
+                self._placed.add(node_id)
                 self._nodes[node_id]["pos"] = pos
             size = ui.node_size(node_id)
             if size is not None:

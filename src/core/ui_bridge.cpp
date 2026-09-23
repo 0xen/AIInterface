@@ -54,6 +54,15 @@ bool UiBridge::open(const UiWindowSpec& spec, std::string* error) {
     return false;
   }
   Entry& entry = entries_[spec.key];
+  // A key whose window was closed comes back as a new window, and results
+  // belong to the window that produced them. A user-closed entry stays until
+  // its key is opened again, so without this a reopened window's new run
+  // read the old window's node_pos/node_size for every node id it reused,
+  // took its nodes as already placed, and never sent their positions: every
+  // node drew at the origin (user, 23 Sep). A key that is still open (a
+  // re-title, or a takeover of the same live window) keeps its results, so a
+  // latched click is not lost.
+  if (entry.user_closed || entry.script_closed) entry.results.clear();
   entry.spec = spec;
   entry.user_closed = false;
   entry.script_closed = false;

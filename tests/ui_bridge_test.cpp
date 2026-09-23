@@ -60,7 +60,39 @@ void test_open_refuses_a_seventh_window() {
   check(bridge.keys().size() == aii::kUiWindowsMax, "the refused window was not added");
 }
 
-void test_reopen_updates_spec_and_clears_flags_but_keeps_results() {
+void test_reopen_after_user_close_drops_the_old_windows_results() {
+  // The user closed the window; the entry stays until the key is opened
+  // again. A reopen is a new window, and the old one's node reports must not
+  // reach the new run: it reused the same node ids and took every node as
+  // already placed, so all of them drew at the origin (user, 23 Sep).
+  aii::UiBridge bridge;
+  check(bridge.open(spec("k", "t")), "first open succeeds");
+  aii::UiResult pos;
+  pos.id = "node_pos:100001";
+  pos.f[0] = 250.0f;
+  pos.f[1] = 40.0f;
+  bridge.set_results("k", {pos});
+  bridge.mark_closed("k");
+  check(bridge.open(spec("k", "t")), "reopening a user-closed key succeeds");
+  check(bridge.take_results("k").empty(), "the old window's node_pos is gone after the reopen");
+}
+
+void test_reopen_of_a_live_window_keeps_results() {
+  // A re-title (or a takeover of the same live window) is not a new window:
+  // a click the script has not read yet survives it.
+  aii::UiBridge bridge;
+  check(bridge.open(spec("k", "first title")), "first open succeeds");
+  aii::UiResult r;
+  r.id = "btn";
+  r.clicked = true;
+  bridge.set_results("k", {r});
+  check(bridge.open(spec("k", "second title")), "re-opening the live key succeeds");
+  const auto results = bridge.take_results("k");
+  check(results.size() == 1 && results[0].id == "btn" && results[0].clicked,
+        "a live window's latched click survives a re-open");
+}
+
+void test_reopen_updates_spec_and_clears_flags() {
   aii::UiBridge bridge;
   check(bridge.open(spec("k", "first title")), "first open succeeds");
 
@@ -86,9 +118,8 @@ void test_reopen_updates_spec_and_clears_flags_but_keeps_results() {
   }
   check(found_new_title, "reopening updates the spec (title)");
 
-  const auto results = bridge.take_results("k");
-  check(results.size() == 1 && results[0].id == "btn" && results[0].clicked,
-        "reopening keeps results that were there before");
+  check(bridge.take_results("k").empty(),
+        "reopening a closed key drops the closed window's results");
 }
 
 void test_submit_unknown_key_fails() {
@@ -288,7 +319,9 @@ int main() {
   test_key_validation();
   test_open_refuses_malformed_key();
   test_open_refuses_a_seventh_window();
-  test_reopen_updates_spec_and_clears_flags_but_keeps_results();
+  test_reopen_updates_spec_and_clears_flags();
+  test_reopen_after_user_close_drops_the_old_windows_results();
+  test_reopen_of_a_live_window_keeps_results();
   test_submit_unknown_key_fails();
   test_submit_drops_commands_past_the_cap();
   test_submit_truncates_strings_at_a_utf8_boundary();

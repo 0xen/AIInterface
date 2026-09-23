@@ -186,6 +186,12 @@ allocates all of its ids from one counter for exactly this reason; write
 against that rather than calling these ops directly unless you need
 something it does not do.
 
+Keep every id below 16,777,216. The app carries a link's two pin ids as 32-bit
+floats, which hold whole numbers exactly only that far. Above it the pin ids
+round to other numbers and the link is silently not drawn. `NodeGraph` stays
+inside the limit and never reuses an id in one app session, so a reopened
+window's old position reports cannot match a new graph's nodes.
+
 **Positions are applied once.** `set_node_pos` only moves a node the first
 time you call it for that id in that editor; call it again with `force=True`
 if you really mean to override wherever the node is now. Otherwise a script
