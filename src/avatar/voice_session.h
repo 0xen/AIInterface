@@ -471,6 +471,11 @@ class VoiceSession {
     double seconds = 0.0;  // until due; for a running one, how long it has run
   };
   std::vector<PendingItem> pending_items() const;
+  // M32. The bus's own door onto `WorkerPool::tell()` -- see there for the
+  // three shapes a note can land in. `false` with `--no-voice` or before a
+  // pool exists, the same as every other worker-addressing call in this
+  // file. Any thread.
+  bool tell_worker(const std::string& name, const std::string& text, std::string* error);
   // M2b.4. What the app says about schedules it is dropping at shutdown.
   // **One line for all of them**, not one per schedule: this runs during
   // teardown, where the frame loop has already stopped and nothing can be

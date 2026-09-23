@@ -118,6 +118,7 @@ WorkerPool::~WorkerPool() {
 
 bool WorkerPool::spawn(const std::string& name, const std::string& cwd, const std::string& task,
                        std::string* error, const std::string& model_override) {
+  std::unique_ptr<Worker> stale;
   {
     std::lock_guard<std::mutex> l(mutex_);
     for (const auto& w : workers_) {
@@ -126,7 +127,29 @@ bool WorkerPool::spawn(const std::string& name, const std::string& cwd, const st
         return false;
       }
     }
+    // A finished row under this name is taken out before the new one is
+    // added, rather than left beside it. Its report was already delivered
+    // (that is what made it Done or Failed), so nothing is lost -- and two
+    // snapshot rows sharing one name is exactly what fed AvatarController's
+    // old name-keyed map two different states for one entry and made it flip
+    // every frame (23 Sep 2026: a finished `bunpro` and a fresh one looping
+    // `child_merge` for minutes). `Snapshot::id` is the other half of that
+    // fix; this half is what stops the ambiguity ever reaching a snapshot.
+    auto it = std::find_if(workers_.begin(), workers_.end(), [&](const std::unique_ptr<Worker>& w) {
+      return w->name == name && (w->state == State::Done || w->state == State::Failed);
+    });
+    if (it != workers_.end()) {
+      stale = std::move(*it);
+      workers_.erase(it);
+    }
   }
+  // Joined outside the lock, matching stop()'s reasoning: a finished worker's
+  // thread is on its way out through the same mutex, so joining it while
+  // holding that mutex is a wait for a thread waiting on the lock. In
+  // practice this join is instant -- update() already joins finished threads
+  // every frame -- but the ordering has to hold regardless.
+  if (stale && stale->thread.joinable()) stale->thread.join();
+
   auto w = std::make_unique<Worker>();
   w->name = name;
   w->task = task;
@@ -167,88 +190,166 @@ bool WorkerPool::spawn(const std::string& name, const std::string& cwd, const st
   });
   {
     std::lock_guard<std::mutex> l(mutex_);
+    w->id = next_id_++;
     workers_.push_back(std::move(w));
   }
-  raw->thread = std::thread([this, raw] { run(raw); });
+  raw->thread = std::thread([this, raw] { run(raw, false); });
   return true;
 }
 
-void WorkerPool::run(Worker* w) {
-  {
-    std::lock_guard<std::mutex> l(mutex_);
-    w->state = State::Working;
-    w->activity = "thinking";
-  }
-  ChatResult r = w->client->turn(w->task, nullptr, &w->cancel);
-  State state;
-  // `shown` keeps the worker's name, `spoken` never does -- see ReportFn.
-  std::string shown, spoken;
-  {
-    std::lock_guard<std::mutex> l(mutex_);
-    // **`r.ok` is asked first** (M17.3, review finding 23). The cancel flag used
-    // to be, and it is the wrong question to ask first because it is raised
-    // from another thread at a moment nobody chose: a worker that finished its
-    // turn properly a millisecond before somebody pressed Stop was filed as
-    // Paused, and the panel showed an agent still holding work it had already
-    // handed back. A turn that came back `ok` came back; whatever happened
-    // afterwards happened to nothing.
-    //
-    // `r.stop_reason == "interrupted"` is not used for this, although turn()
-    // sets it on exactly this path: it is set *because* the cancel flag was
-    // seen, so it is the same question in different words and it answers 23 no
-    // better. What it does is arrive with the same meaning after a kill, which
-    // is why the order below is also what makes M17.3's escalation report as
-    // stopped: `kill()` finishes the turn with `ok == false`, the cancel flag
-    // is up because this app only ever kills what it has already interrupted,
-    // and so a worker the app ended reads as Paused and not as Failed.
-    if (r.ok) {
-      w->state = State::Done;
-      w->activity = "done";
-      w->result = trim(r.text);
-      const std::string what = first_sentence(r.text);
-      shown = app_text(Msg::WorkerFinishedShown, w->name, what);
-      spoken = app_text(Msg::FinishedSpoken, what);
-    } else if (w->cancel) {
-      w->state = State::Paused;
-      w->activity = "paused";
-      shown = app_text(Msg::WorkerPausedShown, w->name);
-      spoken = app_text(Msg::PausedSpoken);
-    } else {
-      w->state = State::Failed;
-      w->activity = "failed";
-      w->result = r.error;
-      std::string why = first_sentence(r.error, 120);
-      // A CLI error can end in a dangling "reason:" with nothing after it
-      // ("claude process exited: "), which is read out as a colon-shaped
-      // pause. Spoken, a full stop is the honest punctuation.
-      //
-      // M26.1 fixed the source of that particular string -- the client now
-      // puts the child's exit code and its last words after the colon, or says
-      // it has neither -- so this no longer has a known caller. It stays
-      // because it is three lines and because the error text here comes from
-      // another program: a `result` event carrying "Error:" and nothing else
-      // would land in exactly the same shape.
-      while (!why.empty() && (why.back() == ':' || why.back() == ' ')) why.pop_back();
-      if (!why.empty() && why.back() != '.' && why.back() != '!' && why.back() != '?') why += '.';
-      shown = app_text(Msg::WorkerFailedShown, w->name, why);
-      // The failure path loses the name too, not only the success path. A rule
-      // with an exception is one the user hears break; the panel row and the
-      // transcript still say which worker failed, and a failure is acted on by
-      // looking, not by listening.
-      //
-      // And it loses the CLI's wording as well. `why` above is the raw reason
-      // and it stays where it can be read: on the transcript line above, in
-      // `w->result` and so in every `snapshot()` the panel is drawn from, and
-      // in the log. What is *said* is one of the Fail* sentences, mapped from
-      // the whole error rather than from the clipped first sentence -- the
-      // clip is for the eye, and classifying what is left of a truncated
-      // string would lose the very word that identifies it.
-      spoken = app_text(Msg::TaskFailedSpoken, app_text(failure_reason(r.error)));
+namespace {
+// M32. "note waiting: <first 60 chars>" -- clipped on a UTF-8 boundary the
+// same way first_sentence() clips a reply, because a note is exactly as
+// likely to be Japanese as anything else typed at this app.
+std::string clip_note(const std::string& text, size_t limit) {
+  const std::string t = trim(text);
+  return t.size() <= limit ? t : clip_utf8(t, limit) + "...";
+}
+}  // namespace
+
+void WorkerPool::run(Worker* w, bool resume) {
+  if (!resume) {
+    {
+      std::lock_guard<std::mutex> l(mutex_);
+      w->state = State::Working;
+      w->activity = "thinking";
     }
-    state = w->state;
+    ChatResult r = w->client->turn(w->task, nullptr, &w->cancel);
+    State state;
+    // `shown` keeps the worker's name, `spoken` never does -- see ReportFn.
+    std::string shown, spoken;
+    {
+      std::lock_guard<std::mutex> l(mutex_);
+      // **`r.ok` is asked first** (M17.3, review finding 23). The cancel flag used
+      // to be, and it is the wrong question to ask first because it is raised
+      // from another thread at a moment nobody chose: a worker that finished its
+      // turn properly a millisecond before somebody pressed Stop was filed as
+      // Paused, and the panel showed an agent still holding work it had already
+      // handed back. A turn that came back `ok` came back; whatever happened
+      // afterwards happened to nothing.
+      //
+      // `r.stop_reason == "interrupted"` is not used for this, although turn()
+      // sets it on exactly this path: it is set *because* the cancel flag was
+      // seen, so it is the same question in different words and it answers 23 no
+      // better. What it does is arrive with the same meaning after a kill, which
+      // is why the order below is also what makes M17.3's escalation report as
+      // stopped: `kill()` finishes the turn with `ok == false`, the cancel flag
+      // is up because this app only ever kills what it has already interrupted,
+      // and so a worker the app ended reads as Paused and not as Failed.
+      if (r.ok) {
+        w->state = State::Done;
+        w->activity = "done";
+        w->result = trim(r.text);
+        const std::string what = first_sentence(r.text);
+        shown = app_text(Msg::WorkerFinishedShown, w->name, what);
+        spoken = app_text(Msg::FinishedSpoken, what);
+      } else if (w->cancel) {
+        w->state = State::Paused;
+        w->activity = "paused";
+        shown = app_text(Msg::WorkerPausedShown, w->name);
+        spoken = app_text(Msg::PausedSpoken);
+      } else {
+        w->state = State::Failed;
+        w->activity = "failed";
+        w->result = r.error;
+        std::string why = first_sentence(r.error, 120);
+        // A CLI error can end in a dangling "reason:" with nothing after it
+        // ("claude process exited: "), which is read out as a colon-shaped
+        // pause. Spoken, a full stop is the honest punctuation.
+        //
+        // M26.1 fixed the source of that particular string -- the client now
+        // puts the child's exit code and its last words after the colon, or says
+        // it has neither -- so this no longer has a known caller. It stays
+        // because it is three lines and because the error text here comes from
+        // another program: a `result` event carrying "Error:" and nothing else
+        // would land in exactly the same shape.
+        while (!why.empty() && (why.back() == ':' || why.back() == ' ')) why.pop_back();
+        if (!why.empty() && why.back() != '.' && why.back() != '!' && why.back() != '?') why += '.';
+        shown = app_text(Msg::WorkerFailedShown, w->name, why);
+        // The failure path loses the name too, not only the success path. A rule
+        // with an exception is one the user hears break; the panel row and the
+        // transcript still say which worker failed, and a failure is acted on by
+        // looking, not by listening.
+        //
+        // And it loses the CLI's wording as well. `why` above is the raw reason
+        // and it stays where it can be read: on the transcript line above, in
+        // `w->result` and so in every `snapshot()` the panel is drawn from, and
+        // in the log. What is *said* is one of the Fail* sentences, mapped from
+        // the whole error rather than from the clipped first sentence -- the
+        // clip is for the eye, and classifying what is left of a truncated
+        // string would lose the very word that identifies it.
+        spoken = app_text(Msg::TaskFailedSpoken, app_text(failure_reason(r.error)));
+      }
+      state = w->state;
+    }
+    if (report_) report_(w->name, state, shown, spoken);
+    // Paused or Failed ends the thread here, exactly as before M32: a note
+    // waiting behind a turn that did not come back Done has nothing left to
+    // reach. Only success falls through to the notes loop below.
+    if (state != State::Done) {
+      w->finished = true;
+      return;
+    }
   }
-  w->finished = true;
-  if (report_) report_(w->name, state, shown, spoken);
+
+  // M32. The notes loop: a worker that came back Done, or was just restarted
+  // on a note (`resume == true`), works through whatever is waiting for it
+  // one turn at a time. `State` stays Done between notes -- the panel and the
+  // model both see a finished worker the whole time, which is honest: nothing
+  // is running until a note actually starts a turn.
+  for (;;) {
+    std::string note;
+    {
+      std::lock_guard<std::mutex> l(mutex_);
+      if (w->notes.empty()) {
+        w->finished = true;
+        return;
+      }
+      note = w->notes.front();
+      w->notes.pop_front();
+      w->state = State::Working;
+      w->activity = "reading a note";
+    }
+    ChatResult r = w->client->turn(note, nullptr, &w->cancel);
+    State state;
+    std::string shown, spoken;
+    {
+      std::lock_guard<std::mutex> l(mutex_);
+      if (r.ok) {
+        w->state = State::Done;
+        w->activity = "done";
+        w->result = trim(r.text);
+        const std::string what = first_sentence(r.text);
+        shown = app_text(Msg::WorkerRepliedShown, w->name, what);
+        spoken = app_text(Msg::RepliedSpoken, what);
+      } else if (w->cancel) {
+        // A cancelled note-turn follows the same Paused branch a cancelled
+        // task does: it is the same fact in the same words, and the panel and
+        // the transcript already know how to show it.
+        w->state = State::Paused;
+        w->activity = "paused";
+        shown = app_text(Msg::WorkerPausedShown, w->name);
+        spoken = app_text(Msg::PausedSpoken);
+      } else {
+        w->state = State::Failed;
+        w->activity = "failed";
+        w->result = r.error;
+        std::string why = first_sentence(r.error, 120);
+        while (!why.empty() && (why.back() == ':' || why.back() == ' ')) why.pop_back();
+        if (!why.empty() && why.back() != '.' && why.back() != '!' && why.back() != '?') why += '.';
+        shown = app_text(Msg::WorkerFailedShown, w->name, why);
+        spoken = app_text(Msg::TaskFailedSpoken, app_text(failure_reason(r.error)));
+      }
+      state = w->state;
+    }
+    if (report_) report_(w->name, state, shown, spoken);
+    if (state != State::Done) {
+      w->finished = true;
+      return;
+    }
+    // Done: loop back and see whether another note arrived while this one was
+    // being answered.
+  }
 }
 
 bool WorkerPool::pause(const std::string& name) {
@@ -304,6 +405,62 @@ bool WorkerPool::stop(const std::string& name) {
   return true;
 }
 
+bool WorkerPool::tell(const std::string& name, const std::string& text, std::string* error) {
+  // Only the Done branch falls out of the lock block below: the Working /
+  // Starting case and the not-found case both return from inside it.
+  Worker* target = nullptr;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    Worker* live = nullptr;
+    Worker* done = nullptr;
+    Worker* other = nullptr;
+    for (auto& w : workers_) {
+      if (w->name != name) continue;
+      if (w->state == State::Working || w->state == State::Starting) { live = w.get(); break; }
+      if (w->state == State::Done) done = w.get();
+      else other = w.get();
+    }
+    if (live) {
+      live->notes.push_back(text);
+      live->activity = "note waiting: " + clip_note(text, 60);
+      return true;
+    }
+    if (!done) {
+      if (error) {
+        if (other && other->state == State::Paused)
+          *error = name + " is paused; a paused worker cannot take a note";
+        else if (other && other->state == State::Failed)
+          *error = name + " failed";
+        else
+          *error = "no worker named " + name;
+      }
+      return false;
+    }
+    // `done`: the child is still alive with the conversation in it, so the
+    // note becomes its next turn. The note is queued here, under the lock,
+    // before anything below can look at it -- run(w, /*resume=*/true) starts
+    // straight into the notes loop and expects to find it.
+    done->notes.push_back(text);
+    target = done;
+  }
+
+  // The old thread already returned (that is what made the worker Done);
+  // update() joins finished threads every frame, but this may run on the
+  // same frame that state was set, so the join is done here too rather than
+  // assumed to have already happened.
+  if (target->thread.joinable()) target->thread.join();
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    target->cancel = false;
+    target->killed = false;
+    target->finished = false;
+    target->state = State::Working;
+    target->activity = "reading a note";
+  }
+  target->thread = std::thread([this, target] { run(target, /*resume=*/true); });
+  return true;
+}
+
 void WorkerPool::update() {
   // M17.3. The escalation for pause() and pause_all(), which return straight
   // away and so have nowhere of their own to put a wait. Collected under the
@@ -329,6 +486,7 @@ std::vector<WorkerPool::Snapshot> WorkerPool::snapshot() const {
   out.reserve(workers_.size());
   for (const auto& w : workers_) {
     Snapshot s;
+    s.id = w->id;
     s.name = w->name;
     s.task = w->task;
     s.cwd = w->cwd;
@@ -337,6 +495,7 @@ std::vector<WorkerPool::Snapshot> WorkerPool::snapshot() const {
     s.result = w->result;
     s.tool_calls = w->tool_calls;
     s.recent.assign(w->recent.begin(), w->recent.end());
+    s.notes_waiting = static_cast<int>(w->notes.size());
     out.push_back(std::move(s));
   }
   return out;

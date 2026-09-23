@@ -3755,6 +3755,14 @@ std::vector<VoiceSession::PendingItem> VoiceSession::pending_items() const {
   return out;
 }
 
+bool VoiceSession::tell_worker(const std::string& name, const std::string& text, std::string* error) {
+  if (!workers_) {
+    if (error) *error = "no voice in this run";
+    return false;
+  }
+  return workers_->tell(name, text, error);
+}
+
 void VoiceSession::apply_cancels() {
   std::vector<std::uint64_t> ids;
   {
@@ -4244,6 +4252,18 @@ void VoiceSession::run_commands(const std::string& reply_text) {
         announce(app_text(Msg::NoWorker, c.name));
       } else {
         log("[worker] stopped " + c.name + " in " + std::to_string(took) + " s");
+      }
+    } else if (c.verb == "tell") {
+      // M32. Passes a note to a running or just-finished worker without a new
+      // `spawn` -- see `WorkerPool::tell()` for the three shapes it can land
+      // in. Unlike `spawn`'s failure, a refused note is spoken: the user
+      // asked the model to pass something on, out loud, and a silent failure
+      // here is a note they think arrived and did not.
+      if (!workers_->tell(c.name, c.text, &err)) {
+        log("[worker] refused note for " + c.name + ": " + err);
+        announce(app_text(Msg::NoteRefused, c.name, err));
+      } else {
+        log("[worker] note for " + c.name);
       }
     }
   }

@@ -312,6 +312,31 @@ int main() {
     check(problems.empty(), "a well-formed block reports no problems at all");
   }
 
+  // ---- 6. tell (M32) -----------------------------------------------------
+  //
+  // `tell` addresses a worker by name, so it is on the name guard's list
+  // already (`!c.name.empty()`) without a change there. `text=` is the same
+  // end-of-line field `remember` already uses, so a note is prose exactly the
+  // way a memory is.
+  std::printf("tell (M32)\n");
+  {
+    const std::vector<Command> c =
+        parse(block("tell name=counter text=stop after the current file"));
+    check(c.size() == 1 && c[0].verb == "tell" && c[0].name == "counter" &&
+              c[0].text == "stop after the current file",
+          "tell keeps its name and its note, which runs to the end of the line");
+  }
+  {
+    const std::vector<Command> c = parse(block("tell text=no name here"));
+    check(c.empty(), "a tell with no name never reaches the dispatcher, like spawn/pause/stop");
+  }
+  {
+    const std::vector<Command> c =
+        parse(block("tell name=counter text=also mind the tests, and the docs"));
+    check(c.size() == 1 && c[0].text == "also mind the tests, and the docs",
+          "text= keeps commas and everything else after them");
+  }
+
   std::printf("%s\n", failures == 0 ? "all ok" : "FAILURES");
   return failures == 0 ? 0 : 1;
 }

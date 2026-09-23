@@ -130,6 +130,15 @@ enum class UiOp : std::uint8_t {
   Combo, ListBox, ColorEdit,
   // display
   ProgressBar, PlotLines, PlotHistogram,
+  // A ring gauge drawn on the window's draw list. f[0]=radius, f[1]=thickness,
+  // label = centre text ('\n' separates lines), text = caption beneath,
+  // i[0] bit 0 = values[0..3] is a track colour (else the frame colour).
+  // values = [track rgba x4] [segment count n] [fraction, r, g, b, a] x n
+  // [line rgba] x per centre line; an r below 0 means "the default" (the
+  // plot-histogram colour for a segment, the text colour for a line). It
+  // advances the cursor by its own size, so rings sit side by side with
+  // SameLine and a SetTooltip after one applies to the whole ring.
+  ProgressRing,
   // containers; each Begin* has an End*, and a frame that forgets one is
   // closed for it by the app so ImGui never sees an unbalanced stack
   CollapsingHeader,  // result `b` = open; the app draws the children only when open

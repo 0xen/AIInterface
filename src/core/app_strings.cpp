@@ -36,6 +36,10 @@ const AppLine kLines[] = {
     {"{} finished. {}", "{} が終わったよ。{}"},
     {"Finished. {}", "終わったよ。{}"},
 
+    // --- A note answered ----------------------------------------------------
+    {"{} replied: {}", "{} から返事があったよ: {}"},
+    {"It came back on your note: {}", "メモの返事が来たよ: {}"},
+
     // --- Why a worker failed ----------------------------------------------
     //
     // Every one of these is a whole sentence that follows another whole
@@ -62,6 +66,7 @@ const AppLine kLines[] = {
     {"Could not start worker {}. {}", "{} を始められなかったよ。{}"},
     {"No running worker called {}.", "{} っていう動いてる作業はないよ。"},
     {"No worker called {}.", "{} っていう作業はないよ。"},
+    {"I couldn't pass that to {}: {}", "{} にそれを伝えられなかったよ: {}"},
 
     // --- A schedule the app would not accept ------------------------------
     {"Sorry, I have not set that up. I need to know how long, and under a day.",

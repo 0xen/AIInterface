@@ -22,6 +22,7 @@
 //     said nothing.
 //
 // Usage: avatar_children_test [<avatar dir>]  (default: the repo's assets copy)
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -39,9 +40,16 @@ void check(bool ok, const std::string& what) {
   if (!ok) ++failures;
 }
 
-// One worker in one state, as the pool would report it.
-aii::WorkerPool::Snapshot worker(const char* name, aii::WorkerPool::State state) {
+// One worker in one state, as the pool would report it. `id` defaults to a
+// fresh one each call (WorkerPool::spawn() never hands out 0 or a repeat),
+// which is what every case before M32 wants -- one worker, one identity. The
+// M32 case below passes explicit ids because it is testing what happens when
+// two rows share a name but not an id.
+aii::WorkerPool::Snapshot worker(const char* name, aii::WorkerPool::State state,
+                                 std::uint64_t id = 0) {
+  static std::uint64_t next_id = 1;
   aii::WorkerPool::Snapshot w;
+  w.id = id != 0 ? id : next_id++;
   w.name = name;
   w.state = state;
   return w;
@@ -133,6 +141,32 @@ int main(int argc, char** argv) {
     check(back.saw("happy"), "and `happy` follows the arrival rather than replacing it");
     check(back.seen.back() != "child_merge" && back.seen.back() != "happy",
           "and both end on their own");
+  }
+
+  // ---- a reused name does not loop the merge clip (M32, 23 Sep 2026) -------
+  //
+  // The bug, reproduced directly: WorkerPool::spawn() lets a name be reused
+  // the moment its earlier holder is Done or Failed, and before M32 it left
+  // the finished row in place until the caller's own `spawn` line went in --
+  // so a snapshot could carry a Done `bunpro` and a Working `bunpro` at once,
+  // for as long as the model took to notice and spawn the next one. Keyed by
+  // name, the two rows fought over one map entry every update() and re-armed
+  // `pending_child_merge_` on every frame -- the clip the user watched loop
+  // for minutes. Keyed by id (M32's fix), they do not: two rows, two keys,
+  // neither overwrites the other's state.
+  {
+    aii::AvatarController ctl;
+    ctl.note_definition(def);
+    Run r{ctl, {}};
+    r.frames(30, {});
+    for (int i = 0; i < 200; ++i) {
+      r.frames(1, {worker("bunpro", aii::WorkerPool::State::Done, 1),
+                   worker("bunpro", aii::WorkerPool::State::Working, 2)});
+    }
+    check(r.count("child_merge") <= 1,
+          "a finished worker and a freshly spawned one sharing a name arm "
+          "child_merge at most once across 200 frames, not once per frame: " +
+              r.trail());
   }
 
   // ---- three at once -------------------------------------------------------

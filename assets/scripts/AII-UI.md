@@ -105,7 +105,8 @@ explicitly.
 | `ui.progress_bar(fraction, w=-1.0, h=0.0, overlay="")` | |
 | `ui.plot_lines(label, values, lo=FLT_MAX, hi=FLT_MAX, w=0.0, h=0.0, overlay="")` | |
 | `ui.plot_histogram(...)` | Same signature |
-| `ui.set_tooltip(s)` | Hovering the previous item shows this |
+| `ui.progress_ring(fraction, radius=32.0, thickness=6.0, color=None, track=None, label="", caption="", label_colors=None)` | A ring gauge filled clockwise from 12 o'clock. `fraction` is 0..1, or a list of `(fraction, rgba)` parts drawn one after another (a ring shaded by stage). `label` is centred inside, `"\n"` between lines, `label_colors` one rgba (or `None`) per line; `caption` sits beneath in the disabled colour. `color` defaults to `COL_PLOT_HISTOGRAM`, `track` to the frame colour. It takes `2*radius` wide (wider if the caption is) and advances the cursor like any widget, so `same_line()` between rings lays a row out, and a `set_tooltip()` after one covers the whole ring. Check `hasattr(ui, "progress_ring")` if the script may run on an older build |
+| `ui.set_tooltip(s)` | Shown while the pointer is over the previous item -- text, button, ring or anything else. Builds before `progress_ring` showed it all the time, hovered or not |
 
 ### Grouping: headers, trees, children, tabs, tables, columns
 

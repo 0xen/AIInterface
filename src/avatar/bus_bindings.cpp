@@ -60,6 +60,8 @@ void BusBindings::install(Context ctx) {
   // can work with the pointer, worked by the same calls the controls make.
   bus.add_family("session", [this](const BusMessage& m, std::string* e) { on_session(m, e); });
   bus.add_family("settings", [this](const BusMessage& m, std::string* e) { on_settings(m, e); });
+  // M32. A note to a worker, without a new spawn.
+  bus.add_family("worker", [this](const BusMessage& m, std::string* e) { on_worker(m, e); });
 }
 
 float BusBindings::lease_from(const BusMessage& m) const {
@@ -768,6 +770,38 @@ void BusBindings::on_settings(const BusMessage& m, std::string* error) {
     return;
   }
 
+  if (error) *error = "unknown verb";
+}
+
+// ------------------------------------------------------------------ worker
+
+// M32. One verb: a note to a worker that is already running or has already
+// finished, without a new `spawn`. `ctx_.session` is null on `--no-voice`,
+// same as `schedule.cancel`'s own session-only lookup, and for the same
+// reason -- there is no worker pool to ask without a session to hold one.
+void BusBindings::on_worker(const BusMessage& m, std::string* error) {
+  AppBus& bus = AppBus::instance();
+  const std::string echo = m.str("echo");
+  if (m.verb == "tell") {
+    if (!ctx_.session) {
+      if (error) *error = "no voice in this run";
+      return;
+    }
+    const std::string name = m.str("name");
+    std::string err;
+    const bool ok = ctx_.session->tell_worker(name, m.str("text"), &err);
+    if (!ok && error) *error = err;
+    // Published rather than only returned, like `schedule.created`/
+    // `schedule.refused`: a script watching the bus, not the one that made
+    // the call, is as likely a reader as the caller itself.
+    bus.publish(BusLine("worker.told")
+                    .str("name", name)
+                    .flag("ok", ok)
+                    .str("reason", err)
+                    .str("echo", echo)
+                    .done());
+    return;
+  }
   if (error) *error = "unknown verb";
 }
 

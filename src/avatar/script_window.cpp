@@ -160,6 +160,84 @@ float to_srgb(float c) {
   return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
 }
 
+// UiOp::ProgressRing. `ui_bridge.h` has the command's layout. A circle of
+// track, then the segments as arcs clockwise from 12 o'clock, the centre
+// lines and a caption, all on the window's draw list; then one Dummy of the
+// whole footprint, so the cursor advances as a widget's would and the ring is
+// "the previous item" for SameLine and SetTooltip. Colours arrive in sRGB and
+// go through ui_color(), the rule every other colour here follows.
+void draw_progress_ring(const UiCommand& cmd) {
+  const float radius = std::max(4.0f, cmd.f[0] > 0.0f ? cmd.f[0] : 32.0f);
+  const float thick = std::clamp(cmd.f[1] > 0.0f ? cmd.f[1] : 6.0f, 1.0f, radius);
+  const std::vector<float>& v = cmd.values;
+  const auto rgba_at = [&](std::size_t i, ImU32 fallback) -> ImU32 {
+    if (i + 3 >= v.size() || v[i] < 0.0f) return fallback;
+    return ImGui::GetColorU32(ui_color(v[i], v[i + 1], v[i + 2], v[i + 3]));
+  };
+
+  // Centre lines, split on '\n'.
+  std::vector<std::string> lines;
+  if (!cmd.label.empty()) {
+    std::size_t start = 0;
+    for (;;) {
+      const std::size_t nl = cmd.label.find('\n', start);
+      lines.push_back(cmd.label.substr(start, nl == std::string::npos ? nl : nl - start));
+      if (nl == std::string::npos) break;
+      start = nl + 1;
+    }
+  }
+
+  const ImGuiStyle& style = ImGui::GetStyle();
+  const float line_h = ImGui::GetTextLineHeight();
+  const ImVec2 caption_size =
+      cmd.text.empty() ? ImVec2(0.0f, 0.0f) : ImGui::CalcTextSize(cmd.text.c_str());
+  const float w = std::max(2.0f * radius, caption_size.x);
+  const float h = 2.0f * radius + (cmd.text.empty() ? 0.0f : style.ItemSpacing.y + line_h);
+  const ImVec2 pos = ImGui::GetCursorScreenPos();
+  const ImVec2 centre(pos.x + w * 0.5f, pos.y + radius);
+  const float mid = radius - thick * 0.5f;  // the stroke's centreline
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+
+  const bool custom_track = (cmd.i[0] & 1) != 0;
+  dl->AddCircle(centre, mid,
+                custom_track ? rgba_at(0, ImGui::GetColorU32(ImGuiCol_FrameBg))
+                             : ImGui::GetColorU32(ImGuiCol_FrameBg),
+                0, thick);
+
+  constexpr float kTau = 6.28318530718f;
+  constexpr float kMinArc = 0.035f;  // a sliver of progress still shows
+  std::size_t at = 5;
+  const int segments = v.size() > 4 ? std::max(0, static_cast<int>(v[4])) : 0;
+  float a0 = -kTau * 0.25f;
+  const float end = a0 + kTau;
+  const ImU32 default_fill = ImGui::GetColorU32(ImGuiCol_PlotHistogram);
+  for (int s = 0; s < segments && at + 4 < v.size(); ++s, at += 5) {
+    const float frac = std::clamp(v[at], 0.0f, 1.0f);
+    if (frac <= 0.0f || a0 >= end) continue;
+    const float a1 = std::min(end, a0 + std::max(frac * kTau, kMinArc));
+    dl->PathArcTo(centre, mid, a0, a1, 0);
+    dl->PathStroke(rgba_at(at + 1, default_fill), ImDrawFlags_None, thick);
+    a0 = a1;
+  }
+  // Line colours follow the segments.
+  const std::size_t line_colours = 5 + 5 * static_cast<std::size_t>(segments);
+
+  const ImU32 text_col = ImGui::GetColorU32(ImGuiCol_Text);
+  float y = centre.y - line_h * static_cast<float>(lines.size()) * 0.5f;
+  for (std::size_t li = 0; li < lines.size(); ++li, y += line_h) {
+    const std::string& s = lines[li];
+    if (s.empty()) continue;
+    const float tw = ImGui::CalcTextSize(s.c_str()).x;
+    dl->AddText(ImVec2(centre.x - tw * 0.5f, y), rgba_at(line_colours + 4 * li, text_col),
+                s.c_str());
+  }
+  if (!cmd.text.empty())
+    dl->AddText(ImVec2(centre.x - caption_size.x * 0.5f, pos.y + 2.0f * radius + style.ItemSpacing.y),
+                ImGui::GetColorU32(ImGuiCol_TextDisabled), cmd.text.c_str());
+
+  ImGui::Dummy(ImVec2(w, h));
+}
+
 }  // namespace
 
 // M24.3's shell, exactly as WorkerWindow uses it. What is new here is the
@@ -597,6 +675,7 @@ void replay(ScriptWindow::Impl& s, std::vector<std::string>& id_stack,
         ImGui::ProgressBar(cmd.f[0], ImVec2(cmd.f[1], cmd.f[2]),
                            cmd.text.empty() ? nullptr : cmd.text.c_str());
         break;
+      case UiOp::ProgressRing: draw_progress_ring(cmd); break;
       case UiOp::PlotLines:
         ImGui::PlotLines(cmd.label.c_str(), cmd.values.data(), static_cast<int>(cmd.values.size()),
                          0, cmd.text.empty() ? nullptr : cmd.text.c_str(), cmd.f[0], cmd.f[1],
@@ -766,7 +845,12 @@ void replay(ScriptWindow::Impl& s, std::vector<std::string>& id_stack,
         }
         break;
       case UiOp::SetNextItemWidth: ImGui::SetNextItemWidth(cmd.f[0]); break;
-      case UiOp::SetTooltip: ImGui::SetTooltip("%s", cmd.label.c_str()); break;
+      // Only while the item before it is hovered, as ImGui's own idiom has it;
+      // before this it showed on every frame whatever the pointer was over.
+      case UiOp::SetTooltip:
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+          ImGui::SetTooltip("%s", cmd.label.c_str());
+        break;
 
       // ---- meta -------------------------------------------------------
       case UiOp::SetScrollHereY: ImGui::SetScrollHereY(cmd.f[0]); break;

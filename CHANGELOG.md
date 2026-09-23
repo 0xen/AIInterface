@@ -5,6 +5,24 @@ assistant inside it. The assistant reads this when asked what is new, so entries
 plain and free of file paths; the technical record with measurements is `docs/MILESTONES.md`.
 Every milestone that merges adds an entry here in the same commit.
 
+## 2026-09-23
+
+### Added
+- **Ring gauges in its windows.** The small windows the assistant opens can now draw real
+  progress rings — smooth circles filled clockwise, in one colour or several, with a label
+  in the middle and a caption underneath — instead of rings pieced together from text.
+- **Notes to a worker already on a job.** The assistant can now leave a running worker a
+  note — new information it needs, or a change of plan — and the worker reads it the
+  moment its current step finishes. It can also ask a worker that has already reported
+  back a follow-up question, and get an answer that remembers everything that came before.
+
+### Fixed
+- **Tooltips in its windows only appear when you point at something.** Before, a tooltip
+  the assistant added to a window showed all the time, whatever the pointer was over.
+- **A worker coming home no longer loops for minutes.** Reusing a worker's name for a new
+  job could leave the little animation for "a worker just finished" playing over and over;
+  it now plays once, as it should.
+
 ## 2026-09-22
 
 ### Added

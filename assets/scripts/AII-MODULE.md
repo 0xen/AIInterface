@@ -75,6 +75,12 @@ contained, and its last error line appears in the settings panel under Scripts.
 | `aii.cancel_schedule(id, echo="")` | Call one off |
 | `aii.list_schedules(echo="")` | Ask what is pending |
 
+## Workers
+
+| Call | What it does |
+|---|---|
+| `aii.tell(name, text, echo="")` | Pass a note to a worker by name, without starting a new one -- answered by `worker.told` |
+
 ## Settings and state
 
 | Call | What it does |

@@ -74,6 +74,8 @@ any `##`/`###` suffix passed through); `id` for results is `ui_compose_id(stack,
 | ListBox | label | | | i[0]=index, i[1]=height_in_items | | items |
 | ColorEdit | label | | rgba | i[1]=flags | | |
 | ProgressBar | | overlay | f[0]=fraction, f[1]=w, f[2]=h | | | |
+| ProgressRing | centre text, `
+` between lines | caption | f[0]=radius, f[1]=thickness | i[0] bit 0 = custom track | | values: track rgba, segment count, (fraction, rgba) per segment, rgba per centre line; r < 0 = default |
 | PlotLines, PlotHistogram | label | overlay | f[0]=min, f[1]=max, f[2]=w, f[3]=h | | | values |
 | CollapsingHeader | label | | | i[1]=ImGuiTreeNodeFlags | default open | |
 | TreeNode | label | | | | | |
@@ -94,7 +96,7 @@ any `##`/`###` suffix passed through); `id` for results is `ui_compose_id(stack,
 | PopStyleColor | | | | i[0]=count (1 default) | | |
 | PushItemWidth, SetNextItemWidth | | | f[0]=width | | | |
 | PopItemWidth | | | | | | |
-| SetTooltip | the text | | | | | |
+| SetTooltip | the text (shown only while the previous item is hovered) | | | | | |
 | SetScrollHereY | | | f[0]=center ratio | | | |
 
 To keep the InputText row unambiguous: **the current text of InputText and
@@ -153,6 +155,7 @@ ui.input_int(label, v, step=1) -> int; ui.input_float(label, v, step=0.0, fmt="%
 ui.combo(label, index, items) -> int; ui.list_box(label, index, items, height_in_items=-1) -> int
 ui.color_edit(label, rgba, flags=0) -> tuple[4 floats]
 ui.progress_bar(fraction, w=-1.0, h=0.0, overlay="")
+ui.progress_ring(fraction, radius=32.0, thickness=6.0, color=None, track=None, label="", caption="", label_colors=None)
 ui.plot_lines(label, values, lo=FLT_MAX, hi=FLT_MAX, w=0.0, h=0.0, overlay="")
 ui.plot_histogram(...same...)
 ui.collapsing_header(label, default_open=False, flags=0) -> bool

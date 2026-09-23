@@ -75,6 +75,13 @@ enum class Msg {
   WorkerFinishedShown,   // {name}, {what it said}
   FinishedSpoken,        // {what it said} -- the model's words, already localised
 
+  // --- WorkerPool, a note answered (M32) ----------------------------------
+  // The reply to `WorkerPool::tell()`'s note, once the worker's next turn
+  // comes back -- the same split as the pair above: `shown` names the worker
+  // for the transcript and the panel, `spoken` does not.
+  WorkerRepliedShown,    // {name}, {what it said}
+  RepliedSpoken,         // {what it said} -- the model's words, already localised
+
   // --- Why a worker failed, in words a person can hear -------------------
   //
   // A client error string ("claude process exited: ", "CreateProcess failed
@@ -106,6 +113,9 @@ enum class Msg {
   SpawnFailed,           // {name}, {error}
   NoRunningWorker,       // {name}
   NoWorker,              // {name}
+  // M32. `WorkerPool::tell()`'s own refusal, folded into one line the same
+  // way SpawnFailed already is: what was asked, and why it did not happen.
+  NoteRefused,           // {name}, {reason}
 
   // --- A schedule the app would not accept (M2b.3) ----------------------
   // All five open the same way in both languages, because the user hears the

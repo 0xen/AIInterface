@@ -214,7 +214,7 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
     last_failed_seq_ = snap.turn_failed_seq;
     last_timeout_seq_ = snap.listen_timeout_seq;
     for (const auto& w : snap.workers) {
-      worker_state_[w.name] = w.state;
+      worker_state_[w.id] = w.state;
       // M7.5. The running count is recorded with the rest of the world, so a
       // worker already in flight when this object was built is not a child
       // that departed while nobody was looking.
@@ -285,9 +285,9 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
     if (w.state == WorkerPool::State::Starting || w.state == WorkerPool::State::Working) {
       ++running;
     }
-    const auto it = worker_state_.find(w.name);
+    const auto it = worker_state_.find(w.id);
     const bool changed = it == worker_state_.end() || it->second != w.state;
-    worker_state_[w.name] = w.state;
+    worker_state_[w.id] = w.state;
     if (!changed) continue;
     // The reaction rides home with the child rather than firing beside it.
     // `happy` still holds the floor through the spoken report, which was
@@ -308,7 +308,7 @@ AvatarPose AvatarController::update(const VoiceSession::Snapshot& snap, float dt
   if (worker_state_.size() > snap.workers.size()) {
     for (auto it = worker_state_.begin(); it != worker_state_.end();) {
       bool present = false;
-      for (const auto& w : snap.workers) present = present || w.name == it->first;
+      for (const auto& w : snap.workers) present = present || w.id == it->first;
       it = present ? std::next(it) : worker_state_.erase(it);
     }
   }

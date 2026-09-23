@@ -401,6 +401,12 @@ bool WorkerWindow::draw(float dt, const WorkerPool::Snapshot* live) {
   ImGui::PopStyleColor();
   ImGui::TextColored(dim, "for %s   ·   %d tool call%s", age_text(s.activity_age).c_str(),
                      w.tool_calls, w.tool_calls == 1 ? "" : "s");
+  // M32. One waiting note, dimmed, under the activity line -- so a note that
+  // has not reached a turn yet is visible from the window it was sent about,
+  // and not only from the panel row's own copy of the same count.
+  if (w.notes_waiting > 0) {
+    ImGui::TextColored(dim, "%d note%s waiting", w.notes_waiting, w.notes_waiting == 1 ? "" : "s");
+  }
 
   ImGui::Spacing();
 

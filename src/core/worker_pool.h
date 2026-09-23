@@ -6,6 +6,7 @@
 // tools.
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -24,6 +25,17 @@ class WorkerPool {
   enum class State { Starting, Working, Done, Paused, Failed };
 
   struct Snapshot {
+    // M32. Monotonic and never 0, assigned once at spawn() and never reused.
+    // `name` is what the user and the model address a worker by, and a name
+    // can be spawned again the moment its earlier holder is Done or Failed
+    // (spawn() removes that finished row first -- see there) -- so `name`
+    // alone cannot key anything that must tell two different runs apart
+    // across a frame boundary. `id` is what does: AvatarController keys
+    // `worker_state_` on it rather than on `name`, which is the fix for the
+    // child-merge clip that looped for minutes on 23 Sep 2026 (a finished
+    // `bunpro` and a fresh `bunpro` sharing one map entry flipped its stored
+    // state, Done/Working/Done/..., once a frame).
+    std::uint64_t id = 0;
     std::string name;
     std::string task;
     std::string cwd;
@@ -32,6 +44,11 @@ class WorkerPool {
     std::string result;                 // final text once it is Done
     std::vector<std::string> recent;    // last few activity lines, oldest first
     int tool_calls = 0;
+    // M32. Notes queued behind the current or next turn -- see tell(). Drawn
+    // as a dimmed line under the activity line in worker_window.cpp so the
+    // user can see a note is waiting rather than wondering why it was not
+    // answered yet.
+    int notes_waiting = 0;
   };
 
   // Called from a worker thread when an instance finishes (Done or Failed).
@@ -108,6 +125,24 @@ class WorkerPool {
   // number of seconds rather than the rest of the run.
   bool stop(const std::string& name);
 
+  // M32. Passes `text` to a worker without waiting for a new task -- the
+  // headless CLI has no "new user message mid-turn", only an interrupt, so
+  // this is the two honest shapes of "a note" rather than a fake third one:
+  //
+  //   * **Working or Starting**: queued on `notes` and read at the end of the
+  //     current turn (see run()'s loop). Returns true at once; the worker's
+  //     activity says a note is waiting.
+  //   * **Done**: the child process is still alive with the conversation in
+  //     it, so the note becomes the next turn -- a new thread, state back to
+  //     Working, activity "reading a note".
+  //   * **Paused or Failed, or no worker by that name**: false, with a
+  //     one-line reason in `error`.
+  //
+  // A Paused worker is deliberately refused rather than queued: it is
+  // mid-interrupt or already stopped, and a note that outlives the turn it
+  // was meant to reach would sit unread forever with nothing to say so.
+  bool tell(const std::string& name, const std::string& text, std::string* error);
+
   // How long the polite interrupt is given before the child is simply ended.
   //
   // Three seconds, which is the number `~ClaudeCodeClient` has always waited
@@ -127,6 +162,9 @@ class WorkerPool {
 
  private:
   struct Worker {
+    // M32. Assigned once in spawn(), under `mutex_`, from `next_id_`. See the
+    // comment on `Snapshot::id` for what it is for.
+    std::uint64_t id = 0;
     std::string name, task, cwd;
     std::unique_ptr<ClaudeCodeClient> client;
     std::thread thread;
@@ -142,9 +180,17 @@ class WorkerPool {
     std::string activity, result;
     std::deque<std::string> recent;
     int tool_calls = 0;
+    // M32. Notes waiting behind the current or next turn -- see tell(). Only
+    // ever touched under `mutex_`: pushed there by tell(), popped there by
+    // run()'s notes loop.
+    std::deque<std::string> notes;
   };
 
-  void run(Worker* w);
+  // `resume`: skip the task turn and go straight to the notes loop. Set by
+  // tell() when it restarts a Done worker's thread on a note rather than a
+  // task -- the task already ran and was already reported, and running it
+  // again would report the same work twice.
+  void run(Worker* w, bool resume = false);
   // M17.3. Raise the interrupt and start its clock. Caller holds `mutex_`.
   static void request_cancel(Worker* w);
   // M17.3. Wait up to `kInterruptGrace` for `w` to finish on its own, and end
@@ -165,6 +211,9 @@ class WorkerPool {
   ReportFn report_;
   mutable std::mutex mutex_;
   std::vector<std::unique_ptr<Worker>> workers_;
+  // M32. Never 0 (0 means "no id" on a default-constructed Snapshot), never
+  // reused. Written only in spawn(), under `mutex_`.
+  std::uint64_t next_id_ = 1;
 };
 
 const char* worker_state_name(WorkerPool::State s);

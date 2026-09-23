@@ -31,6 +31,9 @@
 //   settings.*      -> the settings surface's own fields in AvatarUiState
 //                      (M2.9), which is where every one of those controls
 //                      writes and the only owner of record there is
+//   worker.tell     -> VoiceSession::tell_worker -> WorkerPool::tell (M32):
+//                      a note to a worker that is already running or has
+//                      already finished, without starting a new one
 //
 // ## The controls a script can work (M2.9)
 //
@@ -291,6 +294,9 @@ class BusBindings {
   // M2.9. The transport row and the settings surface.
   void on_session(const BusMessage& m, std::string* error);
   void on_settings(const BusMessage& m, std::string* error);
+  // M32. `worker.tell` -- a note to a running or just-finished worker,
+  // through VoiceSession::tell_worker() -> WorkerPool::tell().
+  void on_worker(const BusMessage& m, std::string* error);
   // The two levels, published on change and whenever a verb touched one.
   void publish_facts();
   float lease_from(const BusMessage& m) const;

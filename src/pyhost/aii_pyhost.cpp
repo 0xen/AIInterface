@@ -443,6 +443,24 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       "-- schedules not yet due *and* workers a schedule has already started "
       "-- then one `schedule.list` carrying the count.");
 
+  // ---- workers (M32) ------------------------------------------------------
+  m.def(
+      "tell",
+      [](const std::string& name, const std::string& text, const std::string& echo) {
+        return post_line(
+            aii::BusLine("worker.tell").str("name", name).str("text", text).str("echo", echo).done());
+      },
+      py::arg("name"), py::arg("text"), py::arg("echo") = "",
+      "Pass a note to a worker by name, without starting a new one. A worker "
+      "still Working or Starting reads it once its current turn ends; one "
+      "that has already finished (Done) is handed a fresh turn on the same "
+      "child, so it keeps whatever it had already found. Paused or Failed, "
+      "or no worker by that name, is refused.\n"
+      "\n"
+      "Answered by `worker.told` (`ok`, `reason`, `echo`) and, once the "
+      "worker actually replies, the same `worker.state` events a task "
+      "produces.");
+
   // ---- the transport row (M2.9) -----------------------------------------
   // One helper per control, not a `press(button)`: half of these are levels
   // the panel owns rather than presses — `mute(False)` means the same thing
@@ -1080,6 +1098,58 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
       py::arg("fraction"), py::arg("w") = -1.0f, py::arg("h") = 0.0f, py::arg("overlay") = "",
       "A fraction-filled bar. Not interactive; no result.");
   ui.def(
+      "progress_ring",
+      [](const py::object& fraction, float radius, float thickness, const py::object& color,
+         const py::object& track, const std::string& label, const std::string& caption,
+         const py::object& label_colors) {
+        // `values` layout is in ui_bridge.h at UiOp::ProgressRing.
+        aii::UiCommand& c = ui_push(aii::UiOp::ProgressRing);
+        c.f[0] = radius;
+        c.f[1] = thickness;
+        c.label = label;
+        c.text = caption;
+        float rgba[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
+        if (!track.is_none()) {
+          ui_set_rgba(rgba, track);
+          c.i[0] |= 1;
+        }
+        c.values.assign(rgba, rgba + 4);
+        const auto push_segment = [&c](float frac, const py::object& col) {
+          float seg[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
+          if (!col.is_none()) ui_set_rgba(seg, col);
+          c.values.push_back(frac);
+          c.values.insert(c.values.end(), seg, seg + 4);
+        };
+        c.values.push_back(0.0f);  // segment count, filled in below
+        float count = 0.0f;
+        if (py::isinstance<py::sequence>(fraction) && !py::isinstance<py::str>(fraction)) {
+          for (const py::handle part : fraction.cast<py::sequence>()) {
+            py::sequence p = part.cast<py::sequence>();
+            if (p.size() != 2)
+              throw py::type_error("each part must be a (fraction, rgba) pair");
+            push_segment(p[0].cast<float>(), py::reinterpret_borrow<py::object>(p[1]));
+            count += 1.0f;
+          }
+        } else {
+          push_segment(fraction.cast<float>(), color);
+          count = 1.0f;
+        }
+        c.values[4] = count;
+        if (!label_colors.is_none()) {
+          for (const py::handle lc : label_colors.cast<py::sequence>()) {
+            float col[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
+            if (!lc.is_none()) ui_set_rgba(col, py::reinterpret_borrow<py::object>(lc));
+            c.values.insert(c.values.end(), col, col + 4);
+          }
+        }
+      },
+      py::arg("fraction"), py::arg("radius") = 32.0f, py::arg("thickness") = 6.0f,
+      py::arg("color") = py::none(), py::arg("track") = py::none(), py::arg("label") = "",
+      py::arg("caption") = "", py::arg("label_colors") = py::none(),
+      "A ring gauge filled clockwise from 12 o'clock. fraction is 0..1, or a list of "
+      "(fraction, rgba) parts drawn in order. label is centred inside ('\\n' for more "
+      "lines, label_colors colours each), caption sits beneath. Not interactive; no result.");
+  ui.def(
       "plot_lines",
       [](const std::string& label, const std::vector<float>& values, float lo, float hi, float w,
          float h, const std::string& overlay) {
@@ -1258,7 +1328,7 @@ PYBIND11_EMBEDDED_MODULE(aii, m) {
 
   ui.def(
       "set_tooltip", [](const std::string& s) { ui_push(aii::UiOp::SetTooltip).label = s; },
-      py::arg("s"), "A tooltip over the item recorded just before this call.");
+      py::arg("s"), "A tooltip shown while the item recorded just before this call is hovered.");
   ui.def(
       "set_scroll_here_y", [](float center) { ui_push(aii::UiOp::SetScrollHereY).f[0] = center; },
       py::arg("center") = 0.5f, "Scroll the current window so this point is at center (0..1).");

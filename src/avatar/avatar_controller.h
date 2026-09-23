@@ -32,6 +32,7 @@
 //   something that actually knows — Claude itself, or a script — can ask for
 //   it.
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <random>
 #include <string>
@@ -374,7 +375,15 @@ class AvatarController {
   // wakes it, including any that get added later without reading this comment.
   bool dozed_ = false;
   unsigned last_timeout_seq_ = 0;
-  std::map<std::string, WorkerPool::State> worker_state_;
+  // Keyed by `WorkerPool::Snapshot::id`, not by name (M32). A name can be
+  // spawned again the moment its earlier holder is Done or Failed, and
+  // before M32 that reuse could put a finished row and a fresh one in the
+  // same snapshot for one frame -- two states, one map entry, so the second
+  // write here flipped it back and forth every frame and re-armed
+  // `pending_child_merge_` on each flip. `id` is unique per worker for the
+  // life of the pool, so two rows sharing a name now occupy two entries and
+  // neither can overwrite the other's state.
+  std::map<std::uint64_t, WorkerPool::State> worker_state_;
 
   // ---- M7.5: the child slime that leaves with a worker and comes back -----
   //
