@@ -97,6 +97,7 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <dbghelp.h>
 
 #include <io.h>
 
@@ -109,6 +110,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -418,36 +420,85 @@ void routeDiagnostics() {
 // This handler runs first: it writes the stack as module+offset to the log
 // through the info stream (not the error stream, which may be the stream at
 // fault), and then lets the CRT do what it was going to do.
-void onInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
-    void* frames[32];
-    const USHORT n = CaptureStackBackTrace(1, 32, frames, nullptr);
+// One line per frame: module+offset always, then the function and source line
+// when dbghelp can find symbols for that module (avatar.pdb ships beside the
+// exe for exactly this).
+std::string describeStack(void* const* frames, USHORT n) {
+    HANDLE proc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    const bool symbols = SymInitialize(proc, nullptr, TRUE) != FALSE;
     std::string trace;
     for (USHORT i = 0; i < n; ++i) {
         HMODULE mod = nullptr;
         char name[MAX_PATH] = "?";
+        char line[MAX_PATH + 32];
         if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                static_cast<const char*>(frames[i]), &mod) &&
             GetModuleFileNameA(mod, name, sizeof(name))) {
             const char* base = std::strrchr(name, '\\');
             const auto off = reinterpret_cast<uintptr_t>(frames[i]) - reinterpret_cast<uintptr_t>(mod);
-            char line[MAX_PATH + 32];
             std::snprintf(line, sizeof(line), "\n    %s+0x%llx", base ? base + 1 : name,
                           static_cast<unsigned long long>(off));
-            trace += line;
         } else {
-            char line[48];
             std::snprintf(line, sizeof(line), "\n    %p", frames[i]);
+        }
+        trace += line;
+        if (!symbols) continue;
+        const DWORD64 addr = reinterpret_cast<DWORD64>(frames[i]);
+        alignas(SYMBOL_INFO) char buf[sizeof(SYMBOL_INFO) + 256]{};
+        auto* sym = reinterpret_cast<SYMBOL_INFO*>(buf);
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen = 255;
+        DWORD64 symOff = 0;
+        if (SymFromAddr(proc, addr, &symOff, sym)) trace += std::string("  ") + sym->Name;
+        IMAGEHLP_LINE64 src{sizeof(src)};
+        DWORD lineOff = 0;
+        if (SymGetLineFromAddr64(proc, addr, &lineOff, &src)) {
+            std::snprintf(line, sizeof(line), "  %s:%lu", src.FileName, src.LineNumber);
             trace += line;
         }
     }
+    if (symbols) SymCleanup(proc);
+    return trace;
+}
+
+void onInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
+    void* frames[32];
+    const USHORT n = CaptureStackBackTrace(1, 32, frames, nullptr);
     rend::log::warn("[diag] the C runtime refused an argument; the process is about to end. "
-                    "Stack:{}", trace);
+                    "Stack:{}", describeStack(frames, n));
     std::fflush(stdout);
+}
+
+// A crash anywhere else -- an access violation in a GPU driver, found on 23 Sep
+// 2026 -- also ended the process with the log simply stopping; the only trace
+// was a line in the Windows event log naming the driver DLL. This writes the
+// fault and the stack that led to it, the same way and through the same
+// stream as the handler above, then lets Windows Error Reporting carry on.
+// The walk starts inside the exception dispatcher, which sits on top of the
+// faulting frames, so the first lines are the handler itself and the frames
+// that matter follow KiUserExceptionDispatcher.
+LONG WINAPI onCrash(EXCEPTION_POINTERS* info) {
+    const EXCEPTION_RECORD* rec = info->ExceptionRecord;
+    std::string what = std::format("exception 0x{:08x} at {}", static_cast<unsigned>(rec->ExceptionCode),
+                                   rec->ExceptionAddress);
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
+        what += std::format(" ({} address 0x{:x})",
+                            rec->ExceptionInformation[0] == 1 ? "writing" : "reading",
+                            static_cast<unsigned long long>(rec->ExceptionInformation[1]));
+    }
+    void* frames[48];
+    const USHORT n = CaptureStackBackTrace(0, 48, frames, nullptr);
+    rend::log::warn("[diag] crashed: {}; the process is about to end. Stack:{}", what,
+                    describeStack(frames, n));
+    std::fflush(stdout);
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 
 int main(int /*argc*/, char** /*argv*/) {
     _set_invalid_parameter_handler(&onInvalidParameter);
+    SetUnhandledExceptionFilter(&onCrash);
     routeDiagnostics();
     // **The folder every worker falls back to**, captured here and nowhere
     // else: this is the directory the user launched the app from, which is the

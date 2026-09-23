@@ -71,7 +71,15 @@ target_compile_definitions(avatar PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
   AII_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets")
 if(MSVC)
   target_compile_options(avatar PRIVATE /utf-8 /W4 /wd4996)
+  # Symbols in every configuration, so the crash stack main.cpp writes to the
+  # log names functions and lines rather than bare offsets. /Zi changes
+  # nothing about the optimised code; /OPT:REF and /OPT:ICF put back the
+  # linker trimming that /DEBUG would otherwise switch off.
+  target_compile_options(avatar PRIVATE /Zi)
+  target_link_options(avatar PRIVATE /DEBUG /OPT:REF /OPT:ICF)
 endif()
+# dbghelp resolves those symbols in the crash handler.
+target_link_libraries(avatar PRIVATE Dbghelp)
 set_target_properties(avatar PROPERTIES FOLDER "apps")
 # No console window (user, 19 Sep 2026).
 #

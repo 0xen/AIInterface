@@ -396,7 +396,16 @@ void ImGuiLayer::end_frame(gpu::CommandContext& cmd) {
   s_->frame_active = false;
   ImGui::Render();
   auto* list = static_cast<ID3D12GraphicsCommandList*>(cmd.nativeHandle());
-  if (list) ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), list);
+  if (!list) return;
+  // The backend reads its textures from this layer's heap but never binds it:
+  // that is the caller's job. Left alone, the heap bound is the engine's, from
+  // the scene pass, and the font descriptor is a handle into a heap the GPU is
+  // not looking at. AMD's driver tolerated that; NVIDIA's dereferences it and
+  // takes the process down a few seconds into the first run. The overlay is the
+  // last thing recorded in the frame, so nothing after this needs the engine's
+  // heap back.
+  list->SetDescriptorHeaps(1, &s_->srv_heap);
+  ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), list);
 }
 
 }  // namespace aii

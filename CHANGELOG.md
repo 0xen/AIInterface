@@ -33,6 +33,10 @@ Every milestone that merges adds an entry here in the same commit.
   yourself to see one appear; pressing the Workers button still closes it.
 
 ### Fixed
+- **The app no longer closes by itself a few seconds after starting on NVIDIA graphics.**
+  Its panels were drawn without telling the graphics card where their text lived; some
+  drivers let that pass, and NVIDIA's crashed on it. If the app ever does close on its
+  own, its log now ends with where it crashed rather than simply stopping.
 - **Setup fetches the Japanese voice again.** On some PCs the setup script's answer to the
   voice's licence question arrived garbled, so the voice was never downloaded and the build
   stopped on a missing file.
