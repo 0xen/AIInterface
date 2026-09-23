@@ -23,6 +23,10 @@ Every milestone that merges adds an entry here in the same commit.
 - **Its windows say when they were opened.** A dim line at the bottom of each of the
   assistant's windows gives the date and time it was opened, so after a fix you can tell
   at a glance whether you are looking at the new copy or an old one.
+- **Fixes to its own windows can go back into the app.** Ask the assistant to sync its
+  scripts upstream and it hands a worker the job of carrying general lessons and fixes
+  from its installed window toolkit back to the app's source, leaving anything personal
+  to this PC behind, so every install gets them.
 
 ### Changed
 - **The workers strip opens by itself when a worker starts.** You no longer have to open it

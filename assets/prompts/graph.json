@@ -99,8 +99,30 @@
     },
     "skill": {
       "start": { "id": "start", "pos": [0, 0] },
-      "nodes": [],
-      "links": []
+      "nodes": [
+        {
+          "id": "upstream-knowledge",
+          "title": "Upstream knowledge",
+          "file": "skill/upstream-knowledge.md",
+          "kind": "skill",
+          "enabled": true,
+          "pos": [320, 0],
+          "triggers": [
+            "upstream",
+            "sync the scripts",
+            "sync scripts",
+            "sync the guides",
+            "back to the repo",
+            "back into the repo",
+            "carry back",
+            "上流",
+            "リポジトリに反映"
+          ]
+        }
+      ],
+      "links": [
+        { "from": "start", "to": "upstream-knowledge", "order": 0, "enabled": true }
+      ]
     }
   }
 }
