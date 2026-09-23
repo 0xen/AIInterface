@@ -14,11 +14,11 @@
 // Every number below was measured, and the document is `docs/bargein-measurements.md`
 // ---------------------------------------------------------------------------
 //
-// One desktop, 21 Sep 2026, five runs through `spikes/bargein/bargein_probe.exe`,
-// which compiles the app's own `AudioOut`, `MicIn`, the two TTS engines and the
-// recogniser rather than copies of them. Per-frame tables of mic RMS against
-// the speaker's own level, with and (by accident, run 4) with a person talking
-// over the reply. What that data says, in the order it constrains this file:
+// One desktop, 21 Sep 2026, five runs through a probe program (the barge-in
+// spike, since archived out of the tree) that compiled the app's own `AudioOut`,
+// `MicIn`, the two TTS engines and the recogniser rather than copies of them.
+// Per-frame tables of mic RMS against the speaker's own level, with and (by
+// accident, run 4) with a person talking over the reply. What that data says, in the order it constrains this file:
 //
 //  * **The binding constraint is not the app's own voice. It is room
 //    transients.** Through that machine's default output the reply arrived at

@@ -1,7 +1,7 @@
 // M2b.1's harness. Not "it compiles": a simulated 60 Hz frame loop on a
 // thread of its own, with every timing case run as **repeats** rather than one
 // sample — this project has twice declared a race fixed on one sample and been
-// wrong twice (MANAGER-HANDOFF.md, "Method lessons").
+// wrong twice (a lesson recorded in the project notes).
 //
 //   schedule_test [reps]        default 40
 //

@@ -15,7 +15,7 @@ Speech recognition and synthesis run locally on the CPU; Claude runs through the
 installed Claude Code CLI on your subscription (no API key needed). No audio is ever written
 to disk.
 
-Plan: `PROJECT_OUTLINE.md`. Research: `docs/`. Engine experiments and evidence: `spikes/`.
+Design notes and measurements: `docs/`.
 
 ## Build
 
@@ -74,8 +74,8 @@ a `build\` configured before 19 Sep 2026 has `AII_STAGE_LATEST=ON` in its cache 
 staging until you pass `-DAII_STAGE_LATEST=OFF` once or delete the cache.
 
 **What it stages is not a package you can copy elsewhere.** The models, the VOICEVOX core and
-`assets\` are compiled in as absolute paths into this checkout (`docs\RELEASE-HANDOVER.md`, B1),
-so the staged `avatar.exe` runs on the machine that built it and nowhere else.
+`assets\` are compiled in as absolute paths into this checkout, so the staged `avatar.exe` runs
+on the machine that built it and nowhere else.
 
 ### Building the development targets
 
@@ -100,10 +100,6 @@ child, so it takes arguments: `worker_report_test <name> <cwd> <task...>`.) Turn
 back off with `cmake -S . -B build -DAII_BUILD_TESTS=OFF` — it is cached, so it stays on
 until you do. Executables built while an option was on are **not** removed when it goes off;
 delete `build\bin\Release\` to clear them.
-
-The spikes in `spikes\` are separate CMake projects with their own build directories
-(`stt_test`, `mic_stt`, `codeswitch_bench`); nothing in the main build refers to them, so they
-are never built from here.
 
 ## Avatar window
 
@@ -222,8 +218,9 @@ same work by hand, for anyone who would rather see each step or is debugging one
 script reported.
 
 Models, prebuilt SDKs, DLLs and executables are gitignored. `CMakeLists.txt` and `src/main.cpp`
-expect them at the exact paths below (the spike folders are reused on purpose until the project
-gets a proper dependency layout). Run these from the repository root in PowerShell.
+expect them at the exact paths below. The `spikes\` folders are where the engines were first
+tried and are still their home, until the project gets a proper dependency layout. Run these
+from the repository root in PowerShell.
 Everything is a public download; nothing needs an account or token.
 
 ### 1. sherpa-onnx prebuilt (recognition + Kokoro runtime), 20 MB
@@ -294,9 +291,8 @@ Install Claude Code and sign in once so `%USERPROFILE%\.local\bin\claude.exe` ex
 
 ### Not needed for the app
 
-`models\zonos2\` (13 GB) and the `zonos2.cpp` source trees under `spikes\tts_src\` belong to
-the abandoned ZONOS2 experiment; see `spikes\README.md`. `kokoro-multi-lang-v1_1` and the
-SenseVoice model were only used as cross-checks during the spikes.
+`models\zonos2\` (13 GB), if you have it, belongs to an abandoned GPU synthesis experiment.
+`kokoro-multi-lang-v1_1` and the SenseVoice model were only used as cross-checks.
 
 ## Run the console loop (`voiceloop`)
 

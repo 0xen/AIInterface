@@ -1,6 +1,6 @@
 // action_bytes_test: consent is to the bytes, not to the name (M19.1/M19.2).
 //
-// Finding 11 of `docs/HANDOFF-2026-09-21.md`: an armed action was trusted by
+// Finding 11 of the 21 Sep 2026 code review: an armed action was trusted by
 // filename and its body was re-read from disk on every call, so anything that
 // could write the file — a worker at bypass, the assistant with file writing
 // on, the seeder on an upgrade — silently changed what a yes the user had

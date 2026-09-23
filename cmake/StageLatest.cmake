@@ -127,8 +127,8 @@ string(JOIN "\n" _ledger_text ${_wanted})
 file(WRITE "${_ledger}" "${_ledger_text}\n")
 
 # ---- say what this is -----------------------------------------------------
-# C2 in docs/RELEASE-HANDOVER.md: a binary and the assets it seeds can drift
-# apart, and the only defence is being able to see which build this is.
+# A binary and the assets it seeds can drift apart, and the only defence is
+# being able to see which build this is.
 set(_commit "unknown")
 find_package(Git QUIET)
 if(GIT_EXECUTABLE)
@@ -152,5 +152,5 @@ avatar.exe    : ${_built} UTC
 This folder holds the most recent build, whichever configuration that was.
 It is not relocatable: the model, VOICEVOX and asset directories are compiled
 in as absolute paths into the source tree above, so it runs on this machine
-only. See docs/RELEASE-HANDOVER.md, B1.
+only.
 ")

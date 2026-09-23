@@ -393,7 +393,7 @@ if(AII_BUILD_TESTS)
 
   # ---- text_util_test: which voice says what --------------------------------
   # M22.1, finding 26. `split_by_script` is one of the four places that decide
-  # "is this Japanese?" (docs/HANDOFF-2026-09-21.md) and the only one with no
+  # "is this Japanese?" and the only one with no
   # test; `clip_utf8` keeps its own target above and is not repeated there.
   add_executable(text_util_test tests/text_util_test.cpp src/core/text_util.cpp)
   target_include_directories(text_util_test PRIVATE src)

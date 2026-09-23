@@ -11,7 +11,7 @@
 //
 // The settings surface is a region because *it had to be*: "an ImGui popup is a
 // floating window, and nothing may be drawn outside this window's composition
-// surface, so a taller popup would have been silently clipped" (`HANDOFF.md`).
+// surface, so a taller popup would have been silently clipped", as an earlier session found.
 // The widget is 360 px wide, borderless, transparent, pinned bottom-right, and
 // its height follows its content — so a region here would **resize the main
 // window** every time the model wrote a file, and a jumping avatar is already

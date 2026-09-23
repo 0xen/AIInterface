@@ -2,7 +2,7 @@
 
 What changed in this app, newest first, written for the person using it and for the
 assistant inside it. The assistant reads this when asked what is new, so entries are short,
-plain and free of file paths; the technical record with measurements is `docs/MILESTONES.md`.
+plain and free of file paths.
 Every milestone that merges adds an entry here in the same commit.
 
 ## 2026-09-23
